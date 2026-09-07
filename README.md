@@ -52,7 +52,8 @@ ccr start                      # range defaults to @{upstream}..HEAD, else main.
 # ccr: url http://127.0.0.1:7777/?t=3f9a…
 ```
 
-1. Open the printed URL (or run `ccr open`). On a remote machine, forward the port first:
+1. Open the printed URL — `ccr start --open` or `ccr open` launches your default browser when you are on the
+   machine running ccr. On a remote machine, forward the port first:
    `ssh -L 7777:127.0.0.1:7777 host`, then open the URL locally.
 2. Pick a commit in the sidebar. Hover a line and click the gutter **[+]**, or drag across the line
    numbers to comment on a range. Comment on a whole file or commit from their headers.

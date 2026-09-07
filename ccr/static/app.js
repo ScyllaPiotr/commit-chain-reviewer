@@ -620,7 +620,12 @@
     meta += `<span class="stats-wrap">${esc(diff.stats.files)} file${diff.stats.files === 1 ? '' : 's'} ${statsHtml(diff.stats.additions, diff.stats.deletions)}</span>`;
     meta += '<span class="header-actions">';
     if (!commentsDisabled()) {
-      meta += '<button type="button" id="btn-comment-commit" class="sm-btn" aria-label="Comment on this commit">💬 Comment on this commit</button>';
+      // "All changes" gets only the whole-change button: a commit-level comment on the combined view would just
+      // duplicate a review-level one.
+      if (diff.kind !== 'combined') {
+        const label = diff.kind === 'worktree' ? 'Comment on the uncommitted changes' : 'Comment on this commit';
+        meta += `<button type="button" id="btn-comment-commit" class="sm-btn" aria-label="${label}">💬 ${label}</button>`;
+      }
       if (diff.kind === 'combined') meta += '<button type="button" id="btn-comment-review" class="sm-btn" aria-label="Comment on the whole change" title="A review-level comment about the whole change, not tied to any commit">💬 Comment on the whole change</button>';
     }
     meta += '</span></div>';
@@ -2704,7 +2709,7 @@
     return `<button type="button" class="drawer-item${state.currentThread === root.id ? ' is-current' : ''}" data-thread-id="${esc(root.id)}" role="listitem">
       <span class="anchor"><span class="sha">${esc(a.commit ? shortSha(a.commit) : '')}</span><span>${esc(anchorLabel(a))}</span></span>
       ${snippet ? `<span class="snippet">${esc(snippet)}</span>` : ''}
-      <span class="excerpt">${esc(excerpt)}${root.body.length > 60 ? '…' : ''}</span>
+      <span class="excerpt">${renderInline(excerpt)}${root.body.length > 60 ? '…' : ''}</span>
       <span class="row3">${authors}<span class="n">${members.length} comment${members.length === 1 ? '' : 's'}</span>${tags.join('')}${state.orphans.has(root.id) ? '<span class="orphan-note">anchor not found in current diff</span>' : ''}</span>
     </button>`;
   }

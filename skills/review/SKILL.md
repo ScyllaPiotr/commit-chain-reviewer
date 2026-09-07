@@ -24,7 +24,10 @@ snippet and a `→ HEAD path:line` location.
 - Set `REPO` to the absolute toplevel of the repository under review:
   `REPO=$(git rev-parse --show-toplevel)`. Pass `--repo "$REPO"` on **every** ccr command. If you work in
   a linked git worktree, `REPO` is that worktree's path (each worktree is its own session).
-- Never pass `--open`: you cannot see the browser and the user may be on another machine.
+- Open the browser for the user **only** when they are on this machine with a display: `DISPLAY` or
+  `WAYLAND_DISPLAY` is set and `SSH_CONNECTION` is not. Then run `ccr open --repo "$REPO"` right after
+  `ccr start` (or pass `--open` to `ccr start`). Otherwise never try: you cannot see the browser and the user
+  may be on another machine. In both cases hand over the URL as well (step 1.4).
 - Never run `ccr stop` on your own initiative (it deletes the review data).
 
 ## The loop
@@ -59,8 +62,9 @@ snippet and a `→ HEAD path:line` location.
    Exit 1 with `range X..Y is empty` (no commits: fix the base or add `--worktree`) or a git error about
    the spec → fix the range and retry. Exit 1 with `ccr: server exited with code N — last log lines:` →
    read the tail, then `ccr logs --repo "$REPO" -n 100`.
-4. Hand the URL to the user **verbatim, on its own line** — the `?t=` token in it is what authorises
-   the browser. Use this sentence, substituting the printed URL and its port for `PORT`:
+4. If the user is local (`DISPLAY`/`WAYLAND_DISPLAY` set, `SSH_CONNECTION` unset) run
+   `ccr open --repo "$REPO"` so the review opens in their browser, and say so. Then, in every case, hand the
+   URL to the user **verbatim, on its own line** — the `?t=` token in it is what authorises the browser. Use this sentence, substituting the printed URL and its port for `PORT`:
 
    > Open http://127.0.0.1:PORT/?t=… (over SSH: `ssh -L PORT:127.0.0.1:PORT <host>` first), leave
    > comments, then click **Submit review** — or just tell me when you are done.
@@ -178,7 +182,8 @@ conversation ends without a decision, leave the server running and say so:
 - Always `--repo <absolute path>`; never depend on the current directory.
 - Always pass `--range` explicitly on `ccr start`; add `--worktree` when `git status --porcelain` is non-empty.
 - Always start with a cover letter (`--cover FILE`); it is the review's "PR description".
-- Hand over the URL verbatim, on its own line, with the SSH hint. Never `--open`.
+- Hand over the URL verbatim, on its own line, with the SSH hint. Open the browser (`ccr open`) only when a
+  local display is available and the session is not over SSH.
 - Treat pending comments as real: the user may never click Submit.
 - Process every thread of a round in one pass; reply to all of them in one `ccr reply --batch -` call.
 - `[resolve]` only for committed fixes; disagree or ask by replying without it.
