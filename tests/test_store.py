@@ -940,3 +940,42 @@ def test_store_error_shapes():
     assert missing.status == 404 and str(missing) == "gone" and isinstance(missing, KeyError)
     conflict = StoreError("thread has replies", 409)
     assert conflict.status == 409
+
+
+# --------------------------------------------------------------------------- projection into other views
+
+def test_comments_project_into_other_views(fixture_repo, store):
+    """A comment written on a commit shows up in "All changes" at the branch head's line (and vice versa)."""
+    commit = fixture_repo.sha(THREE_HUNKS)
+    line = store.add_comment("Why 500?", line_anchor(commit, "src/app.py", 5))
+    reply = store.add_comment("Because.", None, author="claude", parent_id=line["id"])
+    span = store.add_comment("Range", line_anchor(commit, "src/app.py", 26, start_line=24))
+    on_file = store.add_comment("File", {"kind": "file", "commit": commit, "path": "src/app.py", "side": None, "line": None, "start_line": None})
+    on_commit = store.add_comment("Commit", {"kind": "commit", "commit": commit, "path": None, "side": None, "line": None, "start_line": None})
+    on_review = store.add_comment("Review", {"kind": "review", "commit": None, "path": None, "side": None, "line": None, "start_line": None})
+
+    native = {c["id"]: c for c in store.list_comments(project=commit)}
+    assert native[line["id"]]["view_anchor"] == line["anchor"] and native[line["id"]]["projected"] is False
+    assert native[reply["id"]]["view_anchor"] == line["anchor"]
+    assert native[on_commit["id"]]["view_anchor"] == on_commit["anchor"]
+
+    combined = {c["id"]: c for c in store.list_comments(project="combined")}
+    projected = combined[line["id"]]["view_anchor"]
+    assert projected is not None and projected["commit"] == "combined" and projected["side"] == "new" and combined[line["id"]]["projected"] is True
+    rows = dict((n, text) for n, text in
+                ((row["n"], row["s"]) for h in store.file_diff("combined", "src/app.py")["hunks"] for row in h["lines"] if row["n"] is not None))
+    assert rows[projected["line"]] == line["snippet"]                       # same text at the mapped line
+    assert combined[reply["id"]]["view_anchor"] == projected                  # replies follow their root
+    span_view = combined[span["id"]]["view_anchor"]
+    assert span_view["start_line"] is not None and span_view["start_line"] < span_view["line"]
+    assert combined[on_file["id"]]["view_anchor"] == {"kind": "file", "commit": "combined", "path": "src/app.py", "side": None, "line": None, "start_line": None}
+    assert combined[on_commit["id"]]["view_anchor"] is None                  # commit-level comments stay put
+    assert combined[on_review["id"]]["view_anchor"] == on_review["anchor"]   # review-level ones belong everywhere
+
+    # the other direction: a comment made on All changes lands on the commit that has that line
+    head_comment = store.add_comment("From combined", line_anchor("combined", "src/app.py", projected["line"]))
+    back = {c["id"]: c for c in store.list_comments(project=commit)}[head_comment["id"]]["view_anchor"]
+    assert back == dict(line["anchor"]) | {"start_line": None}
+
+    other = fixture_repo.sha(RENAME)
+    assert {c["id"]: c for c in store.list_comments(project=other)}[line["id"]]["view_anchor"] is None

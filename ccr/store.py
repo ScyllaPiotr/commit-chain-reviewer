@@ -998,6 +998,79 @@ class ReviewStore:
         except GitError:
             return dict(UNKNOWN_LOCATION)
 
+    # ------------------------------------------------------------------ projection into another view
+
+    def _view_revs(self, data: dict, view: str):
+        """``(old_rev, new_rev)`` of a view; ``WORKTREE`` stands for the working tree, None for "no such side"."""
+        if view == COMBINED:
+            return data["range"]["base"], data["range"]["head"]
+        if view == WORKTREE:
+            return data["worktree_head"], WORKTREE
+        meta = data["by_sha"].get(view)
+        if meta is None:
+            return None, None
+        return (meta["parents"][0] if meta["parents"] else None), view
+
+    def _map(self, from_rev, to_rev, path, line):
+        try:
+            return gitx.map_line(self.repo, from_rev, None if to_rev == WORKTREE else to_rev, path, line)
+        except GitError:
+            return None
+
+    def _project_one(self, root: dict, data: dict, view: str, view_diff: dict):
+        """Where ``root`` shows up in ``view``: its own anchor, a mapped anchor, or None (drawer only).
+
+        Line anchors travel through ``git diff`` between the two views' revisions (so a comment written on
+        a commit appears in "All changes" at the line the branch head has now); file anchors follow the
+        path; commit anchors stay in their own view; review anchors belong to every view.
+        """
+        anchor = root["anchor"]
+        kind = anchor["kind"]
+        if kind == "review" or anchor["commit"] == view:
+            return dict(anchor)
+        if root["outdated"] or kind == "commit":
+            return None
+        if kind == "file":
+            file_diff = _find_file(view_diff, anchor["path"])
+            if file_diff is None:
+                return None
+            return {"kind": "file", "commit": view, "path": file_diff["path"], "side": None, "line": None, "start_line": None}
+        side = anchor["side"]
+        src_old, src_new = self._view_revs(data, anchor["commit"])
+        dst_old, dst_new = self._view_revs(data, view)
+        from_rev, to_rev = (src_new, dst_new) if side == "new" else (src_old, dst_old)
+        if from_rev is None or to_rev is None or from_rev == WORKTREE:
+            return None
+        mapped = self._map(from_rev, to_rev, anchor["path"], anchor["line"])
+        if not mapped or mapped["status"] not in ("same", "moved") or mapped["line"] is None:
+            return None
+        file_diff = _find_file(view_diff, mapped["path"])
+        if file_diff is None or mapped["line"] not in {number for number, _ in _side_rows(file_diff, side)}:
+            return None
+        start = None
+        if anchor.get("start_line"):
+            first = self._map(from_rev, to_rev, anchor["path"], anchor["start_line"])
+            if first and first["status"] in ("same", "moved") and first["path"] == mapped["path"] \
+                    and first["line"] is not None and first["line"] < mapped["line"]:
+                start = first["line"]
+        return {"kind": "line", "commit": view, "path": file_diff["path"], "side": side, "line": mapped["line"],
+                "start_line": start}
+
+    def _project(self, comments: list, data: dict, project) -> None:
+        """Attach ``view_anchor``/``projected`` to every comment for the view ``project`` (in place)."""
+        with self._lock:
+            view = self._resolve_view(project)
+        view_diff = self._view_diff(view, False)
+        anchors = {}  # root id -> view anchor (replies carry their root's anchor, so they map identically)
+        for comment in comments:
+            root_id = comment["parent_id"] or comment["id"]
+            if root_id not in anchors:
+                anchors[root_id] = self._project_one(comment, data, view, view_diff)
+            view_anchor = anchors[root_id]
+            comment["view_anchor"] = None if view_anchor is None else dict(view_anchor)
+            comment["projected"] = view_anchor is not None and comment["anchor"]["commit"] != view \
+                and comment["anchor"]["kind"] != "review"
+
     def _locate(self, comments: list, data: dict) -> None:
         """Attach ``head_location`` to every root line comment in ``comments`` (in place)."""
         targets = [c for c in comments if c["parent_id"] is None and c["anchor"]["kind"] == "line"]
@@ -1024,7 +1097,8 @@ class ReviewStore:
             raise
 
     def list_comments(self, state=None, round=None, resolved=None, author=None, commit=None, path=None,
-                      include_outdated: bool = True, outdated_only: bool = False, locate: bool = False) -> list:
+                      include_outdated: bool = True, outdated_only: bool = False, locate: bool = False,
+                      project=None) -> list:
         """Comments in creation order matching every given filter (``resolved`` applies to the thread's root)."""
         with self._lock:
             data = self._require_data()
@@ -1048,6 +1122,8 @@ class ReviewStore:
             selected = [c for c in comments if keep(c)]
         if locate:
             self._locate(selected, data)
+        if project is not None:
+            self._project(selected, data, project)
         return selected
 
     # ------------------------------------------------------------------ rounds

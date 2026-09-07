@@ -510,7 +510,7 @@ paths → 404 JSON. Log line (only with `--verbose`): `"%s %s %d %dms"` with the
 | GET | `/api/commits/{sha}/file?path=P&ws=ignore` | one **untrimmed** FileDiff (path, then old_path); 404 |
 | GET | `/api/compare?base=X&head=Y&ws=ignore` | CommitDiff with `sha: "compare:<X10>..<Y10>"`, `kind: "compare"`, `subject: "Compare …"` |
 | GET | `/api/file?rev=R&path=P` | `{"rev","path","content","lines","truncated_lines"}`; 400 bad rev/path; 403 escape; 404 missing/not a blob; 413 too large; 415 binary |
-| GET | `/api/comments?state=&round=&resolved=&author=&commit=&path=&outdated=include|exclude|only&locate=1` | `{"version","generation","now","comments":[…]}` |
+| GET | `/api/comments?state=&round=&resolved=&author=&commit=&path=&outdated=include|exclude|only&locate=1&project=<view>` | `{"version","generation","now","comments":[…]}`. With `project` (a listed sha, `combined` or `worktree`; 404 otherwise) every comment carries `view_anchor` — the anchor to render it at **in that view** (its own anchor when native; a line mapped with `map_line` between the two views' revisions for line comments made elsewhere; the same path for file comments; `null` for other views' commit-level comments and unmappable lines; review anchors as-is) — and `projected` (true when it came from another view). Replies carry their root's `view_anchor`. |
 | POST | `/api/comments` | `{body, anchor, author?, parent_id?}` → 201 Comment |
 | PATCH | `/api/comments/{id}` | `{body?, resolved?, anchor?}` → Comment |
 | DELETE | `/api/comments/{id}?cascade=1` | 204; 409 when a root has replies and no cascade |
@@ -821,8 +821,13 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
 * **Threads** attach to a row by anchor key (7.8): for every row attach threads keyed `(new, n)` if `n` and `(old, o)` if
   `o` (old-side first). Ranges render under the **end** line; hovering the thread adds `in-range` to rows start..end.
   Threads whose row does not exist in the rendered table (drifted combined/worktree anchors, `ws_only`, too_large) go
-  to `state.orphans` and are drawer-only with *"anchor not found in current diff"*. Threads render only in the view
-  whose `anchor.commit` matches (no projection between combined and per-commit views).
+  to `state.orphans` and are drawer-only with *"anchor not found in current diff"*. Threads render in every view the
+  server projects them into: the UI always fetches `GET /api/comments?project=<selected view>` (5.2; refetched on every
+  view change, compare views have no comments) and keys `threadsByKey`, thread rows and the gutter attachment by each
+  root's `view_anchor` (falling back to `anchor`); a root whose `view_anchor` is `null` in the current view is drawer-only
+  there (not an orphan); `projected` roots carry a `.tag-from` tag (*"from &lt;short sha&gt;"*, *"from All changes"*,
+  *"from uncommitted changes"*) that opens the thread in the view it was written in. Replies keep posting `parent_id`
+  (the server copies the root's native anchor).
 
 ### 7.4 Comments, editors, threads
 
@@ -921,7 +926,7 @@ resembles GitHub dark-dimmed. `prefers-reduced-motion` disables animations. Focu
 | Diff table | `table.diff[data-view]`; `tr.hunk` (`.btn-expand-up`, `.btn-expand-down`, `.btn-expand-all`); `tr.line.add|del|ctx[data-o][data-n][data-x]` (`.is-selected`, `.in-range`); `td.num.old|new[data-side][data-line]`, `td.num.empty`, `td.marker`, `td.code.old|new`, `td.code.empty`, `span.wd`, `span.cr` |
 | Gutter | `button.btn-add-comment[data-side][data-line]` (shared, moved into the hovered `td.num`) |
 | Editor | `tr.editor` / `div.editor-block` → `form.comment-editor[data-key]` (`textarea`, `.btn-submit-comment`, `.btn-cancel-comment`, `.btn-discard-comment`) |
-| Thread | `tr.threads[data-key]` / `div.thread-block` → `.thread[data-thread-id]` (`.is-resolved`, `.has-new`) → `.comment[data-id][data-author]` (`.comment-meta` `.author .time .tag-pending .tag-round .tag-edited .tag-new .tag-moved`, `.comment-body`, `.comment-actions` `.act-edit .act-delete .act-reply .act-resolve`), `button.btn-reply`, `button.btn-show-resolved` |
+| Thread | `tr.threads[data-key]` / `div.thread-block` → `.thread[data-thread-id]` (`.is-resolved`, `.has-new`) → `.comment[data-id][data-author]` (`.comment-meta` `.author .time .tag-pending .tag-round .tag-edited .tag-new .tag-moved`, `a.tag-from[data-sha]` on a projected root, `.comment-body`, `.comment-actions` `.act-edit .act-delete .act-reply .act-resolve`), `button.btn-reply`, `button.btn-show-resolved` |
 | Drawer | `#drawer.is-open`, `.tab[data-tab="pending|new|unresolved|all"]`, `#chk-this-commit`, `#drawer-list .drawer-item[data-thread-id]`, `#drafts-list`, `input[name=verdict][value=…]`, `#review-summary`, `#btn-submit-review`, `#rounds-list .round-item[data-round]` (`.btn-since-round`) |
 | Banners/toasts | `#banner-disconnected`, `#banner-compare`, `#banner-reloaded`, `#toasts .toast.info|error|success`, `#notice-token` |
 | Readiness | `body[data-ready="1"]` after the first full render; `body[data-loading="1"]` while the server reports `loading` |

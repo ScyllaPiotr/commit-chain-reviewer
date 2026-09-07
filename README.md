@@ -230,6 +230,10 @@ first parent.
   verdict (Comment / Approve / Request changes) and an optional summary, and wakes `ccr wait`. Later
   comments start a new pending set. Submitting with no pending comments *and* no summary is allowed
   only with the verdict *Approve*; a summary alone is enough for any verdict.
+* **Everywhere they belong**: a comment written on one commit also appears in **All changes** at the line
+  the branch head has now (mapped through git), and a comment written on All changes appears on the commit
+  that has that line; such threads carry a *from …* tag linking to where they were written. File comments
+  follow the file; commit-level comments stay on their commit.
 * **Threads**: one level of replies. Edit, Delete (a root with replies deletes them too), Reply,
   Resolve/Unresolve. Resolved threads collapse to one line. Comments by the agent appear live with a
   **New** dot and a toast — *Claude replied to N threads (k resolved) — Show*; `Mark all seen` clears

@@ -157,7 +157,7 @@
     counts: { byCommit: new Map(), byFile: new Map(), pendingComments: 0, unresolvedThreads: 0 },
     knownIds: new Set(), expandedResolved: new Set(), fileFilter: '', hideViewed: false,
     loadedOnce: false, polling: false, pollSeq: 0, pollAbort: null, pollRole: null, disconnectedSince: null,
-    rangeAnchorSha: null, currentDrawerFilterPath: null, inflight: new Set(), hoverThread: null,
+    rangeAnchorSha: null, currentDrawerFilterPath: null, inflight: new Set(), hoverThread: null, projectedFor: null,
   };
   window.ccrState = state;
 
@@ -181,6 +181,12 @@
   const realCommits = () => (state.review ? state.review.commits.filter((c) => c.kind === 'commit') : []);
   /** The view (listed sha) a thread belongs to: its anchor commit, or "combined" for review-level anchors. */
   const anchorView = (a) => (a ? (a.kind === 'review' ? 'combined' : a.commit || null) : null);
+  /** Where a thread renders in the view on screen: its `view_anchor` from `?project=` (null = lives in another view, 7.3), else its own anchor. */
+  const renderAnchor = (c) => (c ? (c.view_anchor === undefined ? c.anchor : c.view_anchor) : null);
+  /** The view comments are projected onto: the selected listed commit (a compare keeps the previous selection), else All changes. */
+  const projectView = () => (state.selectedSha && commitMeta(state.selectedSha) ? state.selectedSha : 'combined');
+  /** How the "from …" tag names a view: its short sha, "All changes" or "uncommitted changes". */
+  const viewLabel = (sha) => (sha === 'combined' ? 'All changes' : sha === 'worktree' ? 'uncommitted changes' : shortSha(sha));
   function commitIndex(sha) {
     return state.review ? state.review.commits.findIndex((c) => c.sha === sha) : -1;
   }
@@ -314,9 +320,10 @@
       applyReview(review, { initial: true });
       loadRepoPrefs();
       loadReviewDraft();
-      const cs = await api('/api/comments');
-      applyComments(cs.comments, { initial: true });
-      state.version = Math.max(state.version, cs.version);
+      // Comments come projected onto the view the hash selects (7.3), so navigateFromHash finds them in place.
+      const target = parseHash(location.hash);
+      const listed = target && !target.compare ? findCommit(target.sha) : null;
+      await loadComments(listed ? listed.sha : 'combined', { initial: true });
       await navigateFromHash();
       renderDrawer();
       document.body.dataset.ready = '1';
@@ -1481,7 +1488,9 @@
     const roots = [...state.comments.values()].filter((c) => !c.parent_id);
     roots.sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0));
     for (const r of roots) {
-      const key = anchorKey(r.anchor);
+      const a = renderAnchor(r);
+      if (!a) continue; // written in another view and not mappable here: drawer-only (7.3)
+      const key = anchorKey(a);
       if (!byKey.has(key)) byKey.set(key, []);
       byKey.get(key).push(r.id);
     }
@@ -1515,12 +1524,10 @@
       const members = threadMembers(id);
       const m = { pending: members.some((c) => c.state === 'pending'), unresolved: !root.resolved, hasNew: members.some(isUnseen) };
       if (m.unresolved) unresolvedThreads++;
-      const a = root.anchor;
-      const sha = anchorView(a);
-      if (sha) {
-        bump(byCommit, sha, m);
-        if (a.path) bump(byFile, `${sha}|${a.path}`, m);
-      }
+      const home = anchorView(root.anchor); // sidebar badges count where a thread was written…
+      if (home) bump(byCommit, home, m);
+      const a = renderAnchor(root) || root.anchor; // …file headers where it renders: here when projected, else in its own view (7.3)
+      if (a && a.path && anchorView(a)) bump(byFile, `${anchorView(a)}|${a.path}`, m);
     }
     state.counts = { byCommit, byFile, pendingComments, unresolvedThreads };
   }
@@ -1529,7 +1536,7 @@
     const orphans = new Set();
     for (const id of state.threadOrder) {
       const root = state.comments.get(id);
-      const a = root && root.anchor;
+      const a = root && renderAnchor(root); // null: shown in another view, not an orphan
       if (!a || root.outdated || !a.commit || (a.kind !== 'line' && a.kind !== 'file')) continue;
       const diff = state.diffs.get(a.commit);
       if (!diff) continue;
@@ -1541,7 +1548,7 @@
   }
 
   /** Reconcile a fresh comment list into state, re-rendering only threads whose signature changed. */
-  function applyComments(list, { initial = false } = {}) {
+  function applyComments(list, { initial = false, patch = true } = {}) {
     const before = signatures();
     const prevIds = state.knownIds;
     state.comments = new Map(list.map((c) => [c.id, c]));
@@ -1551,7 +1558,7 @@
     for (const [k, v] of after) if (before.get(k) !== v) changed.add(k);
     for (const k of before.keys()) if (!after.has(k)) changed.add(k);
     afterCommentsChanged();
-    for (const k of changed) patchKey(k);
+    if (patch) for (const k of changed) patchKey(k); // a view switch re-renders everything right after
     if (!initial) {
       const fresh = list.filter((c) => c.author === 'claude' && !prevIds.has(c.id));
       if (fresh.length) {
@@ -1562,6 +1569,29 @@
       }
     }
     state.knownIds = new Set(list.map((c) => c.id));
+  }
+
+  /**
+   * Fetch every comment projected onto `view` (5.2 `?project=`) and reconcile it into state, so threads written in
+   * other views render at their mapped lines (7.3). Returns false without applying when the selection moved elsewhere
+   * meanwhile — the newer selection fetches its own projection.
+   */
+  async function loadComments(view, opts = {}) {
+    const cs = await api(`/api/comments?project=${encodeURIComponent(view)}`);
+    if (state.selectedSha && projectView() !== view) return false;
+    state.projectedFor = view;
+    applyComments(cs.comments, opts);
+    state.version = Math.max(state.version, cs.version);
+    return true;
+  }
+
+  /** A Comment from POST/PATCH lacks the `?project=` fields; carry them over from its previous copy or its thread root. */
+  function projectLocal(c) {
+    if (c.view_anchor !== undefined) return c;
+    const prev = state.comments.get(c.id) || (c.parent_id ? state.comments.get(c.parent_id) : null);
+    if (prev && prev.view_anchor !== undefined) { c.view_anchor = prev.view_anchor; c.projected = prev.projected; }
+    else { c.view_anchor = c.anchor; c.projected = false; }
+    return c;
   }
 
   function afterCommentsChanged() {
@@ -1575,18 +1605,18 @@
   }
 
   function upsertComment(c) {
-    state.comments.set(c.id, c);
+    state.comments.set(c.id, projectLocal(c));
     state.knownIds.add(c.id);
     reindex();
     afterCommentsChanged();
-    patchKey(anchorKey(rootOf(c).anchor));
+    patchKey(anchorKey(renderAnchor(rootOf(c))));
   }
 
   function removeComments(ids) {
     const keys = new Set();
     for (const id of ids) {
       const c = state.comments.get(id);
-      if (c) { keys.add(anchorKey(rootOf(c).anchor)); state.comments.delete(id); }
+      if (c) { keys.add(anchorKey(renderAnchor(rootOf(c)))); state.comments.delete(id); }
     }
     reindex();
     afterCommentsChanged();
@@ -1684,7 +1714,7 @@
 
   function patchThreadById(rootId) {
     const el = $(`#main .thread[data-thread-id="${cssEsc(rootId)}"]`);
-    if (!el) { patchKey(anchorKey((state.comments.get(rootId) || {}).anchor)); return; }
+    if (!el) { patchKey(anchorKey(renderAnchor(state.comments.get(rootId)))); return; }
     const parent = el.parentElement;
     preserveEditors(parent, () => {
       const tmp = document.createElement('div');
@@ -1726,6 +1756,10 @@
     if (c.updated_at > c.created_at) tags.push(`<span class="tag tag-edited" title="Edited ${esc(fmtAbs(c.updated_at))}">edited</span>`);
     if (c.moved_from) tags.push(`<span class="tag tag-moved" title="Re-anchored from ${esc(shortSha(c.moved_from.commit))}${c.moved_from.line ? ':' + esc(c.moved_from.line) : ''}">moved</span>`);
     if (root && c.outdated) tags.push('<span class="tag tag-outdated" title="Anchored to a commit that is no longer in the range">outdated</span>');
+    if (root && c.projected) { // written in another view, shown here at its mapped location (7.3); the link opens it there
+      const home = anchorView(c.anchor);
+      tags.push(`<a href="#${esc(home)}" class="tag tag-from" data-sha="${esc(home)}" title="Written in ${esc(viewLabel(home))} — open the thread there">from ${esc(viewLabel(home))}</a>`);
+    }
     if (isUnseen(c)) tags.push(`<span class="tag tag-new" data-created="${esc(c.created_at)}">New</span>`);
     return tags.join('');
   }
@@ -1754,7 +1788,7 @@
     const newest = members.reduce((m, c) => (c.created_at > m ? c.created_at : m), '');
     const hasNew = members.some(isUnseen);
     const collapsed = root.resolved && !hasNew && !state.expandedResolved.has(rootId);
-    const a = root.anchor || {};
+    const a = renderAnchor(root) || root.anchor || {}; // range rows follow the projected location (7.3)
     const cls = ['thread', root.resolved ? 'is-resolved' : '', hasNew ? 'has-new' : '', state.currentThread === rootId ? 'is-current' : '', state.orphans.has(rootId) ? 'is-orphan' : ''].filter(Boolean).join(' ');
     const rangeAttrs = a.kind === 'line' && a.start_line ? ` data-range-start="${esc(a.start_line)}" data-range-end="${esc(a.line)}" data-range-side="${esc(a.side)}"` : '';
     let inner;
@@ -2107,9 +2141,7 @@
     const roundsChanged = state.review && typeof st.rounds === 'number' && st.rounds !== state.review.rounds.length;
     const prev = state.review;
     if (genChanged || roundsChanged) applyReview(await api('/api/review'));
-    const cs = await api('/api/comments');
-    applyComments(cs.comments);
-    state.version = Math.max(state.version, cs.version, st.version || 0);
+    if (await loadComments(projectView())) state.version = Math.max(state.version, st.version || 0);
     if (genChanged) {
       await reloadCurrentView();
       // `ccr cover` bumps the generation too; say so instead of announcing a chain reload when only the cover moved.
@@ -2133,7 +2165,7 @@
     stopPolling();
     state.startedAt = null;
     state.diffs.clear(); state.fileText.clear(); state.hl.clear(); state.perCommitScroll.clear();
-    state.comments.clear(); state.threadsByKey.clear(); state.threadOrder = []; state.knownIds = new Set();
+    state.comments.clear(); state.threadsByKey.clear(); state.threadOrder = []; state.knownIds = new Set(); state.projectedFor = null;
     toast('Server restarted — reloading the review', 'info');
     await initialLoad();
   }
@@ -2283,7 +2315,9 @@
     if (t.threadId && !sha) {
       const root = state.comments.get(t.threadId);
       if (!root) return;
-      const a = root.anchor || {};
+      // The view on screen when it shows the thread (natively or projected, 7.3); else — or with `native` — the one it was written in.
+      const shown = renderAnchor(root);
+      const a = (!t.native && shown && anchorView(shown) === state.selectedSha ? shown : root.anchor) || {};
       sha = anchorView(a); // review-level threads live in the combined header
       if (!sha) { openDrawer('all'); return; }
       t = Object.assign({}, t, { sha, path: a.path, side: a.side, line: a.line, endLine: a.start_line ? a.line : null, startLine: a.start_line });
@@ -2385,7 +2419,10 @@
     if (commitMeta(sha) && commitMeta(sha).kind === 'commit') state.rangeAnchorSha = sha;
     updateCommitSelection();
     if (push && !keepFile) writeHash({ sha }, false); // with a file target the caller pushes the full hash once
-    try { await loadDiff(sha); } catch (e) { toast(`Could not load ${shortSha(sha)}: ${e.message}`, 'error'); return; }
+    const jobs = [loadDiff(sha)];
+    // Projections differ per view (7.3): a view change refetches the comments unless they already target this one.
+    if (state.projectedFor !== sha) jobs.push(loadComments(sha, { patch: false }).catch((e) => toast(`Could not load comments: ${e.message}`, 'error')));
+    try { await Promise.all(jobs); } catch (e) { toast(`Could not load ${shortSha(sha)}: ${e.message}`, 'error'); return; }
     if (state.viewSha !== sha) return;
     renderView();
     if (keepFile) return;
@@ -2480,8 +2517,7 @@
     try {
       const r = await api('/api/reload', { method: 'POST', body: {} });
       applyReview(r.review);
-      const cs = await api('/api/comments');
-      applyComments(cs.comments);
+      await loadComments(projectView());
       await reloadCurrentView();
       showReloadedBanner(r);
     } catch (e) {
@@ -2664,7 +2700,7 @@
 
   function drawerRoots(tab) {
     let ids = state.threadOrder.filter((id) => threadMatchesTab(id, tab));
-    if (state.drawer.thisCommitOnly) ids = ids.filter((id) => anchorView(state.comments.get(id).anchor) === state.selectedSha);
+    if (state.drawer.thisCommitOnly) ids = ids.filter((id) => anchorView(renderAnchor(state.comments.get(id))) === state.selectedSha); // native or projected here (7.3)
     if (state.currentDrawerFilterPath) ids = ids.filter((id) => { const a = state.comments.get(id).anchor; return a && a.path === state.currentDrawerFilterPath; });
     const groupIdx = (root) => {
       if (root.outdated) return 1e6;
@@ -2837,9 +2873,7 @@
       const n = (round.comment_ids || []).length || pendingBefore + (summary ? 1 : 0);
       toast(`Round ${round.number} submitted · ${n} comment${n === 1 ? '' : 's'}`, 'success');
       applyReview(await api('/api/review'));
-      const cs = await api('/api/comments');
-      applyComments(cs.comments);
-      state.version = Math.max(state.version, cs.version);
+      await loadComments(projectView());
     } catch (e) {
       toast(e.message, 'error');
     } finally { btn.disabled = false; updateBadges(); }
@@ -2912,6 +2946,7 @@
     }
     const comment = hit('.comment');
     const thread = hit('.thread');
+    if (hit('a.tag-from') && thread) { e.preventDefault(); navigateTo({ threadId: thread.dataset.threadId, native: true }); return; }
     if ((b = hit('.act-edit')) && comment) { const c = state.comments.get(comment.dataset.id); openEditor(`edit:${c.id}`, { mode: 'edit', id: c.id, rootId: c.parent_id || c.id }); return; }
     if ((b = hit('.act-delete')) && comment) { deleteComment(comment.dataset.id); return; }
     if ((hit('.act-reply') || hit('.btn-reply')) && thread) { openEditor(`reply:${thread.dataset.threadId}`, { mode: 'reply', rootId: thread.dataset.threadId }); return; }

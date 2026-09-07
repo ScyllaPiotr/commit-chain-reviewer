@@ -527,7 +527,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             state=state, round=_int_param(query, "round"), resolved=_bool_param(query, "resolved"),
             author=_first(query, "author") or None, commit=_first(query, "commit") or None,
             path=_first(query, "path") or None, include_outdated=outdated != "exclude",
-            outdated_only=outdated == "only", locate=_flag(query, "locate"))
+            outdated_only=outdated == "only", locate=_flag(query, "locate"), project=_first(query, "project") or None)
         self._send_json(200, {"version": store.version, "generation": store.generation, "now": utcnow(),
                               "comments": comments})
 

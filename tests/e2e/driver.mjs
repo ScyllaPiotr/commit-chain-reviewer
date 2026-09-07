@@ -7,8 +7,9 @@
  * Talks to Chromium over the DevTools protocol using Node's built-in WebSocket (Node >= 22, no
  * dependencies) and walks the review UI through the end-to-end scenario: load with the token in
  * `?t=`, grammar check, set a cover letter through the API and comment on the whole change from the
- * "All changes" header, select the second commit, comment on a hovered line via the gutter [+],
- * toggle split view, drag a three-line range and comment on it, submit a review round from the
+ * "All changes" header, select the second commit, comment on a hovered line via the gutter [+], see that
+ * comment projected into "All changes" with a "from <sha>" tag that leads back, toggle split view, drag a
+ * three-line range and comment on it, submit a review round from the
  * drawer, receive a Claude reply pushed through the API (toast + "New" tab), and reload the page
  * without `?t=` to prove the token survives in localStorage.
  *
@@ -336,6 +337,24 @@ export async function runScenario(page, url) {
     const badge = await page.evaluate(`document.querySelector('#btn-review .badge-pending').textContent.trim()`);
     if (badge !== '2') throw new Error('pending badge is ' + JSON.stringify(badge)); // the review-level comment plus this one
     return 'pending badge=' + badge;
+  });
+
+  await runner.step('thread projected into All changes', async () => {
+    // SPEC 7.3: a comment written on a commit renders in "All changes" at its git-mapped line, tagged with its origin.
+    await page.click('#commit-list .commit-item[data-sha="combined"]');
+    await page.waitFor(`document.querySelector('#commit-list .commit-item[data-sha="combined"]').classList.contains('is-selected') && document.querySelector('#cover-letter') && document.querySelector('.file-card[data-rendered="1"] table.diff')`);
+    await page.waitFor(`document.querySelector('tr.threads .thread .comment[data-author="user"] .tag-from')`, { label: 'projected thread with .tag-from' });
+    const tag = await page.evaluate(`document.querySelector('tr.threads .thread .tag-from').textContent`);
+    if (tag !== 'from ' + commitSha.slice(0, 10)) throw new Error('tag text ' + JSON.stringify(tag));
+    const key = await page.evaluate(`document.querySelector('tr.threads .thread .tag-from').closest('tr.threads').dataset.key`);
+    if (!key.startsWith(`line:combined|${filePath}|new|`)) throw new Error('unexpected thread row key ' + key);
+    if (await page.evaluate(`document.querySelectorAll('#main .thread.is-orphan, #main .tag-orphan').length`)) throw new Error('projected thread marked orphan');
+    await page.shot('02b-projected');
+    await page.click('tr.threads .thread .tag-from'); // opens the thread where it was written
+    await page.waitFor(`location.hash.startsWith('#${commitSha}') && document.querySelector('#main .thread.is-current .comment[data-author="user"]') && !document.querySelector('#main .tag-from')`, { label: 'tag link opens the native view' });
+    await page.key('Escape', 'Escape', 27); // drop the thread focus so \`c\` below comments on the selection, not the thread
+    if (await page.evaluate('ccrState.currentThread')) throw new Error('thread still current after Esc');
+    return key;
   });
 
   await runner.step('toggle split view keeps thread', async () => {

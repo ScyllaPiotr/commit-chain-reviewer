@@ -1183,8 +1183,8 @@ def _name_status_entry(repo, from_rev, to_rev, path):
     """``(status, new_path)`` of ``path`` (as old path) in ``from..to``, or None when unchanged."""
     # Renames are followed, copies are not (-C would relocate a line into a copy sorted before the still-existing
     # original); everything else matches the flags of the diff itself.
-    args = ["diff", "--name-status", "-z"] + [f for f in _DIFF_FLAGS if f != "-C"] + [
-        "--end-of-options", from_rev, to_rev, "--"]
+    revs = [from_rev] if to_rev is None else [from_rev, to_rev]
+    args = ["diff", "--name-status", "-z"] + [f for f in _DIFF_FLAGS if f != "-C"] + ["--end-of-options"] + revs + ["--"]
     tokens = _git(repo, args).stdout.split(b"\0")
     if tokens and tokens[-1] == b"":
         tokens.pop()
@@ -1256,8 +1256,9 @@ def map_line(repo, from_rev, to_rev, path, line) -> dict:
     if from_rev == to_rev:
         return {"path": path, "line": line, "status": "same"}
     _check_rev_arg(from_rev)
-    _check_rev_arg(to_rev)
-    lookup = _cached_changed_file if _is_sha(from_rev) and _is_sha(to_rev) else _changed_file
+    if to_rev is not None:  # None = the working tree
+        _check_rev_arg(to_rev)
+    lookup = _cached_changed_file if _is_sha(from_rev) and to_rev is not None and _is_sha(to_rev) else _changed_file
     changed = lookup(repo, from_rev, to_rev, path)
     if changed is None:
         return {"path": path, "line": line, "status": "same"}

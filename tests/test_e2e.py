@@ -100,11 +100,12 @@ def test_browser_review_flow(live, tmp_path):
     assert report["consoleErrors"] == [], pretty
     assert report["ok"] is True and report["exit_code"] == 0, pretty
     expected_steps = ["load page", "hljs languages", "first render shows All changes", "cover letter and review comment",
-                      "click 2nd commit", "hover row and click [+]", "type and submit comment", "toggle split view keeps thread",
+                      "click 2nd commit", "hover row and click [+]", "type and submit comment", "thread projected into All changes",
+                      "toggle split view keeps thread",
                       "drag 3-line range and comment", "open drawer and submit review", "claude reply → toast + New tab",
                       "reload keeps token"]
     assert [s["name"] for s in report["steps"]] == expected_steps, pretty
-    assert len(report["screenshots"]) == 7 and all(os.path.getsize(p) > 1000 for p in report["screenshots"]), pretty
+    assert len(report["screenshots"]) == 8 and all(os.path.getsize(p) > 1000 for p in report["screenshots"]), pretty
 
     # -- the state the browser left on the server: the cover letter, and one round bundling four user comments
     #    (a whole-change comment, two line comments and the summary) plus Claude's reply

@@ -451,6 +451,8 @@ table.diff tr.threads .thread + .thread, table.diff tr.threads .thread + .editor
 .tag-outdated { background: var(--danger-bg); color: var(--danger); }
 .tag-resolved { background: var(--resolved-bg); color: var(--resolved); }
 .tag-orphan { background: var(--pending-bg); color: var(--pending); }
+.tag-from { background: var(--accent-bg); color: var(--accent); text-decoration: none; } /* projected thread: links to the view it was written in */
+.tag-from:hover, .tag-from:focus-visible { text-decoration: underline; }
 .comment-body { margin-top: 4px; }
 /* rendered Markdown (comment bodies and the cover letter share the renderer and these rules) */
 .md { word-break: break-word; }

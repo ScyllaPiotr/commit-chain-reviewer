@@ -634,3 +634,13 @@ def test_cover_route(live):
     assert review["cover"] == "# Retry logic\n\nWhy this change exists."
     assert review["version"] == before["version"] + 1 and review["generation"] == before["generation"] + 1
     assert live.post("/api/cover", {"text": 42}).status == 400
+
+
+def test_comments_route_projects_into_a_view(live):
+    created = add_comment(live)
+    plain = live.get("/api/comments").json["comments"][0]
+    assert "view_anchor" not in plain
+    projected = live.get("/api/comments?project=combined").json["comments"][0]
+    assert projected["id"] == created["id"] and projected["projected"] is True
+    assert projected["view_anchor"]["commit"] == "combined" and projected["view_anchor"]["path"] == "src/app.py"
+    assert live.get("/api/comments?project=nosuchview").status == 404
