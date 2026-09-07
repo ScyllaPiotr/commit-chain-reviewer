@@ -476,7 +476,9 @@ def cmd_status(args) -> int:
     rounds = review["rounds"]
     if rounds:
         last = rounds[-1]
-        out("ccr: rounds %d (last: %s at %s)" % (len(rounds), last["verdict"], last["submitted_at"]))
+        verdict = last.get("verdict")
+        detail = ("%s at %s" % (verdict, last["submitted_at"])) if verdict not in (None, "", "comment") else "at %s" % last["submitted_at"]
+        out("ccr: rounds %d (last: %s)" % (len(rounds), detail))
     else:
         out("ccr: rounds 0")
     if ui.get("last_seen") is None:
@@ -583,8 +585,9 @@ def report_round(client: Client, number: int, as_json: bool) -> int:
     if as_json:
         print_json(dict(render.to_json(review, comments, threads=selected), round=round_info))
         return EXIT_OK
-    out("ccr: round %d — %s — %d new comments in %d threads" % (
-        number, round_info["verdict"], len(round_info["comment_ids"]), len(selected)))
+    verdict = round_info.get("verdict")
+    label = "" if verdict in (None, "", "comment") else " — %s" % verdict  # "comment" = no verdict
+    out("ccr: round %d%s — %d new comments in %d threads" % (number, label, len(round_info["comment_ids"]), len(selected)))
     sys.stdout.write(render.render_comments(review, comments, fetch_file_diff(client), threads=selected,
                                             matching=matching, mark="★ new in round %d" % number))
     sys.stdout.flush()

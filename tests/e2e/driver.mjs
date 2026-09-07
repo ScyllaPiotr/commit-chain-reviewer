@@ -6,12 +6,13 @@
  *
  * Talks to Chromium over the DevTools protocol using Node's built-in WebSocket (Node >= 22, no
  * dependencies) and walks the review UI through the end-to-end scenario: load with the token in
- * `?t=`, grammar check, set a cover letter through the API and comment on the whole change from the
- * "All changes" header, select the second commit, comment on a hovered line via the gutter [+], see that
- * comment projected into "All changes" with a "from <sha>" tag that leads back, toggle split view, drag a
- * three-line range and comment on it, submit a review round from the
- * drawer, receive a Claude reply pushed through the API (toast + "New" tab), and reload the page
- * without `?t=` to prove the token survives in localStorage.
+ * `?t=`, grammar check, set a cover letter through the API and comment on the whole series from the
+ * "All changes" header, select the second commit, comment on a hovered line via the gutter [+], type into
+ * an editor and watch the live Markdown preview, cancel it (draft kept), see the line comment projected into
+ * "All changes" with a "from <sha>" tag that leads back, check that single-key shortcuts are off, toggle split
+ * view, drag a three-line range and comment on it, submit the pending comments as a round with the top-bar
+ * Submit button, receive a Claude reply pushed through the API (toast + New dot that clears once the thread
+ * has been on screen), and reload the page without `?t=` to prove the token survives in localStorage.
  *
  * Prints exactly one JSON line on stdout: {ok, steps:[{name, ok, detail}], consoleErrors:[…],
  * screenshots:[paths]} and exits 0 when every step passed and no console error (exceptions,
@@ -197,11 +198,6 @@ export class Page {
     await this.waitFor(`document.body.dataset.ready === '1'`, { label: 'body[data-ready]', timeout: 20000 });
   }
 
-  /** The drawer slides in with a CSS transition; wait until it is fully in place before clicking inside. */
-  settleDrawer() {
-    return this.waitFor(`Math.abs(document.querySelector('#drawer').getBoundingClientRect().right - window.innerWidth) < 2`, { label: 'drawer slid in' });
-  }
-
   async shot(name) {
     const r = await this.cdp.send('Page.captureScreenshot', { format: 'png' });
     const file = join(this.shotsDir, name + '.png');
@@ -247,6 +243,12 @@ export class Runner {
 const MAIN_THREADS = '#main .thread[data-thread-id]';
 /** Cover letter the scenario sets through POST /api/cover: a heading, a paragraph, a list and a code span. */
 export const COVER = '# Why\n\nThe **cover** letter set by the e2e driver.\n\n- retries\n- `backoff`';
+/** Controls the simplified UI no longer has (drawer, help, Viewed, collapse-all, verdicts, since-round). */
+const REMOVED = ['#drawer', '#drawer-backdrop', '#btn-review', '#btn-help', '#help', '#btn-mark-seen', '#btn-collapse-all', '#btn-expand-all',
+  '#chk-hide-viewed', '#files-progress', '#files-toolbar', '#review-summary', '#rounds-list', '#btn-submit-review', 'input[name=verdict]',
+  '.file-header .viewed', '.other-views', '.btn-since-round', '.btn-discard-comment'];
+/** The colour of `var(--success)` as the browser reports it (the Submit button must be painted with it). */
+const SUCCESS_RGB = `(() => { const p = document.createElement('span'); p.style.color = 'var(--success)'; document.body.appendChild(p); const c = getComputedStyle(p).color; p.remove(); return c; })()`;
 
 /** The SPEC 9 scenario against the fixture repository (`main..feature --worktree`). */
 export async function runScenario(page, url) {
@@ -277,6 +279,17 @@ export async function runScenario(page, url) {
     if (subject !== 'All changes') throw new Error('initial subject is ' + subject);
     const selected = await page.evaluate(`document.querySelector('#commit-list .commit-item.is-selected').dataset.sha`);
     if (selected !== 'combined') throw new Error('initial selection is ' + selected);
+    const present = await page.evaluate(`${JSON.stringify(REMOVED)}.filter(s => document.querySelector(s))`);
+    if (present.length) throw new Error('removed controls still in the DOM: ' + present.join(', '));
+    // The top-bar Submit button: bold green, one pending badge (hidden at 0), disabled while nothing is pending.
+    const submit = await page.evaluate(`(() => { const b = document.querySelector('#btn-submit'); const cs = getComputedStyle(b);
+      return { disabled: b.disabled, label: b.querySelector('.label').textContent, zero: b.querySelector('.badge-pending').classList.contains('is-zero'),
+        unresolved: Boolean(b.querySelector('.badge-unresolved')), bg: cs.backgroundColor, fg: cs.color, weight: getComputedStyle(b.querySelector('.label')).fontWeight, green: ${SUCCESS_RGB} }; })()`);
+    if (!submit.disabled || submit.label !== 'Submit' || !submit.zero || submit.unresolved) throw new Error('submit button state: ' + JSON.stringify(submit));
+    if (submit.bg !== submit.green || submit.fg !== 'rgb(255, 255, 255)' || parseInt(submit.weight, 10) < 700) throw new Error('submit button style: ' + JSON.stringify(submit));
+    const label = await page.evaluate(`document.querySelector('#btn-comment-review').textContent.trim()`);
+    if (!label.endsWith('Comment on the whole series')) throw new Error('review button label: ' + label);
+    if (!(await page.evaluate(`document.querySelector('#outdated-note').hidden`))) throw new Error('outdated note shown without outdated comments');
     await page.shot('01-all-changes');
     return await page.evaluate(`document.querySelectorAll('#files .file-card').length + ' files'`);
   });
@@ -293,12 +306,14 @@ export async function runScenario(page, url) {
     await page.click('#btn-comment-review');
     await page.waitFor(`document.querySelector('#commit-header .editor-block form.comment-editor[data-key="review:"] textarea')`, { label: 'review editor' });
     if (!(await page.evaluate(`document.activeElement && document.activeElement.tagName === 'TEXTAREA'`))) throw new Error('textarea not focused');
-    await page.type('Whole-change comment from the e2e driver.');
+    const info = await page.evaluate(`document.querySelector('#commit-header form.comment-editor .anchor-info').textContent`);
+    if (info !== 'whole series') throw new Error('anchor info: ' + info);
+    await page.type('Whole-series comment from the e2e driver.');
     await page.click('#commit-header form.comment-editor[data-key="review:"] .btn-submit-comment');
     await page.waitFor(`document.querySelector('#commit-header .thread-block[data-key-host="review"] .thread .comment[data-author="user"] .comment-body') && !document.querySelector('#commit-header form.comment-editor')`, { label: 'review thread rendered' });
     const kind = await page.evaluate(`ccrState.comments.get(document.querySelector('#commit-header .thread-block[data-key-host="review"] .thread').dataset.threadId).anchor.kind`);
     if (kind !== 'review') throw new Error('anchor kind is ' + kind);
-    const badge = await page.evaluate(`document.querySelector('#btn-review .badge-pending').textContent.trim()`);
+    const badge = await page.evaluate(`document.querySelector('#btn-submit .badge-pending').textContent.trim() + (document.querySelector('#btn-submit').disabled ? ' disabled' : '')`);
     if (badge !== '1') throw new Error('pending badge is ' + JSON.stringify(badge));
     await page.shot('01b-cover-letter');
     return 'cover rendered; review thread kind=' + kind;
@@ -334,9 +349,43 @@ export async function runScenario(page, url) {
     await page.click('tr.editor form.comment-editor .btn-submit-comment');
     await page.waitFor(`document.querySelector('tr.threads .thread .comment[data-author="user"] .comment-body strong')`, { label: 'thread rendered' });
     await page.waitFor(`!document.querySelector('tr.editor')`, { label: 'editor closed' });
-    const badge = await page.evaluate(`document.querySelector('#btn-review .badge-pending').textContent.trim()`);
+    const badge = await page.evaluate(`document.querySelector('#btn-submit .badge-pending').textContent.trim()`);
     if (badge !== '2') throw new Error('pending badge is ' + JSON.stringify(badge)); // the review-level comment plus this one
     return 'pending badge=' + badge;
+  });
+
+  await runner.step('live preview and Cancel keeps draft', async () => {
+    // SPEC 7.4: the preview under the textarea renders the same safe Markdown as comment bodies while typing; Cancel keeps
+    // the text as a draft (dot on the [+]); cancelling an emptied editor drops it. There is no Discard button any more.
+    const row = `.file-card[data-path="${filePath}"] tr.line.ctx`;
+    const text = 'Draft with `code` and **bold**';
+    await page.hover(row + ' td.code');
+    await page.waitFor(`document.querySelector(${JSON.stringify(row)}).querySelector('td.num.new .btn-add-comment')`, { label: 'gutter [+] on the context row' });
+    await page.click(row + ' .btn-add-comment');
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor textarea')`, { label: 'editor row' });
+    const key = await page.evaluate(`document.querySelector('tr.editor form.comment-editor').dataset.key`);
+    if (!(await page.evaluate(`document.querySelector('tr.editor .md-preview').hidden`))) throw new Error('empty editor shows a preview');
+    await page.type(text);
+    await page.waitFor(`(() => { const pv = document.querySelector('tr.editor .md-preview'); const code = pv && pv.querySelector('p > code');
+      return pv && !pv.hidden && code && code.textContent === 'code' && pv.querySelector('p > strong'); })()`, { label: 'live preview rendered <code> and <strong>' });
+    const mono = await page.evaluate(`getComputedStyle(document.querySelector('tr.editor .md-preview code')).fontFamily`);
+    if (!/mono/i.test(mono)) throw new Error('preview code is not monospace: ' + mono);
+    await page.shot('02c-preview');
+    await page.click('tr.editor .btn-cancel-comment');
+    await page.waitFor(`!document.querySelector('tr.editor')`, { label: 'editor closed' });
+    if ((await page.evaluate(`localStorage.getItem(${JSON.stringify('ccr:draft:' + key)})`)) !== text) throw new Error('draft not kept on Cancel');
+    await page.hover(row + ' td.code');
+    await page.waitFor(`document.querySelector(${JSON.stringify(row)}).querySelector('.btn-add-comment.has-draft')`, { label: 'draft dot on [+]' });
+    await page.click(row + ' .btn-add-comment');
+    await page.waitFor(`document.querySelector('tr.editor textarea') && document.querySelector('tr.editor textarea').value === ${JSON.stringify(text)} && document.querySelector('tr.editor .md-preview:not([hidden]) code')`, { label: 'draft restored with its preview' });
+    await page.evaluate(`(() => { const ta = document.querySelector('tr.editor textarea'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    await page.waitFor(`document.querySelector('tr.editor .md-preview').hidden`, { label: 'preview hidden once the text is empty' });
+    await page.click('tr.editor .btn-cancel-comment');
+    await page.waitFor(`!document.querySelector('tr.editor')`, { label: 'editor closed again' });
+    if ((await page.evaluate(`localStorage.getItem(${JSON.stringify('ccr:draft:' + key)})`)) !== null) throw new Error('emptied draft not dropped');
+    await page.hover(row + ' td.code');
+    await page.waitFor(`document.querySelector(${JSON.stringify(row)}).querySelector('.btn-add-comment:not(.has-draft)')`, { label: 'draft dot gone' });
+    return key;
   });
 
   await runner.step('thread projected into All changes', async () => {
@@ -348,12 +397,16 @@ export async function runScenario(page, url) {
     if (tag !== 'from ' + commitSha.slice(0, 10)) throw new Error('tag text ' + JSON.stringify(tag));
     const key = await page.evaluate(`document.querySelector('tr.threads .thread .tag-from').closest('tr.threads').dataset.key`);
     if (!key.startsWith(`line:combined|${filePath}|new|`)) throw new Error('unexpected thread row key ' + key);
-    if (await page.evaluate(`document.querySelectorAll('#main .thread.is-orphan, #main .tag-orphan').length`)) throw new Error('projected thread marked orphan');
+    if (await page.evaluate(`document.querySelectorAll('#main .thread.is-orphan').length`)) throw new Error('projected thread marked orphan');
     await page.shot('02b-projected');
     await page.click('tr.threads .thread .tag-from'); // opens the thread where it was written
     await page.waitFor(`location.hash.startsWith('#${commitSha}') && document.querySelector('#main .thread.is-current .comment[data-author="user"]') && !document.querySelector('#main .tag-from')`, { label: 'tag link opens the native view' });
-    await page.key('Escape', 'Escape', 27); // drop the thread focus so \`c\` below comments on the selection, not the thread
-    if (await page.evaluate('ccrState.currentThread')) throw new Error('thread still current after Esc');
+    // Single-key shortcuts are off by default (KEYBOARD_SHORTCUTS in app.js): `j` must not move to the next file.
+    await page.waitFor(`!document.querySelector('#main .is-flash')`, { label: 'flash settled', timeout: 4000 });
+    const top = await page.evaluate(`document.querySelector('#main').scrollTop`);
+    await page.key('j', 'KeyJ', 74, 0, 'j');
+    const after = await page.evaluate(`({ top: document.querySelector('#main').scrollTop, flash: Boolean(document.querySelector('#main .file-card.is-flash')), thread: ccrState.currentThread })`);
+    if (after.top !== top || after.flash || !after.thread) throw new Error('`j` had an effect although shortcuts are disabled: ' + JSON.stringify(after));
     return key;
   });
 
@@ -381,11 +434,14 @@ export async function runScenario(page, url) {
     await page.waitFor(`document.querySelectorAll('tr.line.in-range').length === 3`, { label: '3 rows in range' });
     const hash = await page.evaluate('location.hash');
     if (!hash.endsWith(`:n${cells[0].line}-${cells[2].line}`)) throw new Error('range hash missing: ' + hash);
-    await page.key('c', 'KeyC', 67, 0, 'c');
+    await page.hover('#commit-header .subject'); // leaving the table re-parks the shared [+] (sticky-visible) on the range's end row
+    const plus = `.file-card[data-path="${filePath}"] tr.line.in-range .btn-add-comment.is-visible`;
+    await page.waitFor(`document.querySelector(${JSON.stringify(plus)})`, { label: '[+] parked on the range end row' });
+    await page.click(plus);
     await page.waitFor(`document.querySelector('tr.editor form.comment-editor textarea')`, { label: 'range editor' });
     const info = await page.evaluate(`document.querySelector('tr.editor .anchor-info').textContent`);
     await page.type('Range comment over three lines.');
-    await page.key('Enter', 'Enter', 13, 2);
+    await page.key('Enter', 'Enter', 13, 2); // Ctrl+Enter posts even though single-key shortcuts are off
     await page.waitFor(`document.querySelectorAll(${JSON.stringify(MAIN_THREADS)}).length === 2 && !document.querySelector('tr.editor')`, { label: 'range thread' });
     const note = await page.evaluate(`(document.querySelector('.thread .range-note') || {}).textContent || ''`);
     if (!note.includes(`${cells[0].line}–${cells[2].line}`)) throw new Error('range note: ' + note);
@@ -393,40 +449,34 @@ export async function runScenario(page, url) {
     return `anchor ${info}; ${note}`;
   });
 
-  await runner.step('open drawer and submit review', async () => {
-    await page.click('#btn-review');
-    await page.waitFor(`document.querySelector('#drawer').classList.contains('is-open')`);
-    await page.waitFor(`document.querySelectorAll('#drawer-list .drawer-item').length === 3`, { label: '3 drawer items' });
-    await page.settleDrawer();
-    await page.click('#drawer input[name=verdict][value="request_changes"]');
-    if (!(await page.evaluate(`document.querySelector('#drawer input[name=verdict][value="request_changes"]').checked`))) throw new Error('verdict radio not checked');
-    await page.click('#review-summary');
-    await page.type('Two comments from the e2e driver.');
-    await page.shot('05-drawer-pending');
-    const before = await page.api('/api/state');
-    await page.click('#btn-submit-review');
-    await page.waitFor(`document.querySelectorAll('#rounds-list .round-item').length === ${before.rounds + 1}`, { label: 'round listed' });
-    await page.waitFor(`document.querySelector('#btn-review .badge-pending').classList.contains('is-zero')`, { label: 'pending badge cleared' });
+  await runner.step('submit round from the top bar', async () => {
+    const before = await page.evaluate(`({ disabled: document.querySelector('#btn-submit').disabled, badge: document.querySelector('#btn-submit .badge-pending').textContent.trim() })`);
+    if (before.disabled || before.badge !== '3') throw new Error('submit button before submit: ' + JSON.stringify(before));
+    await page.shot('05-pending-submit');
+    await page.click('#btn-submit');
+    await page.waitFor(`[...document.querySelectorAll('#toasts .toast.success')].some(t => /Round 1 submitted · 3 comments/.test(t.textContent))`, { label: 'submitted toast', timeout: 15000 });
+    await page.waitFor(`document.querySelector('#btn-submit').disabled && document.querySelector('#btn-submit .badge-pending').classList.contains('is-zero')`, { label: 'submit button idle again' });
+    await page.waitFor(`document.querySelectorAll('#main .tag-round').length === 2 && !document.querySelector('#main .tag-pending')`, { label: 'R1 tags on both line threads' });
     const state = await page.api('/api/state');
-    if (state.rounds !== 1 || state.last_round.verdict !== 'request_changes') throw new Error('round not recorded: ' + JSON.stringify(state.last_round));
-    if (state.last_round.summary !== 'Two comments from the e2e driver.') throw new Error('summary not recorded: ' + state.last_round.summary);
-    return `rounds=${state.rounds} verdict=${state.last_round.verdict}`;
+    if (state.rounds !== 1 || state.last_round.verdict !== 'comment' || state.last_round.summary !== '') throw new Error('round not recorded: ' + JSON.stringify(state.last_round));
+    return `rounds=${state.rounds} comments=${state.last_round.comment_ids.length}`;
   });
 
-  await runner.step('claude reply → toast + New tab', async () => {
+  await runner.step('claude reply → toast + New dot', async () => {
     const rootId = await page.evaluate(`document.querySelector(${JSON.stringify(MAIN_THREADS)}).dataset.threadId`);
+    // Collapse the file first: a thread that stays on screen for ~1 s is marked seen, which would clear the New dot we assert.
+    await page.click(`.file-card[data-path="${filePath}"] .btn-collapse`);
+    await page.waitFor(`document.querySelector('.file-card[data-path=${JSON.stringify(filePath)}]').classList.contains('is-collapsed')`, { label: 'file collapsed' });
     const reply = await page.api('/api/comments', { method: 'POST', body: JSON.stringify({ body: 'Fixed in the next commit.', parent_id: rootId, author: 'claude' }) });
     if (!reply || reply.parent_id !== rootId) throw new Error('reply not created: ' + JSON.stringify(reply));
     await page.waitFor(`[...document.querySelectorAll('#toasts .toast')].some(t => /Claude replied to 1 thread/.test(t.textContent))`, { label: 'Claude toast', timeout: 15000 });
-    // Read the count right away: a visible comment is marked seen after ~1 s, which clears its "New" state.
-    const count = await page.evaluate(`parseInt(document.querySelector('#drawer .tab[data-tab="new"] .count').textContent, 10)`);
-    if (!(count >= 1)) throw new Error('New tab count is ' + count);
-    await page.waitFor(`document.querySelector('#main .comment[data-author="claude"][data-id=${JSON.stringify(reply.id)}]')`, { label: 'claude comment rendered' });
-    await page.settleDrawer();
-    await page.click('#drawer .tab[data-tab="new"]');
-    await page.waitFor(`document.querySelector('#drawer .tab[data-tab="new"]').classList.contains('is-active') || document.querySelector('#drawer .tab[data-tab="new"][aria-selected="true"]')`, { label: 'New tab active' });
+    const dot = `#main .thread.has-new[data-thread-id=${JSON.stringify(rootId)}] .comment[data-author="claude"][data-id=${JSON.stringify(reply.id)}] .tag-new`;
+    await page.waitFor(`document.querySelector(${JSON.stringify(dot)})`, { label: 'New dot on the reply' });
     await page.shot('06-claude-reply');
-    return `new=${count} reply=${reply.id}`;
+    await page.click('#toasts .toast .toast-action'); // "Show" navigates to the thread (expanding the file)
+    await page.waitFor(`document.querySelector('#main .thread.is-current[data-thread-id=${JSON.stringify(rootId)}]') && !document.querySelector('.file-card[data-path=${JSON.stringify(filePath)}]').classList.contains('is-collapsed')`, { label: 'thread focused' });
+    await page.waitFor(`!document.querySelector('#main .tag-new') && !document.querySelector('#main .thread.has-new')`, { label: 'New dot cleared after being on screen', timeout: 5000 });
+    return `reply=${reply.id}; New dot cleared automatically`;
   });
 
   await runner.step('reload keeps token', async () => {

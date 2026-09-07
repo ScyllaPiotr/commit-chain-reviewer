@@ -437,3 +437,11 @@ def test_to_json_shape():
                                                    "c0mb1n", "w0rktr", "outd8d"]
     assert by_root["k3f9a2"] == {"root": "k3f9a2", "replies": ["p0o9i8"], "last_author": "claude", "answered": True}
     assert by_root["c2line"] == {"root": "c2line", "replies": [], "last_author": "user", "answered": False}
+
+
+def test_round_without_verdict_omits_the_verdict_word():
+    review = {"repo": {"name": "r"}, "range": {"spec": "main..x", "base": None, "head": "a" * 40},
+              "commits": [], "rounds": [{"number": 1, "submitted_at": "2026-09-07T13:51:00Z", "verdict": "comment",
+                                         "summary": "", "comment_ids": ["k3f9a2"]}]}
+    text = render.render_comments(review, [], None)
+    assert "- Round 1 · 2026-09-07T13:51:00Z · 1 comment\n" in text and "comment ·" not in text.split("\n")[3]

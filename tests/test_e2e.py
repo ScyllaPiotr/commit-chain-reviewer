@@ -100,27 +100,27 @@ def test_browser_review_flow(live, tmp_path):
     assert report["consoleErrors"] == [], pretty
     assert report["ok"] is True and report["exit_code"] == 0, pretty
     expected_steps = ["load page", "hljs languages", "first render shows All changes", "cover letter and review comment",
-                      "click 2nd commit", "hover row and click [+]", "type and submit comment", "thread projected into All changes",
-                      "toggle split view keeps thread",
-                      "drag 3-line range and comment", "open drawer and submit review", "claude reply → toast + New tab",
+                      "click 2nd commit", "hover row and click [+]", "type and submit comment", "live preview and Cancel keeps draft",
+                      "thread projected into All changes", "toggle split view keeps thread",
+                      "drag 3-line range and comment", "submit round from the top bar", "claude reply → toast + New dot",
                       "reload keeps token"]
     assert [s["name"] for s in report["steps"]] == expected_steps, pretty
-    assert len(report["screenshots"]) == 8 and all(os.path.getsize(p) > 1000 for p in report["screenshots"]), pretty
+    assert len(report["screenshots"]) == 9 and all(os.path.getsize(p) > 1000 for p in report["screenshots"]), pretty
 
-    # -- the state the browser left on the server: the cover letter, and one round bundling four user comments
-    #    (a whole-change comment, two line comments and the summary) plus Claude's reply
+    # -- the state the browser left on the server: the cover letter, and one round (rounds carry no verdict: the UI
+    #    always sends "comment" and no summary) bundling three user comments — a whole-series comment and two line
+    #    comments — plus Claude's reply
     review = live.store.review()
     assert review["cover"] == COVER
     assert len(review["rounds"]) == 1, pretty
     rnd = review["rounds"][0]
-    assert rnd["number"] == 1 and rnd["verdict"] == "request_changes"
-    assert rnd["summary"] == "Two comments from the e2e driver."
+    assert rnd["number"] == 1 and rnd["verdict"] == "comment" and rnd["summary"] == ""
     assert rnd["head"] == review["range"]["head"] and len(rnd["commit_shas"]) == 7
 
     comments = live.store.list_comments()
     by_author = {a: [c for c in comments if c["author"] == a] for a in ("user", "claude")}
-    assert len(by_author["user"]) == 4 and len(by_author["claude"]) == 1, pretty
-    assert review["counts"] == {"pending": 0, "submitted": 4, "unresolved": 4, "total": 5, "outdated": 0}
+    assert len(by_author["user"]) == 3 and len(by_author["claude"]) == 1, pretty
+    assert review["counts"] == {"pending": 0, "submitted": 3, "unresolved": 3, "total": 4, "outdated": 0}
     assert set(rnd["comment_ids"]) == {c["id"] for c in comments}
 
     second = review["commits"][1]  # combined first, then the first real commit ("Modify app in three hunks")
@@ -131,7 +131,7 @@ def test_browser_review_flow(live, tmp_path):
     assert roots[1]["snippet"] == "value_05 = 500  # changed" and roots[1]["body"] == "First **e2e** comment with `code`."
     assert all(c["state"] == "submitted" and c["round"] == 1 for c in comments)
     review_level = sorted((c for c in by_author["user"] if c["anchor"]["kind"] == "review"), key=lambda c: c["created_at"])
-    assert [c["body"] for c in review_level] == ["Whole-change comment from the e2e driver.", rnd["summary"]]
+    assert [c["body"] for c in review_level] == ["Whole-series comment from the e2e driver."]
     assert all(c["anchor"] == {"kind": "review", "commit": None, "path": None, "side": None, "line": None, "start_line": None}
                and c["snippet"] == "" for c in review_level)
     reply = by_author["claude"][0]

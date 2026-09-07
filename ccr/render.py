@@ -413,7 +413,8 @@ def _round_lines(review: dict, comments: list) -> list:
         ids = round_info.get("comment_ids")
         if ids is None:
             ids = [c["id"] for c in comments if c.get("round") == round_info["number"]]
-        parts = ["Round %d" % round_info["number"], clean(round_info.get("verdict"), True),
+        parts = ["Round %d" % round_info["number"]] + (
+            [clean(round_info["verdict"], True)] if round_info.get("verdict") not in (None, "", "comment") else []) + [
                  clean(round_info.get("submitted_at"), True), _plural(len(ids), "comment")]
         if round_info.get("summary"):
             parts.append('"%s"' % clean(round_info["summary"], True))

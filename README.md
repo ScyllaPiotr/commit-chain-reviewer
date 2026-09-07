@@ -3,9 +3,9 @@
 `ccr` is a local, zero-dependency, GitHub-like code review UI built for agentic workflows. An agent
 (Claude Code) prepares a chain of commits, runs `ccr start`, and hands you a URL. You review in the
 browser — the commit chain, per-commit diffs, inline comments on lines, ranges, files or whole
-commits — and click **Submit review**. The agent reads every comment in one call (`ccr wait` /
+commits — and click **Submit**. The agent reads every comment in one call (`ccr wait` /
 `ccr comments`), fixes the code, replies to and resolves threads from the CLI, reloads the diff, and
-the loop repeats until you approve. No GitHub detour, no network, no accounts.
+the loop repeats until you have nothing left to ask. No GitHub detour, no network, no accounts.
 
 ## Requirements
 
@@ -57,8 +57,8 @@ ccr start                      # range defaults to @{upstream}..HEAD, else main.
    `ssh -L 7777:127.0.0.1:7777 host`, then open the URL locally.
 2. Pick a commit in the sidebar. Hover a line and click the gutter **[+]**, or drag across the line
    numbers to comment on a range. Comment on a whole file or commit from their headers.
-3. Press `r` to open the Review drawer, choose a verdict, optionally write a summary, and click
-   **Submit review**.
+3. Click **Submit** in the top bar: the pending comments become a numbered round and `ccr wait`
+   wakes up.
 4. `ccr comments` prints every thread as Markdown. `ccr stop` exports the review to Markdown and
    shuts the server down.
 
@@ -174,25 +174,24 @@ Why not use the existing backoff helper here?
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────────┐
-│ ⎇ repo · branch   main..HEAD · 7 commits · +worktree  [Unified] [Wrap] [Hide ws] [☾] [⟳] [Review ●3 · 4] [?] │
+│ ⎇ repo · branch   main..HEAD · 7 commits · +worktree  [Unified] [Wrap] [Hide ws] [☾] [⟳] [Submit ●3] │
 ├────────────┬─────────────────────────────────────────────────────────────────────────────┤
 │ COMMITS    │ Header card: subject · body · author · date · sha (copy) · +40 −12  [💬]      │
-│ ● All      │ 12 / 40 files viewed ▓▓▓░░  [Collapse all] [Expand all] [☐ Hide viewed]        │
-│ ○ 9fceb02 •│ ┌ src/fetcher.py  M  +10 −2   · 2 threads in other views   [☐ Viewed] [💬] [▾] ┐│
-│ ○ 1a2b3c4  │ │ @@ -10,7 +10,9 @@ def foo(self):                      [⤒ 20] [expand all] [⤓ 20]│
-│ ○ Worktree │ │ 10  10     x = 1                                                           │
-│────────────│ │ 11        - y = 2                                                    [+]   │
-│ FILES  [🔍]│ │     11    + y = 3                                                          │
-│ ▾ src      │ │ ┌ thread ────────────────────────────────────────────────────────────┐    │
-│   fetcher  │ │ │ U user · 2 min ago · Pending          [Edit][Delete][Reply][Resolve]│    │
+│ ● All      │ ┌ src/fetcher.py  M  +10 −2                                           [💬] [▾] ┐│
+│ ○ 9fceb02 •│ │ @@ -10,7 +10,9 @@ def foo(self):                      [⤒ 20] [expand all] [⤓ 20]│
+│ ○ 1a2b3c4  │ │ 10  10     x = 1                                                           │
+│ ○ Worktree │ │ 11        - y = 2                                                    [+]   │
+│────────────│ │     11    + y = 3                                                          │
+│ FILES  [🔍]│ │ ┌ thread ────────────────────────────────────────────────────────────┐    │
+│ ▾ src      │ │ │ U user · 2 min ago · Pending          [Edit][Delete][Reply][Resolve]│    │
+│   fetcher  │ │ │ Why not use the existing backoff helper?                            │    │
 └────────────┴─┴─┴───────────────────────────────────────────────────────────────────────────┘
-                                                      [Review drawer slides in from the right]
 ```
 
 **Top bar** — repo and branch, the range (hover for the merge-base note), commit count, then:
-Unified/Split, Wrap, Hide whitespace, theme (auto → light → dark), ⟳ reload, **Review** (badges:
-pending comments · unresolved threads), Copy link (the link carries the token, so it works in another
-browser), `?` help, sidebar toggle.
+Unified/Split, Wrap, Hide whitespace, theme (auto → light → dark), ⟳ reload, the green **Submit**
+button with the pending-comment count (disabled while nothing is pending), Copy link (the link carries
+the token, so it works in another browser), sidebar toggle.
 
 **Sidebar** — the commit chain: **All changes** (`combined`, the whole range as one diff) first, the
 real commits oldest → newest, and **Uncommitted changes** (`worktree`: staged + unstaged + untracked
@@ -200,15 +199,14 @@ vs `HEAD`) last when started with `--worktree`. Each item shows the short sha, s
 avatar, age, `+N −M`, thread badges (yellow pending, red unresolved) and a `•` dot for commits that
 were not part of the last submitted round. Hover for the full message. **Shift+click** two commits
 for a compare view of that sub-range (read-only: comments are disabled). Below it, the file tree of
-the selected commit with status letters, counts, viewed ticks and a filter box that also hides
+the selected commit with status letters, counts and a filter box that also hides
 non-matching files in the main pane.
 
 **Main pane** — the commit header card (subject, body, author, sha click-to-copy, stats, *comment on
-this commit*; in **All changes** also the cover letter set by the agent and *Comment on the whole
-change*), a files toolbar (`12 / 40 files viewed`, Collapse/Expand all, Hide viewed), and one
+this commit*; in **All changes** also the cover letter set by the agent, *Comment on the whole
+series*, and a note when comments are anchored to commits that left the series), and one
 card per file with a sticky header: path (renames as `old → new`), status, mode changes, `+N −M`,
-"N threads in other views", a **Viewed** checkbox (remembered per blob pair — it unticks itself when
-the file changes), *comment on this file*, and collapse. Diffs come with syntax highlighting,
+thread count, *comment on this file*, and a collapse chevron. Diffs come with syntax highlighting,
 word-level change marks, hunk-gap expansion (`⤒ 20`, `⤓ 20`, expand all, expand to end), CRLF and
 truncation markers, and "Load anyway" for very large files. Merge commits are diffed against their
 first parent.
@@ -217,30 +215,29 @@ first parent.
 
 * **Where**: a line (gutter `[+]` on hover, or the selected line with `c`), a range (drag over the line
   numbers, or Shift+click to extend, then `[+]`/`c`), a file (header button), a commit (header card),
-  or the whole change — the **Comment on the whole change** button under the cover letter in **All
-  changes** (the submit-time summary is such a comment too). Ranges are single-sided: in unified view a
+  or the whole series — the **Comment on the whole series** button under the cover letter in **All
+  changes**. Ranges are single-sided: in unified view a
   context line anchors to the new side, a deleted line to the old side; click the old number of a
   context line to anchor to the old side.
 * **What**: Markdown — paragraphs, `code`, fenced blocks, bold, italic, `https://` links, lists,
-  quotes. A 7–40 hex sha of a listed commit becomes a link to that commit. Drafts survive a reload of
-  the page; Ctrl/⌘+Enter posts, Esc keeps the draft, Discard deletes it.
+  quotes. A 7–40 hex sha of a listed commit becomes a link to that commit. A live preview under the
+  textarea shows the rendered Markdown while you type. Drafts survive a reload of the page;
+  Ctrl/⌘+Enter posts, Esc or Cancel keeps the draft (an emptied editor drops it).
 * **Pending vs submitted**: a new comment is **Pending**. Pending comments are *already visible to the
   agent* — `ccr comments` lists them and `ccr wait --any` wakes on them — so you can also just tell the
-  agent "done". **Submit review** bundles all pending comments into a numbered **round** with a
-  verdict (Comment / Approve / Request changes) and an optional summary, and wakes `ccr wait`. Later
-  comments start a new pending set. Submitting with no pending comments *and* no summary is allowed
-  only with the verdict *Approve*; a summary alone is enough for any verdict.
+  agent "done". **Submit** bundles all pending comments into a numbered **round** — simply the batch
+  of comments submitted together; rounds carry no verdict — and wakes `ccr wait`. Later comments start
+  a new pending set; the button is disabled while nothing is pending.
 * **Everywhere they belong**: a comment written on one commit also appears in **All changes** at the line
   the branch head has now (mapped through git), and a comment written on All changes appears on the commit
   that has that line; such threads carry a *from …* tag linking to where they were written. File comments
   follow the file; commit-level comments stay on their commit.
 * **Threads**: one level of replies. Edit, Delete (a root with replies deletes them too), Reply,
   Resolve/Unresolve. Resolved threads collapse to one line. Comments by the agent appear live with a
-  **New** dot and a toast — *Claude replied to N threads (k resolved) — Show*; `Mark all seen` clears
-  the dots.
-* **Drawer** (`r`): tabs **Pending / New / Unresolved / All**, *This commit only*, threads grouped by
-  commit → path → line with an **Outdated** group last, a Drafts line, the verdict radios, the summary
-  box, **Submit review (N)** and the list of rounds, each with a **Changes since round N** link.
+  **New** dot and a toast — *Claude replied to N threads (k resolved) — Show*; a dot clears by itself
+  once its thread has been on screen.
+* **Submit** (top bar): the badge counts the pending comments; one click posts the round and shows
+  *Round N submitted · K comments*. `ccr comments` lists every thread, outdated ones included.
 
 ### Reload, outdated and moved
 
@@ -253,16 +250,19 @@ never lost:
   comments only when the same line text is found in the file (a unique match, or the nearest one
   within ±20 lines of the old position) — and tagged **moved**.
 * Otherwise it becomes **outdated**: kept in the database, listed by `ccr comments` under
-  *Outdated*, and shown only in the drawer.
-* After a reload a banner reports `+a −r commits, K comments remapped, J now outdated` and offers
-  **Show changes since round N**: a compare view of everything the agent pushed since you last
-  submitted. The `•` dot in the sidebar marks the same thing per commit.
+  *Outdated*; the **All changes** header says how many there are.
+* After a reload a banner reports `+a −r commits, K comments remapped, J now outdated`; the `•` dot
+  in the sidebar marks the commits that were not part of the last submitted round.
 * The UI long-polls the server, so it updates by itself; you never need to press F5. If the tab does
   reload, the token is kept in `localStorage` for that port.
 
 ### Keyboard shortcuts
 
-Ignored while typing in an editor; `?` shows this list in the UI.
+Always on: `Ctrl`/`⌘`+`Enter` posts the focused comment or reply, `Esc` cancels the focused editor
+(draft kept), `Shift`+click on two commits selects a range for a compare view and `Shift`+click on a
+line number extends the line selection. The single-key shortcuts below are **disabled by default**;
+to enable them set `const KEYBOARD_SHORTCUTS = true;` at the top of `ccr/static/app.js` (the server
+reads static files from disk, so reloading the page is enough).
 
 | Key | Action |
 |---|---|
@@ -271,16 +271,10 @@ Ignored while typing in an editor; `?` shows this list in the UI.
 | `n` / `p` | next / previous thread in the current view |
 | `Shift+N` / `Shift+P` | next / previous **unresolved** thread across the whole chain |
 | `c` | comment on the selected line or range (reply when a thread is focused) |
-| `v` | toggle *Viewed* on the current file |
-| `x` / `Shift+X` | collapse / expand the current file / all files |
-| `r` | open / close the Review drawer |
+| `x` | collapse / expand the current file |
 | `u` | toggle Unified / Split |
 | `w` | toggle line wrapping |
-| `?` | help |
-| `Esc` | cancel the focused editor (draft kept), else close help → drawer → selection |
-| `Ctrl`/`⌘`+`Enter` | post the focused comment or reply |
-| `Shift`+click (commits) | select a commit range → compare view |
-| `Shift`+click (line numbers) | extend the line selection |
+| `Esc` | clear the line selection, then the thread focus |
 
 ## The agent loop
 
@@ -300,7 +294,7 @@ Switched to `backoff.retry()` in 1a2b3c4.
 Kept the explicit loop — the helper has no jitter. Shall I add it there instead?
 EOF
 ccr reload --repo /abs/repo                                  # 6. the UI picks the new commits up live
-ccr wait --repo /abs/repo --since-round 1 --timeout 590      # 7. repeat until a round says "approve"
+ccr wait --repo /abs/repo --since-round 1 --timeout 590      # 7. repeat until the user says the review is done
 ccr stop --repo /abs/repo                                    # 8. only when the human asks — exports Markdown first
 ```
 
@@ -314,7 +308,7 @@ ccr stop --repo /abs/repo                                    # 8. only when the 
   `ssh -L PORT:127.0.0.1:PORT host` (the port is in the URL). The Host/Origin checks allow this
   because the browser still talks to `127.0.0.1`.
 * Fixup commits (`git commit --fixup=<sha>`) instead of `--amend`/rebase during the review keep every
-  existing comment anchored and let you see exactly what changed via **Changes since round N**.
+  existing comment anchored; the sidebar's `•` dot marks the commits added since the last round.
   Squash after approval.
 
 ## Security model
@@ -358,8 +352,7 @@ ccr stop --repo /abs/repo                                    # 8. only when the 
 * Diffs are never stored — they are re-extracted from git on start and reload and cached in memory.
 * `ccr export --md` / `--json` dumps everything at any time, including outdated threads.
 * The browser keeps its own convenience state in `localStorage`: the token (per port), theme,
-  the whitespace toggle, viewed files (per blob pair, pruned after 30 days), collapsed folders,
-  sidebar/drawer widths, drafts, and the "seen" marker for New dots.
+  the whitespace toggle, collapsed folders, the sidebar width, drafts, and the "seen" marker for New dots.
 
 ## Troubleshooting
 
@@ -374,7 +367,7 @@ ccr stop --repo /abs/repo                                    # 8. only when the 
 | `cannot infer a range; pass --range or -n` / `range X..Y is empty` | No upstream or `main`/`master` to compare against, or the range has no commits. Pass `--range base..HEAD`, `-n N`, or `--worktree` for uncommitted work. |
 | `ccr wait` exits 2 (`ccr: no new round after 590 s …`) | Just no round yet. Run it again; `ccr status` tells you whether the UI is connected and when it was last seen. If it printed `ccr: UI not opened yet`, the user has not opened the URL (over SSH: is the port forwarded?). |
 | `ccr wait` exits 3 (`ccr: server gone`) | The server died while waiting; the stale session file has been removed. `ccr logs`, then `ccr start` again. |
-| A comment vanished from the diff | Look in the drawer: it is either **outdated** (its commit left the range) or its anchor is not in the current diff ("anchor not found"). `ccr comments --outdated` lists them; `ccr move ID --commit …` re-anchors one by hand. |
+| A comment vanished from the diff | It is either **outdated** (its commit left the range — the **All changes** header counts these) or its anchor is not in the current diff. `ccr comments --outdated` lists them; `ccr move ID --commit …` re-anchors one by hand. |
 | Whitespace-only or huge files show no diff | *Hide whitespace* removed every hunk (note shown), or the file is above the size cap — click **Load anyway**. |
 | Works locally, not through SSH | Forward the port from the URL: `ssh -L PORT:127.0.0.1:PORT host` and open `http://127.0.0.1:PORT/?t=…` in the local browser. Do not change the host to anything but `127.0.0.1`/`localhost`. |
 

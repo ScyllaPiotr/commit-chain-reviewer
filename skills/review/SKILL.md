@@ -12,7 +12,8 @@ or `-n 3`); otherwise pick the range yourself as described in step 1.
 
 `ccr` (Commit Chain Reviewer) serves a local, GitHub-like review UI for a range of commits. You start it,
 hand the user a URL, wait for their review round, fix the code, answer every thread from the CLI, reload
-the diff, and repeat until they approve. You never see the browser; the CLI is your whole interface, and
+the diff, and repeat until the user says the review is done. Rounds carry no verdict: every submitted comment
+is a question or a request for a change. You never see the browser; the CLI is your whole interface, and
 `ccr comments` / `ccr wait` print Markdown written for you: every thread has an id, a numbered code
 snippet and a `→ HEAD path:line` location.
 
@@ -67,7 +68,7 @@ snippet and a `→ HEAD path:line` location.
    URL to the user **verbatim, on its own line** — the `?t=` token in it is what authorises the browser. Use this sentence, substituting the printed URL and its port for `PORT`:
 
    > Open http://127.0.0.1:PORT/?t=… (over SSH: `ssh -L PORT:127.0.0.1:PORT <host>` first), leave
-   > comments, then click **Submit review** — or just tell me when you are done.
+   > comments, then click **Submit** — or just tell me when you are done.
 
    Do not shorten the URL, wrap it in Markdown link syntax or split it across lines; the user copies
    it as is.
@@ -98,7 +99,7 @@ you are woken up instead of blocking. Then act on the exit code:
 
 | Exit | Meaning | Do |
 |---|---|---|
-| 0 | a new round exists | stdout starts with `ccr: round <n> — <verdict> — <k> new comments in <j> threads`, then the round's threads in the Markdown format below (new comments marked `★ new in round n`). Go to step 4. |
+| 0 | a new round exists | stdout starts with `ccr: round <n> — <k> new comments in <j> threads`, then the round's threads in the Markdown format below (new comments marked `★ new in round n`). Go to step 4. |
 | 2 | timeout, no new round | stderr: `ccr: no new round after 590 s (rounds: R, pending unsubmitted: P, version: V)`. Re-run the same command. If it printed `ccr: UI not opened yet` (or `ccr status --repo "$REPO"` shows the UI not connected), remind the user of the URL and the SSH forward once — do not nag. |
 | 3 | `ccr: server gone` / no running session | `ccr sessions`, then `ccr logs --repo "$REPO"` for the reason. If the server crashed, `ccr start` again with the same options — the database survived, comments come back — and hand over the **new** URL (the token changed). If the user ran `ccr stop`, the review was exported to Markdown in the session directory; ask before starting a fresh one. |
 
@@ -162,7 +163,7 @@ Tell the user, briefly: the commits you added (short shas + subjects), which thr
 which you left open and why, and that the UI is already refreshed (it live-updates; no F5 needed).
 Then return to step 3 with `--since-round <n>` of the round you just handled.
 
-Repeat 3 → 5 until a round arrives with verdict `approve`. Then ask whether to squash the fixups and
+Repeat 3 → 5 until the user says the review is done (in chat, or in a comment saying so). Then ask whether to squash the fixups and
 whether to stop the server.
 
 ### 6. Stop — only when the user asks
@@ -187,7 +188,7 @@ conversation ends without a decision, leave the server running and say so:
 - Treat pending comments as real: the user may never click Submit.
 - Process every thread of a round in one pass; reply to all of them in one `ccr reply --batch -` call.
 - `[resolve]` only for committed fixes; disagree or ask by replying without it.
-- Fixup/new commits during the review; no amend, no rebase, no force-push until approved.
+- Fixup/new commits during the review; no amend, no rebase, no force-push until the user declares the review done.
 - `ccr reload` after every batch of commits, never with a narrower range.
 - Use `--json` when acting on ids programmatically.
 - Never `ccr stop` unless told to; when stopping, remember it exports first and then deletes the data.
@@ -260,7 +261,7 @@ How to read it:
 ```jsonc
 {
   "review":  { "repo": {...}, "range": {...}, "commits": [ CommitMeta without files ], "counts": {...}, ... },
-  "rounds":  [ {"number": 1, "verdict": "request_changes", "summary": "…", "submitted_at": "…Z",
+  "rounds":  [ {"number": 1, "verdict": "comment", "summary": "", "submitted_at": "…Z",
                 "base": "…", "head": "…", "commit_shas": ["…"], "comment_ids": ["…"]} ],
   "comments": [ {"id": "k3f9a2", "parent_id": null, "author": "user", "body": "…",
                  "state": "pending", "round": null, "resolved": false,

@@ -7,7 +7,7 @@
  *   4. gutter [+], pointer range selection
  *   5. comments: anchor keys, reconciliation, threads, editors, drafts, Markdown
  *   6. live updates (long-poll), seen tracking, banners
- *   7. navigation (hash), keyboard, drawer, help, event wiring
+ *   7. navigation (hash), keyboard, submit, event wiring
  *
  * Every piece of dynamic text passes through esc(). No inline styles: computed styles are
  * assigned through CSSOM properties or classes (strict CSP).
@@ -27,21 +27,15 @@
   const HEX_RE = /^[0-9a-f]{7,64}$/;
   const EXPAND_STEP = 20;
   const NEW_DOT_TITLE = 'Not yet part of a submitted round — Claude can already read it with ccr comments';
+  /** Single-key shortcuts (j/k files, ]/[ commits, n/p and Shift+N/P threads, c comment, x collapse, u view mode, w wrap,
+   *  Esc clearing the selection / thread focus) are OFF by default — set to true to enable them; the handlers stay in
+   *  onKeyDown. Ctrl/⌘+Enter (post) and Esc (cancel) inside an open editor always work. */
+  const KEYBOARD_SHORTCUTS = false;
 
   const storage = {
     get(key) { try { return localStorage.getItem(key); } catch (e) { return null; } },
     set(key, value) { try { localStorage.setItem(key, value); } catch (e) { /* quota / blocked */ } },
     del(key) { try { localStorage.removeItem(key); } catch (e) { /* ignore */ } },
-    keys(prefix) {
-      const out = [];
-      try {
-        for (let i = 0; i < localStorage.length; i++) {
-          const k = localStorage.key(i);
-          if (k && k.startsWith(prefix)) out.push(k);
-        }
-      } catch (e) { /* ignore */ }
-      return out;
-    },
     json(key, fallback) {
       const raw = storage.get(key);
       if (raw == null) return fallback;
@@ -150,14 +144,13 @@
     diffs: new Map(), fileText: new Map(), hl: new Map(),
     comments: new Map(), threadsByKey: new Map(), threadOrder: [], orphans: new Set(),
     openEditors: new Map(), sel: null, currentFile: 0, currentThread: null,
-    viewed: new Set(), collapsedFolders: new Set(), collapsedFiles: new Set(), expandedViewed: new Set(),
-    drawer: { open: false, tab: 'pending', thisCommitOnly: false },
+    collapsedFolders: new Set(), collapsedFiles: new Set(),
     seenUntil: '', perCommitScroll: new Map(),
     // derived / transient
-    counts: { byCommit: new Map(), byFile: new Map(), pendingComments: 0, unresolvedThreads: 0 },
-    knownIds: new Set(), expandedResolved: new Set(), fileFilter: '', hideViewed: false,
+    counts: { byCommit: new Map(), byFile: new Map(), pendingComments: 0 },
+    knownIds: new Set(), expandedResolved: new Set(), fileFilter: '', submitting: false,
     loadedOnce: false, polling: false, pollSeq: 0, pollAbort: null, pollRole: null, disconnectedSince: null,
-    rangeAnchorSha: null, currentDrawerFilterPath: null, inflight: new Set(), hoverThread: null, projectedFor: null,
+    rangeAnchorSha: null, inflight: new Set(), hoverThread: null, projectedFor: null,
   };
   window.ccrState = state;
 
@@ -238,24 +231,14 @@
     state.theme = ['light', 'dark'].includes(storage.get('ccr:theme')) ? storage.get('ccr:theme') : 'auto';
     const sw = parseInt(storage.get('ccr:sidebar-w') || '', 10);
     if (sw) $('#app').style.setProperty('--sidebar-w', clamp(sw, 200, 480) + 'px');
-    const dw = parseInt(storage.get('ccr:drawer-w') || '', 10);
-    if (dw) $('#app').style.setProperty('--drawer-w', clamp(dw, 320, 720) + 'px');
     if (storage.get('ccr:sidebar') === 'collapsed') $('#app').classList.add('sidebar-collapsed');
-    state.hideViewed = storage.get('ccr:hide-viewed') === '1';
-    $('#chk-hide-viewed').checked = state.hideViewed;
     applyViewPrefs();
   }
 
   function loadRepoPrefs() {
     state.collapsedFolders = new Set(storage.json('ccr:folders:' + repoKey(), []));
     state.seenUntil = storage.get('ccr:seen:' + repoKey()) || '';
-    state.viewed = new Set();
-    const cutoff = Date.now() - 30 * 86400 * 1000;
-    for (const k of storage.keys('ccr:viewed:')) {
-      const t = Date.parse(storage.get(k) || '');
-      if (Number.isNaN(t) || t < cutoff) { storage.del(k); continue; }
-      state.viewed.add(k);
-    }
+    storage.del(`ccr:draft:review:${repoKey()}`); // verdict/summary draft written by earlier versions
   }
 
   function applyViewPrefs() {
@@ -319,13 +302,11 @@
       const review = await fetchReviewWhenReady();
       applyReview(review, { initial: true });
       loadRepoPrefs();
-      loadReviewDraft();
       // Comments come projected onto the view the hash selects (7.3), so navigateFromHash finds them in place.
       const target = parseHash(location.hash);
       const listed = target && !target.compare ? findCommit(target.sha) : null;
       await loadComments(listed ? listed.sha : 'combined', { initial: true });
       await navigateFromHash();
-      renderDrawer();
       document.body.dataset.ready = '1';
       state.loadedOnce = true;
       state.disconnectedSince = null;
@@ -349,7 +330,6 @@
     if (initial || !state.startedAt) state.startedAt = review.server ? review.server.started_at : null;
     renderTopbar();
     renderCommitList();
-    renderRounds();
     updateBadges();
     renderCoverLetter();
   }
@@ -369,19 +349,15 @@
     document.title = `${r.repo.name} — ccr`;
   }
 
+  /** The top-bar Submit button: pending-comment badge; disabled while nothing is pending or a submit is in flight. */
   function updateBadges() {
-    const c = state.counts;
-    const bp = $('#btn-review .badge-pending');
-    const bu = $('#btn-review .badge-unresolved');
-    bp.textContent = String(c.pendingComments);
-    bp.classList.toggle('is-zero', c.pendingComments === 0);
-    bu.textContent = String(c.unresolvedThreads);
-    bu.classList.toggle('is-zero', c.unresolvedThreads === 0);
-    $('#btn-review').title = `Review drawer (r) — ${c.pendingComments} pending comments, ${c.unresolvedThreads} unresolved threads`;
-    const submit = $('#btn-submit-review');
-    submit.textContent = `Submit review (${c.pendingComments})`;
-    const verdict = ($('input[name=verdict]:checked') || {}).value;
-    submit.disabled = c.pendingComments === 0 && verdict !== 'approve' && !$('#review-summary').value.trim();
+    const n = state.counts.pendingComments;
+    const badge = $('#btn-submit .badge-pending');
+    badge.textContent = String(n);
+    badge.classList.toggle('is-zero', n === 0);
+    const btn = $('#btn-submit');
+    btn.disabled = n === 0 || state.submitting;
+    btn.title = n ? `Submit ${n} pending comment${n === 1 ? '' : 's'} as a review round` : 'Nothing to submit — leave a comment first';
   }
 
   /* ==================================================================== sidebar: commit chain */
@@ -518,13 +494,11 @@
   function treeFileHtml(f, showFull) {
     const key = `${state.viewSha}|${f.path}`;
     const c = state.counts.byFile.get(key);
-    const viewed = isViewed(f);
     const name = showFull ? f.path : f.path.split('/').pop();
     return `<div class="tree-file${f.path === currentFilePath() ? ' is-current' : ''}" data-path="${esc(f.path)}" role="treeitem" tabindex="0" title="${esc(f.old_path ? `${f.old_path} → ${f.path}` : f.path)}">
       <span class="st st-${esc(f.status)}" aria-label="${esc(statusName(f.status))}">${esc(f.status)}</span>
       <span class="name"><bdi>${esc(name)}</bdi></span>
       ${c && c.threads ? `<span class="tcount${c.hasNew ? ' has-new' : ''}" title="${esc(c.threads)} threads">${esc(c.threads)}</span>` : ''}
-      ${viewed ? '<span class="tick" title="Viewed">✓</span>' : ''}
       <span class="nums">${f.binary ? 'bin' : `<span class="stat-add">+${esc(f.additions)}</span> <span class="stat-del">−${esc(f.deletions)}</span>`}</span>
     </div>`;
   }
@@ -627,18 +601,19 @@
     meta += `<span class="stats-wrap">${esc(diff.stats.files)} file${diff.stats.files === 1 ? '' : 's'} ${statsHtml(diff.stats.additions, diff.stats.deletions)}</span>`;
     meta += '<span class="header-actions">';
     if (!commentsDisabled()) {
-      // "All changes" gets only the whole-change button: a commit-level comment on the combined view would just
+      // "All changes" gets only the whole-series button: a commit-level comment on the combined view would just
       // duplicate a review-level one.
       if (diff.kind !== 'combined') {
         const label = diff.kind === 'worktree' ? 'Comment on the uncommitted changes' : 'Comment on this commit';
         meta += `<button type="button" id="btn-comment-commit" class="sm-btn" aria-label="${label}">💬 ${label}</button>`;
       }
-      if (diff.kind === 'combined') meta += '<button type="button" id="btn-comment-review" class="sm-btn" aria-label="Comment on the whole change" title="A review-level comment about the whole change, not tied to any commit">💬 Comment on the whole change</button>';
+      if (diff.kind === 'combined') meta += '<button type="button" id="btn-comment-review" class="sm-btn" aria-label="Comment on the whole series" title="A review-level comment about the whole series, not tied to any commit">💬 Comment on the whole series</button>';
     }
     meta += '</span></div>';
     parts.push(meta);
     if (diff.kind === 'combined') {
-      // The cover letter (PR description) and review-level threads live only in the "All changes" view.
+      // The cover letter (PR description), the outdated-comments note and review-level threads live only in "All changes".
+      parts.push('<p id="outdated-note" class="explain" hidden></p>');
       parts.push(coverLetterHtml());
       parts.push('<div class="thread-block" data-key-host="review"></div>');
     }
@@ -646,9 +621,19 @@
     parts.push('<div class="thread-block" data-key-host="commit"></div>');
     preserveEditors(host, () => {
       host.innerHTML = parts.join('');
+      renderOutdatedNote();
       renderReviewThreads();
       renderCommitThreads();
     });
+  }
+
+  /** Outdated roots (anchored to commits that left the series) render nowhere; the combined header says how many there are. */
+  function renderOutdatedNote() {
+    const el = $('#outdated-note');
+    if (!el) return;
+    const n = [...state.comments.values()].filter((c) => !c.parent_id && c.outdated).length;
+    el.hidden = n === 0;
+    el.innerHTML = `${esc(n)} comment${n === 1 ? ' is' : 's are'} anchored to commits that left the series (see <code>ccr comments --outdated</code>)`;
   }
 
   /** The cover-letter panel of the "All changes" header: safe Markdown, or a hint when the agent has not set one. */
@@ -672,33 +657,11 @@
 
   /* ==================================================================== file cards */
 
-  function viewedKey(f) {
-    return `ccr:viewed:${repoKey()}|${f.path}|${f.old_blob || 'null'}..${f.new_blob || 'null'}`;
-  }
-  const isViewed = (f) => state.viewed.has(viewedKey(f));
-
-  function setViewed(f, on) {
-    const key = viewedKey(f);
-    if (on) { state.viewed.add(key); storage.set(key, new Date().toISOString()); } else { state.viewed.delete(key); storage.del(key); }
-    state.expandedViewed.delete(f.path);
-    const card = cardFor(f.path);
-    if (card) {
-      const box = card.querySelector('.viewed input[type=checkbox]');
-      if (box) box.checked = on;
-      card.querySelector('.viewed').classList.toggle('is-checked', on);
-      updateCardCollapse(card, f);
-    }
-    updateFilesProgress();
-    renderFileTree();
-  }
-
-  /** collapsed = viewed (unless explicitly re-opened) || manually collapsed. */
-  const isCollapsed = (f) => (isViewed(f) && !state.expandedViewed.has(f.path)) || state.collapsedFiles.has(f.path);
+  const isCollapsed = (f) => state.collapsedFiles.has(f.path);
 
   function updateCardCollapse(card, f) {
     const collapsed = isCollapsed(f);
     card.classList.toggle('is-collapsed', collapsed);
-    card.classList.toggle('is-hidden-viewed', state.hideViewed && isViewed(f));
     const btn = card.querySelector('.btn-collapse');
     if (btn) btn.setAttribute('aria-expanded', String(!collapsed));
   }
@@ -710,13 +673,11 @@
   function cardFor(path) {
     return $$('#files .file-card').find((c) => c.dataset.path === path) || null;
   }
-  const visibleCards = () => $$('#files .file-card').filter((c) => !c.classList.contains('is-filtered-out') && !c.classList.contains('is-hidden-viewed'));
+  const visibleCards = () => $$('#files .file-card').filter((c) => !c.classList.contains('is-filtered-out'));
 
   function fileHeaderHtml(f) {
     const key = `${state.viewSha}|${f.path}`;
     const c = state.counts.byFile.get(key);
-    const other = otherViewsCount(f.path);
-    const viewed = isViewed(f);
     const collapsed = isCollapsed(f);
     const pathHtml = f.old_path && f.old_path !== f.path
       ? `<span class="old">${esc(f.old_path)}</span><span class="arrow">→</span>${esc(f.path)}`
@@ -732,20 +693,9 @@
       ${modeNote}
       ${f.binary ? '<span class="mode-note">binary</span>' : statsHtml(f.additions, f.deletions)}
       ${c && c.threads ? `<span class="tcount${c.hasNew ? ' has-new' : ''}" title="Threads in this view">💬 ${esc(c.threads)}</span>` : ''}
-      ${other ? `<button type="button" class="other-views" data-path="${esc(f.path)}" title="Open the drawer filtered by this path">${esc(other)} thread${other === 1 ? '' : 's'} in other views</button>` : ''}
       <span class="spacer"></span>
-      <label class="viewed${viewed ? ' is-checked' : ''}"><input type="checkbox" aria-label="Mark file as viewed"${viewed ? ' checked' : ''}> Viewed</label>
       ${commentsDisabled() ? '' : `<button type="button" class="hdr-btn btn-comment-file${hasDraft(`file:${state.viewSha}|${f.path}`) ? ' has-draft' : ''}" aria-label="Comment on this file" title="Comment on this file">💬</button>`}
     </div>`;
-  }
-
-  function otherViewsCount(path) {
-    let n = 0;
-    for (const [key, c] of state.counts.byFile) {
-      const bar = key.indexOf('|');
-      if (key.slice(bar + 1) === path && key.slice(0, bar) !== state.viewSha) n += c.threads;
-    }
-    return n;
   }
 
   function fileNoteHtml(f) {
@@ -763,9 +713,8 @@
   function fileCardHtml(f) {
     const note = fileNoteHtml(f);
     const collapsed = isCollapsed(f);
-    const hidden = state.hideViewed && isViewed(f);
     const filtered = state.fileFilter && !f.path.toLowerCase().includes(state.fileFilter.toLowerCase());
-    return `<section class="file-card${collapsed ? ' is-collapsed' : ''}${hidden ? ' is-hidden-viewed' : ''}${filtered ? ' is-filtered-out' : ''}" data-path="${esc(f.path)}"${f.old_path ? ` data-old-path="${esc(f.old_path)}"` : ''} data-rendered="${note ? '1' : '0'}" id="file-${esc(fileDomId(f.path))}">
+    return `<section class="file-card${collapsed ? ' is-collapsed' : ''}${filtered ? ' is-filtered-out' : ''}" data-path="${esc(f.path)}"${f.old_path ? ` data-old-path="${esc(f.old_path)}"` : ''} data-rendered="${note ? '1' : '0'}" id="file-${esc(fileDomId(f.path))}">
       ${fileHeaderHtml(f)}
       <div class="thread-block" data-key-host="file"></div>
       ${note}
@@ -790,8 +739,7 @@
     const diff = currentDiff();
     const host = $('#files');
     if (bodyObserver) bodyObserver.disconnect();
-    if (!diff) { host.innerHTML = ''; $('#files-toolbar').hidden = true; renderFileTree(); return; }
-    $('#files-toolbar').hidden = diff.files.length === 0;
+    if (!diff) { host.innerHTML = ''; $('#filter-status').hidden = true; renderFileTree(); return; }
     host.innerHTML = diff.files.map(fileCardHtml).join('');
     const rowH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--row-h')) || 20;
     const io = ensureBodyObserver();
@@ -805,17 +753,7 @@
       }
       renderFileThreads(card, f);
     }
-    updateFilesProgress();
     applyFileFilter();
-  }
-
-  function updateFilesProgress() {
-    const diff = currentDiff();
-    if (!diff) return;
-    const total = diff.files.length;
-    const viewed = diff.files.filter(isViewed).length;
-    $('#files-progress').textContent = `${viewed} / ${total} files viewed`;
-    $('#progress-fill').style.width = (total ? Math.round((viewed / total) * 100) : 0) + '%';
   }
 
   /** Render one file's diff body synchronously (single innerHTML), once. */
@@ -1489,7 +1427,7 @@
     roots.sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0));
     for (const r of roots) {
       const a = renderAnchor(r);
-      if (!a) continue; // written in another view and not mappable here: drawer-only (7.3)
+      if (!a) continue; // written in another view and not mappable here: not rendered in this one (7.3)
       const key = anchorKey(a);
       if (!byKey.has(key)) byKey.set(key, []);
       byKey.get(key).push(r.id);
@@ -1511,7 +1449,7 @@
 
   function deriveCounts() {
     const byCommit = new Map(); const byFile = new Map();
-    let pendingComments = 0; let unresolvedThreads = 0;
+    let pendingComments = 0;
     for (const c of state.comments.values()) if (c.state === 'pending') pendingComments++;
     const bump = (map, key, m) => {
       const e = map.get(key) || { threads: 0, pending: 0, unresolved: 0, hasNew: false };
@@ -1523,13 +1461,12 @@
       if (!root || root.outdated) continue;
       const members = threadMembers(id);
       const m = { pending: members.some((c) => c.state === 'pending'), unresolved: !root.resolved, hasNew: members.some(isUnseen) };
-      if (m.unresolved) unresolvedThreads++;
       const home = anchorView(root.anchor); // sidebar badges count where a thread was written…
       if (home) bump(byCommit, home, m);
       const a = renderAnchor(root) || root.anchor; // …file headers where it renders: here when projected, else in its own view (7.3)
       if (a && a.path && anchorView(a)) bump(byFile, `${anchorView(a)}|${a.path}`, m);
     }
-    state.counts = { byCommit, byFile, pendingComments, unresolvedThreads };
+    state.counts = { byCommit, byFile, pendingComments };
   }
 
   function recomputeOrphans() {
@@ -1564,8 +1501,9 @@
       if (fresh.length) {
         const threads = new Set(fresh.map((c) => c.parent_id || c.id));
         const resolved = [...threads].filter((id) => { const r = state.comments.get(id); return r && r.resolved; }).length;
+        const [first] = threads;
         toast(`Claude replied to ${threads.size} thread${threads.size === 1 ? '' : 's'}${resolved ? ` (${resolved} resolved)` : ''}`, 'info',
-          { action: { label: 'Show', fn: () => openDrawer('new') }, timeout: 10000 });
+          { action: { label: 'Show', fn: () => navigateTo({ threadId: first }) }, timeout: 10000 });
       }
     }
     state.knownIds = new Set(list.map((c) => c.id));
@@ -1601,7 +1539,7 @@
     updateCommitBadges();
     renderFileTree();
     updateFileHeaders();
-    renderDrawer();
+    renderOutdatedNote();
   }
 
   function upsertComment(c) {
@@ -1742,6 +1680,7 @@
       const ta = form.querySelector('textarea');
       if (!s || !ta) continue;
       ta.value = s.value;
+      updatePreview(form);
       if (s.height) ta.style.height = s.height;
       if (s.focused) { ta.focus(); try { ta.setSelectionRange(s.start, s.end); } catch (e) { /* ignore */ } }
     }
@@ -1821,11 +1760,11 @@
       info = `${a.side}:${a.start_line ? `${a.start_line}–` : ''}${a.line}`;
     } else if (entry.anchor && entry.anchor.kind === 'file') info = 'file';
     else if (entry.anchor && entry.anchor.kind === 'commit') info = 'commit';
-    else if (entry.anchor && entry.anchor.kind === 'review') info = 'whole change';
+    else if (entry.anchor && entry.anchor.kind === 'review') info = 'whole series';
     return `<form class="comment-editor" data-key="${esc(key)}" data-mode="${esc(entry.mode)}" novalidate>
       <textarea rows="3" placeholder="${entry.mode === 'reply' ? 'Reply (Markdown)…' : 'Leave a comment (Markdown)…'}" aria-label="Comment text">${esc(initial)}</textarea>
+      <div class="md-preview md"${initial.trim() ? '' : ' hidden'}>${renderMarkdown(initial)}</div>
       <div class="editor-foot"><span class="md-hint">Markdown · Ctrl+Enter to post · Esc to cancel</span>${info ? `<span class="anchor-info">${esc(info)}</span>` : ''}
-        <button type="button" class="sm-btn btn-discard-comment" aria-label="Discard draft">Discard</button>
         <button type="button" class="sm-btn btn-cancel-comment" aria-label="Cancel (keeps the draft)">Cancel</button>
         <button type="submit" class="sm-btn btn-submit-comment">${label}</button></div>
     </form>`;
@@ -1841,12 +1780,7 @@
     draftTimers.set(key, setTimeout(() => {
       draftTimers.delete(key);
       if (value.trim()) storage.set(draftKey(key), value); else storage.del(draftKey(key));
-      renderDrafts();
     }, 300));
-  }
-  function allDraftKeys() {
-    // Everything but the verdict/summary draft (`ccr:draft:review:<repo>`); the whole-change editor's key is the bare `review:`.
-    return storage.keys('ccr:draft:').filter((k) => k !== reviewDraftKey()).map((k) => k.slice('ccr:draft:'.length));
   }
 
   function editorForm(key) { return $(`form.comment-editor[data-key="${cssEsc(key)}"]`); }
@@ -1866,6 +1800,15 @@
     ta.style.height = Math.min(window.innerHeight * 0.6, ta.scrollHeight + 2) + 'px';
   }
 
+  /** Live preview under the textarea: the same safe renderer as comment bodies; hidden while the text is empty. */
+  function updatePreview(form) {
+    const text = form.querySelector('textarea').value;
+    const pv = form.querySelector('.md-preview');
+    pv.hidden = !text.trim();
+    pv.innerHTML = text.trim() ? renderMarkdown(text) : '';
+  }
+  const schedulePreview = debounce((key) => { const form = editorForm(key); if (form) updatePreview(form); }, 150);
+
   /** Open an editor identified by key. entry = {mode:'new', anchor} | {mode:'reply', rootId} | {mode:'edit', id, rootId}. */
   async function openEditor(key, entry) {
     if (commentsDisabled()) { toast('Comments are disabled in compare view', 'error'); return; }
@@ -1884,14 +1827,14 @@
     focusEditor(key);
   }
 
-  function closeEditor(key, { discard = false } = {}) {
+  /** Close an editor keeping its text as a draft (an emptied editor drops the draft). */
+  function closeEditor(key) {
     const form = editorForm(key);
     const entry = state.openEditors.get(key);
     if (form) {
       const ta = form.querySelector('textarea');
-      if (discard || !ta.value.trim()) delDraft(key);
-      else storage.set(draftKey(key), ta.value);
-    } else if (discard) delDraft(key);
+      if (ta.value.trim()) storage.set(draftKey(key), ta.value); else delDraft(key);
+    }
     clearTimeout(draftTimers.get(key));
     state.openEditors.delete(key);
     if (!entry) return;
@@ -1900,7 +1843,6 @@
       if (tr) tr.remove(); else patchKey(key);
     } else if (key.startsWith('reply:') || key.startsWith('edit:')) patchThreadById(entry.rootId);
     else patchKey(key);
-    renderDrafts();
     updateDraftDots();
   }
 
@@ -1943,7 +1885,6 @@
       state.openEditors.delete(key);
       upsertComment(c);
       if (entry.mode === 'new' && entry.anchor.kind === 'line') clearSelection();
-      renderDrafts();
       updateDraftDots();
     } catch (e) {
       state.inflight.delete(key);
@@ -2220,15 +2161,6 @@
     updateCommitBadges();
     renderFileTree();
     updateFileHeaders();
-    updateDrawerCounts();
-    if (state.drawer.open && state.drawer.tab === 'new') renderDrawerList();
-  }
-
-  function markAllSeen() {
-    let max = state.seenUntil;
-    for (const c of state.comments.values()) if (c.created_at > max) max = c.created_at;
-    markSeen(max || new Date(serverNow()).toISOString().replace(/\.\d{3}Z$/, 'Z'));
-    renderDrawer();
   }
 
   /* ==================================================================== 7. navigation */
@@ -2309,7 +2241,7 @@
     setTimeout(() => el.classList.remove('is-flash'), 1500);
   }
 
-  /** Navigate to a commit / file / line / thread; the single entry point behind hash, sidebar, drawer and keys. */
+  /** Navigate to a commit / file / line / thread; the single entry point behind hash, sidebar, toasts and keys. */
   async function navigateTo(t, { push = true } = {}) {
     let sha = t.sha;
     if (t.threadId && !sha) {
@@ -2319,7 +2251,7 @@
       const shown = renderAnchor(root);
       const a = (!t.native && shown && anchorView(shown) === state.selectedSha ? shown : root.anchor) || {};
       sha = anchorView(a); // review-level threads live in the combined header
-      if (!sha) { openDrawer('all'); return; }
+      if (!sha) return;
       t = Object.assign({}, t, { sha, path: a.path, side: a.side, line: a.line, endLine: a.start_line ? a.line : null, startLine: a.start_line });
     }
     const c = findCommit(sha);
@@ -2341,7 +2273,6 @@
     if (!card) { toast(`${t.path} is not part of this commit`, 'error'); return; }
     const f = fileForPath(card.dataset.path);
     expandCard(card, f);
-    card.classList.remove('is-hidden-viewed');
     if (t.line) {
       const side = t.side || 'new';
       let row = findRow(card, side, t.line);
@@ -2359,7 +2290,7 @@
         if (!t.threadId) { scrollToEl(row); flash(row); }
       } else {
         writeHash({ sha, path: card.dataset.path }, !push);
-        toast('That line is not in the current diff — see the drawer', 'info');
+        toast('That line is not in the current diff', 'info');
         scrollToEl(card, { offset: 20 });
       }
     } else {
@@ -2368,7 +2299,6 @@
       flash(card);
     }
     if (t.threadId) focusThreadById(t.threadId);
-    if (window.innerWidth < 1280 && state.drawer.open) closeDrawer();
   }
 
   function focusThreadById(id) {
@@ -2435,7 +2365,6 @@
       const mem = state.perCommitScroll.get(sha);
       main.scrollTop = mem ? mem.top : 0;
     }
-    if (window.innerWidth < 1280 && state.drawer.open) closeDrawer();
   }
 
   function renderView() {
@@ -2445,10 +2374,9 @@
     updateCommitSelection();
     state.currentFile = 0;
     updateDraftDots();
-    if (state.drawer.open) renderDrawerList();
   }
 
-  async function openCompare(base, head, { push = true, sinceRound = false } = {}) {
+  async function openCompare(base, head, { push = true } = {}) {
     const main = $('#main');
     if (!state.compare && currentDiff()) state.perCommitScroll.set(state.selectedSha, { top: main.scrollTop, path: currentFilePath() });
     clearSelection({ keepHash: true });
@@ -2456,7 +2384,7 @@
     try {
       await loadCompare(base, head);
     } catch (e) {
-      toast(sinceRound && e.status === 400 ? 'previous head no longer available' : `Compare failed: ${e.message}`, 'error');
+      toast(`Compare failed: ${e.message}`, 'error');
       return;
     }
     state.currentThread = null;
@@ -2479,12 +2407,6 @@
     const i = list.indexOf(anchor); const j = list.indexOf(c);
     const lo = Math.min(i, j); const hi = Math.max(i, j);
     openCompare(list[lo].parents[0] || null, list[hi].sha);
-  }
-
-  function compareSinceRound(n) {
-    const round = (state.review.rounds || []).find((r) => r.number === n);
-    if (!round) return;
-    openCompare(round.head, state.review.range.head, { sinceRound: true });
   }
 
   /* ---- top bar actions */
@@ -2528,9 +2450,6 @@
   function showReloadedBanner(r) {
     const b = $('#banner-reloaded');
     b.querySelector('.banner-text').textContent = `Chain reloaded: +${r.commits_added} −${r.commits_removed} commits, ${(r.remapped || []).length} comments remapped, ${(r.outdated || []).length} now outdated`;
-    const since = b.querySelector('.btn-since-round');
-    const lr = lastRound();
-    if (lr) { since.hidden = false; since.textContent = `Show changes since round ${lr.number}`; since.dataset.round = String(lr.number); } else since.hidden = true;
     b.hidden = false;
   }
 
@@ -2540,14 +2459,7 @@
     storage.set('ccr:sidebar', app.classList.contains('sidebar-collapsed') ? 'collapsed' : 'open');
   }
 
-  function toggleHelp(force) {
-    const help = $('#help');
-    const open = force != null ? force : help.hidden;
-    help.hidden = !open;
-    if (open) $('#btn-help-close').focus();
-  }
-
-  /* ---- files toolbar & keyboard helpers */
+  /* ---- keyboard helpers */
 
   function currentCard() {
     const cards = visibleCards();
@@ -2623,17 +2535,8 @@
     openEditor(anchorKey(a), { mode: 'new', anchor: a });
   }
 
-  function toggleViewedCurrent() {
-    const card = currentCard();
-    if (!card) return;
-    const f = fileForPath(card.dataset.path);
-    setViewed(f, !isViewed(f));
-  }
-
-  /** Open a card regardless of why it is collapsed; a viewed file stays viewed. */
   function expandCard(card, f) {
     state.collapsedFiles.delete(f.path);
-    if (isViewed(f)) state.expandedViewed.add(f.path);
     updateCardCollapse(card, f);
     ensureRendered(card);
   }
@@ -2645,238 +2548,24 @@
     updateCardCollapse(card, f);
   }
 
-  function collapseAll(on) {
-    const diff = currentDiff();
-    if (!diff) return;
-    state.collapsedFiles = on ? new Set(diff.files.map((f) => f.path)) : new Set();
-    for (const card of $$('#files .file-card')) {
-      const f = fileForPath(card.dataset.path);
-      if (on) updateCardCollapse(card, f); else expandCard(card, f);
-    }
-  }
+  /* ==================================================================== submit */
 
-  function toggleCollapseAll() {
-    const any = $$('#files .file-card').some((c) => !c.classList.contains('is-collapsed'));
-    collapseAll(any);
-  }
-
-  /* ==================================================================== drawer */
-
-  function drawerWidth() {
-    return parseInt(getComputedStyle($('#app')).getPropertyValue('--drawer-w'), 10) || 420;
-  }
-
-  function applyDrawerLayout() {
-    const open = state.drawer.open;
-    const d = $('#drawer');
-    d.classList.toggle('is-open', open);
-    d.setAttribute('aria-hidden', String(!open));
-    const wide = window.innerWidth >= 1280;
-    $('#drawer-backdrop').hidden = !(open && !wide);
-    const pad = open && wide ? drawerWidth() + 'px' : '';
-    $('#main').style.paddingRight = pad;
-    $('#banners').style.paddingRight = pad;
-  }
-
-  function openDrawer(tab, { path = null } = {}) {
-    if (tab) state.drawer.tab = tab;
-    state.currentDrawerFilterPath = path;
-    state.drawer.open = true;
-    applyDrawerLayout();
-    renderDrawer();
-  }
-  function closeDrawer() { state.drawer.open = false; applyDrawerLayout(); }
-  function toggleDrawer() { if (state.drawer.open) closeDrawer(); else openDrawer(); }
-
-  function threadMatchesTab(rootId, tab) {
-    const root = state.comments.get(rootId);
-    if (!root) return false;
-    const members = threadMembers(rootId);
-    if (tab === 'pending') return members.some((c) => c.state === 'pending');
-    if (tab === 'new') return members.some(isUnseen);
-    if (tab === 'unresolved') return !root.resolved && !root.outdated;
-    return true;
-  }
-
-  function drawerRoots(tab) {
-    let ids = state.threadOrder.filter((id) => threadMatchesTab(id, tab));
-    if (state.drawer.thisCommitOnly) ids = ids.filter((id) => anchorView(renderAnchor(state.comments.get(id))) === state.selectedSha); // native or projected here (7.3)
-    if (state.currentDrawerFilterPath) ids = ids.filter((id) => { const a = state.comments.get(id).anchor; return a && a.path === state.currentDrawerFilterPath; });
-    const groupIdx = (root) => {
-      if (root.outdated) return 1e6;
-      if (!root.anchor || root.anchor.kind === 'review') return 1e5;
-      const i = commitIndex(root.anchor.commit);
-      return i < 0 ? 1e6 : i;
-    };
-    return ids.map((id) => state.comments.get(id)).sort((a, b) => groupIdx(a) - groupIdx(b)
-      || String((a.anchor || {}).path || '').localeCompare(String((b.anchor || {}).path || ''))
-      || (((a.anchor || {}).line || 0) - ((b.anchor || {}).line || 0)) || a.created_at.localeCompare(b.created_at));
-  }
-
-  function updateDrawerCounts() {
-    for (const tab of ['pending', 'new', 'unresolved', 'all']) {
-      const n = state.threadOrder.filter((id) => threadMatchesTab(id, tab)).length;
-      const el = $(`#drawer .tab[data-tab="${tab}"] .count`);
-      el.textContent = String(n);
-      el.classList.toggle('has-items', n > 0);
-    }
-  }
-
-  function anchorLabel(a) {
-    if (!a || a.kind === 'review') return 'review';
-    if (a.kind === 'commit') return 'commit';
-    const loc = a.kind === 'line' ? `:${a.side === 'old' ? 'o' : 'n'}${a.start_line ? `${a.start_line}–` : ''}${a.line}` : '';
-    return `${a.path}${loc}`;
-  }
-
-  function drawerItemHtml(root) {
-    const members = threadMembers(root.id);
-    const a = root.anchor || {};
-    const tags = [];
-    if (root.resolved) tags.push('<span class="tag tag-resolved">resolved</span>');
-    if (root.outdated) tags.push('<span class="tag tag-outdated">outdated</span>');
-    if (root.moved_from) tags.push('<span class="tag tag-moved">moved</span>');
-    if (state.orphans.has(root.id)) tags.push('<span class="tag tag-orphan" title="anchor not found in current diff">orphan</span>');
-    if (members.some((c) => c.state === 'pending')) tags.push('<span class="tag tag-pending">pending</span>');
-    if (members.some(isUnseen)) tags.push('<span class="tag tag-new">new</span>');
-    const authors = [...new Set(members.map((c) => c.author))].map((au) => avatarHtml(au, au === 'claude' ? 'Claude' : 'user')).join('');
-    const snippet = (root.snippet || '').split('\n')[0];
-    const excerpt = root.body.replace(/\s+/g, ' ').trim().slice(0, 60);
-    return `<button type="button" class="drawer-item${state.currentThread === root.id ? ' is-current' : ''}" data-thread-id="${esc(root.id)}" role="listitem">
-      <span class="anchor"><span class="sha">${esc(a.commit ? shortSha(a.commit) : '')}</span><span>${esc(anchorLabel(a))}</span></span>
-      ${snippet ? `<span class="snippet">${esc(snippet)}</span>` : ''}
-      <span class="excerpt">${renderInline(excerpt)}${root.body.length > 60 ? '…' : ''}</span>
-      <span class="row3">${authors}<span class="n">${members.length} comment${members.length === 1 ? '' : 's'}</span>${tags.join('')}${state.orphans.has(root.id) ? '<span class="orphan-note">anchor not found in current diff</span>' : ''}</span>
-    </button>`;
-  }
-
-  function renderDrawerList() {
-    const host = $('#drawer-list');
-    const roots = drawerRoots(state.drawer.tab);
-    $('#btn-jump-first').hidden = !(state.drawer.tab === 'unresolved' && roots.length);
-    if (!roots.length) {
-      const what = { pending: 'No pending comments', new: 'Nothing new', unresolved: 'No unresolved threads', all: 'No comments yet' }[state.drawer.tab];
-      host.innerHTML = `<div class="drawer-empty">${esc(what)}${state.currentDrawerFilterPath ? ` for ${esc(state.currentDrawerFilterPath)} <button type="button" class="link-btn btn-clear-drawer-path">clear</button>` : ''}</div>`;
-      return;
-    }
-    const groups = [];
-    let cur = null;
-    for (const root of roots) {
-      const a = root.anchor || {};
-      const gkey = root.outdated ? 'outdated' : (!a.commit ? 'review' : a.commit);
-      if (!cur || cur.key !== gkey) { cur = { key: gkey, items: [] }; groups.push(cur); }
-      cur.items.push(root);
-    }
-    let html = state.currentDrawerFilterPath ? `<div class="drawer-group-title">path: ${esc(state.currentDrawerFilterPath)} <button type="button" class="link-btn btn-clear-drawer-path">clear</button></div>` : '';
-    for (const g of groups) {
-      let title;
-      if (g.key === 'outdated') title = 'Outdated';
-      else if (g.key === 'review') title = 'Review summaries';
-      else { const c = commitMeta(g.key); title = c ? `<span class="sha">${esc(c.short_sha)}</span><span class="subject" title="${esc(c.subject)}">${esc(c.subject)}</span>` : `<span class="sha">${esc(shortSha(g.key))}</span>`; }
-      html += `<div class="drawer-group"><div class="drawer-group-title">${title}</div>${g.items.map(drawerItemHtml).join('')}</div>`;
-    }
-    host.innerHTML = html;
-  }
-
-  function renderDrafts() {
-    const host = $('#drafts-list');
-    const keys = allDraftKeys().filter((k) => hasDraft(k));
-    if (!keys.length) { host.innerHTML = ''; return; }
-    host.innerHTML = `<div class="draft-row"><strong>Drafts (${keys.length})</strong></div>` + keys.map((k) => `<div class="draft-row" data-key="${esc(k)}"><span class="dk" title="${esc(k)}">${esc(draftLabel(k))}</span>
-      <button type="button" class="link-btn btn-open-draft">Open</button><button type="button" class="link-btn btn-discard-draft">Discard</button></div>`).join('');
-  }
-
-  function draftLabel(key) {
-    const p = parseLineKey(key);
-    if (p) return `${shortSha(p.commit)} ${p.path}:${p.side === 'old' ? 'o' : 'n'}${p.line}`;
-    if (key.startsWith('file:')) { const rest = key.slice(5); const bar = rest.indexOf('|'); return `${shortSha(rest.slice(0, bar))} ${rest.slice(bar + 1)} (file)`; }
-    if (key.startsWith('commit:')) return `${shortSha(key.slice(7))} (commit)`;
-    if (key === 'review:') return 'whole change (review)';
-    if (key.startsWith('reply:')) return `reply to ${key.slice(6)}`;
-    if (key.startsWith('edit:')) return `edit ${key.slice(5)}`;
-    return key;
-  }
-
-  async function openDraft(key) {
-    const p = parseLineKey(key);
-    if (p) {
-      await navigateTo({ sha: p.commit, path: p.path, side: p.side, line: p.line });
-      await openEditor(key, { mode: 'new', anchor: { kind: 'line', commit: p.commit, path: p.path, side: p.side, line: p.line, start_line: null } });
-    } else if (key.startsWith('file:')) {
-      const rest = key.slice(5); const bar = rest.indexOf('|');
-      await navigateTo({ sha: rest.slice(0, bar), path: rest.slice(bar + 1) });
-      await openEditor(key, { mode: 'new', anchor: { kind: 'file', commit: rest.slice(0, bar), path: rest.slice(bar + 1), side: null, line: null, start_line: null } });
-    } else if (key.startsWith('commit:')) {
-      await navigateTo({ sha: key.slice(7) });
-      await openEditor(key, { mode: 'new', anchor: { kind: 'commit', commit: key.slice(7), path: null, side: null, line: null, start_line: null } });
-    } else if (key === 'review:') {
-      await navigateTo({ sha: 'combined' });
-      await openEditor(key, { mode: 'new', anchor: { kind: 'review' } });
-    } else if (key.startsWith('reply:') || key.startsWith('edit:')) {
-      const id = key.slice(key.indexOf(':') + 1);
-      const c = state.comments.get(id);
-      if (!c) { toast('That comment no longer exists', 'error'); delDraft(key); renderDrafts(); return; }
-      const rootId = c.parent_id || c.id;
-      await navigateTo({ threadId: rootId });
-      await openEditor(key, key.startsWith('reply:') ? { mode: 'reply', rootId } : { mode: 'edit', id, rootId });
-    }
-    if (window.innerWidth < 1280) closeDrawer();
-  }
-
-  const reviewDraftKey = () => `ccr:draft:review:${repoKey()}`;
-  function loadReviewDraft() {
-    const d = storage.json(reviewDraftKey(), null);
-    if (!d) return;
-    if (d.summary) $('#review-summary').value = d.summary;
-    const radio = $(`input[name=verdict][value="${cssEsc(d.verdict || 'comment')}"]`);
-    if (radio) radio.checked = true;
-  }
-  const saveReviewDraft = debounce(() => {
-    const verdict = ($('input[name=verdict]:checked') || {}).value || 'comment';
-    const summary = $('#review-summary').value;
-    if (!summary.trim() && verdict === 'comment') storage.del(reviewDraftKey());
-    else storage.set(reviewDraftKey(), JSON.stringify({ verdict, summary }));
-  }, 300);
-
-  function renderRounds() {
-    const host = $('#rounds-list');
-    const rounds = (state.review && state.review.rounds) || [];
-    if (!rounds.length) { host.innerHTML = '<li class="rounds-empty">No rounds submitted yet</li>'; return; }
-    host.innerHTML = rounds.slice().reverse().map((r) => `<li class="round-item" data-round="${esc(r.number)}">
-      <span>Round ${esc(r.number)}</span><span class="verdict ${esc(r.verdict)}">${esc(r.verdict.replace('_', ' '))}</span>${timeHtml(r.submitted_at)}
-      <span class="n">${esc((r.comment_ids || []).length)} comment${(r.comment_ids || []).length === 1 ? '' : 's'}</span>
-      <button type="button" class="link-btn btn-since-round" data-round="${esc(r.number)}">Changes since round ${esc(r.number)}</button>
-      ${r.summary ? `<span class="summary" title="${esc(r.summary)}">${esc(r.summary)}</span>` : ''}</li>`).join('');
-  }
-
-  function renderDrawer() {
-    updateDrawerCounts();
-    for (const t of $$('#drawer .tab')) { const on = t.dataset.tab === state.drawer.tab; t.classList.toggle('is-active', on); t.setAttribute('aria-selected', String(on)); }
-    $('#chk-this-commit').checked = state.drawer.thisCommitOnly;
-    if (state.drawer.open) renderDrawerList();
-    renderDrafts();
-    updateBadges();
-  }
-
+  /** Bundle every pending comment into a numbered round and wake `ccr wait`. Rounds carry no verdict: the UI always
+   *  sends "comment" (the API still accepts the field). */
   async function submitReview() {
-    const btn = $('#btn-submit-review');
-    if (btn.disabled) return;
-    const verdict = ($('input[name=verdict]:checked') || {}).value || 'comment';
-    const summary = $('#review-summary').value.trim();
+    if (state.submitting || !state.counts.pendingComments) return;
     const pendingBefore = state.counts.pendingComments;
-    btn.disabled = true;
+    state.submitting = true;
+    updateBadges();
     try {
-      const round = await api('/api/submit', { method: 'POST', body: { verdict, summary } });
-      storage.del(reviewDraftKey());
-      $('#review-summary').value = '';
-      $('input[name=verdict][value="comment"]').checked = true;
-      const n = (round.comment_ids || []).length || pendingBefore + (summary ? 1 : 0);
+      const round = await api('/api/submit', { method: 'POST', body: { verdict: 'comment', summary: '' } });
+      const n = (round.comment_ids || []).length || pendingBefore;
       toast(`Round ${round.number} submitted · ${n} comment${n === 1 ? '' : 's'}`, 'success');
       applyReview(await api('/api/review'));
       await loadComments(projectView());
     } catch (e) {
       toast(e.message, 'error');
-    } finally { btn.disabled = false; updateBadges(); }
+    } finally { state.submitting = false; updateBadges(); }
   }
 
   /* ==================================================================== events */
@@ -2884,33 +2573,30 @@
   function onKeyDown(e) {
     const t = e.target;
     const inInput = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    // Inside an editor Ctrl/⌘+Enter posts and Esc cancels whatever KEYBOARD_SHORTCUTS says.
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && inInput) {
       const form = t.closest('form.comment-editor');
-      if (form) { e.preventDefault(); submitEditor(form); return; }
-      if (t.id === 'review-summary') { e.preventDefault(); submitReview(); }
+      if (form) { e.preventDefault(); submitEditor(form); }
       return;
     }
+    if (e.key === 'Escape' && inInput) {
+      const form = t.closest('form.comment-editor');
+      if (form) { closeEditor(form.dataset.key); return; }
+      if (t.id === 'file-filter' && t.value) { t.value = ''; state.fileFilter = ''; applyFileFilter(); return; }
+      t.blur();
+      return;
+    }
+    if (!KEYBOARD_SHORTCUTS || inInput || e.ctrlKey || e.metaKey || e.altKey || !state.review) return;
     if (e.key === 'Escape') {
-      if (inInput) {
-        const form = t.closest('form.comment-editor');
-        if (form) { closeEditor(form.dataset.key); return; }
-        if (t.id === 'file-filter' && t.value) { t.value = ''; state.fileFilter = ''; applyFileFilter(); return; }
-        t.blur();
-        return;
-      }
-      if (!$('#help').hidden) { toggleHelp(false); return; }
-      if (state.drawer.open) { closeDrawer(); return; }
       if (state.sel) { clearSelection(); return; }
       if (state.currentThread) setCurrentThread(null);
       return;
     }
-    if (inInput || e.ctrlKey || e.metaKey || e.altKey) return;
-    if (!state.review) return;
     const actions = {
       j: () => nextFile(1), k: () => nextFile(-1), ']': () => nextCommit(1), '[': () => nextCommit(-1),
       n: () => nextThread(1), p: () => nextThread(-1), N: () => nextUnresolved(1), P: () => nextUnresolved(-1),
-      c: commentShortcut, v: toggleViewedCurrent, x: () => { const card = currentCard(); if (card) toggleCollapseCard(card); },
-      X: toggleCollapseAll, r: toggleDrawer, u: toggleViewMode, w: toggleWrap, '?': () => toggleHelp(),
+      c: commentShortcut, x: () => { const card = currentCard(); if (card) toggleCollapseCard(card); },
+      u: toggleViewMode, w: toggleWrap,
     };
     const fn = actions[e.key];
     if (fn) { e.preventDefault(); fn(); }
@@ -2922,7 +2608,6 @@
     let b;
     if ((b = hit('.btn-add-comment'))) { e.preventDefault(); const a = anchorForGutter(b); openEditor(anchorKey(a), { mode: 'new', anchor: a }); return; }
     if ((b = hit('.btn-collapse'))) { toggleCollapseCard(b.closest('.file-card')); return; }
-    if (el.matches('.viewed input[type=checkbox]')) { const card = el.closest('.file-card'); setViewed(fileForPath(card.dataset.path), el.checked); return; }
     if ((b = hit('.btn-comment-file'))) {
       const card = b.closest('.file-card');
       const a = { kind: 'file', commit: state.viewSha, path: card.dataset.path, side: null, line: null, start_line: null };
@@ -2935,15 +2620,7 @@
     if ((b = hit('.expand-btn'))) { expandGap(b.closest('.file-card'), b); return; }
     if ((b = hit('[data-copy]'))) { copyText(b.dataset.copy, 'Copied ' + (b.classList.contains('sha-copy') ? 'sha' : 'path')); return; }
     if ((b = hit('a.sha-link, a.parent-link'))) { e.preventDefault(); navigateTo({ sha: b.dataset.sha }); return; }
-    if ((b = hit('.other-views'))) { openDrawer('all', { path: b.dataset.path }); return; }
     if (hit('.btn-clear-filter')) { $('#file-filter').value = ''; state.fileFilter = ''; applyFileFilter(); return; }
-    if (hit('#btn-collapse-all')) { collapseAll(true); return; }
-    if (hit('#btn-expand-all')) { collapseAll(false); return; }
-    if (el.matches('#chk-hide-viewed')) {
-      state.hideViewed = el.checked; storage.set('ccr:hide-viewed', el.checked ? '1' : '0');
-      for (const card of $$('#files .file-card')) updateCardCollapse(card, fileForPath(card.dataset.path));
-      return;
-    }
     const comment = hit('.comment');
     const thread = hit('.thread');
     if (hit('a.tag-from') && thread) { e.preventDefault(); navigateTo({ threadId: thread.dataset.threadId, native: true }); return; }
@@ -2954,7 +2631,6 @@
     if (hit('.btn-show-resolved') && thread) { state.expandedResolved.add(thread.dataset.threadId); patchThreadById(thread.dataset.threadId); return; }
     if (hit('.btn-hide-resolved') && thread) { state.expandedResolved.delete(thread.dataset.threadId); patchThreadById(thread.dataset.threadId); return; }
     if ((b = hit('.btn-cancel-comment'))) { closeEditor(b.closest('form').dataset.key); return; }
-    if ((b = hit('.btn-discard-comment'))) { closeEditor(b.closest('form').dataset.key, { discard: true }); return; }
     if (hit('form.comment-editor')) return;
     if (thread) { if (state.currentThread !== thread.dataset.threadId) setCurrentThread(thread.dataset.threadId); return; }
     if (hit('td.code') && state.sel && window.getSelection().isCollapsed) { clearSelection(); return; }
@@ -2983,6 +2659,7 @@
     if (!form) return;
     autoGrow(ta);
     saveDraftDebounced(form.dataset.key, ta.value);
+    schedulePreview(form.dataset.key);
   }
 
   function onSidebarClick(e) {
@@ -3017,36 +2694,19 @@
       case 'btn-ws': toggleWs(); break;
       case 'btn-theme': cycleTheme(); break;
       case 'btn-reload': doReload(); break;
-      case 'btn-review': toggleDrawer(); break;
+      case 'btn-submit': submitReview(); break;
       case 'btn-copy-link': copyText(permalink(), 'Link copied (includes the session token)'); break;
-      case 'btn-help': toggleHelp(); break;
       default: break;
     }
-  }
-
-  function onDrawerClick(e) {
-    const el = e.target;
-    let b;
-    if ((b = el.closest('.tab'))) { state.drawer.tab = b.dataset.tab; renderDrawer(); return; }
-    if ((b = el.closest('.drawer-item'))) { navigateTo({ threadId: b.dataset.threadId }); return; }
-    if (el.closest('#btn-drawer-close')) { closeDrawer(); return; }
-    if (el.closest('#btn-mark-seen')) { markAllSeen(); return; }
-    if (el.closest('#btn-jump-first')) { const first = drawerRoots('unresolved')[0]; if (first) navigateTo({ threadId: first.id }); return; }
-    if (el.closest('.btn-clear-drawer-path')) { state.currentDrawerFilterPath = null; renderDrawerList(); return; }
-    if ((b = el.closest('.btn-open-draft'))) { openDraft(b.closest('.draft-row').dataset.key); return; }
-    if ((b = el.closest('.btn-discard-draft'))) { const k = b.closest('.draft-row').dataset.key; delDraft(k); if (state.openEditors.has(k)) closeEditor(k, { discard: true }); renderDrafts(); updateDraftDots(); return; }
-    if ((b = el.closest('.btn-since-round'))) { compareSinceRound(parseInt(b.dataset.round, 10)); if (window.innerWidth < 1280) closeDrawer(); }
   }
 
   function onBannerClick(e) {
     const el = e.target;
     if (el.closest('.banner-close')) { el.closest('.banner').hidden = true; return; }
-    const since = el.closest('.btn-since-round');
-    if (since) { compareSinceRound(parseInt(since.dataset.round, 10)); $('#banner-reloaded').hidden = true; return; }
     if (el.closest('.btn-exit-compare')) exitCompare();
   }
 
-  function setupResizer(handle, { min, max, cssVar, storeKey, fromRight, after }) {
+  function setupResizer(handle, { min, max, cssVar, storeKey }) {
     let startX = 0; let startW = 0;
     const app = $('#app');
     handle.addEventListener('pointerdown', (e) => {
@@ -3059,9 +2719,7 @@
     });
     handle.addEventListener('pointermove', (e) => {
       if (!handle.classList.contains('is-active')) return;
-      const w = clamp(startW + (fromRight ? startX - e.clientX : e.clientX - startX), min, max);
-      app.style.setProperty(cssVar, w + 'px');
-      if (after) after(w);
+      app.style.setProperty(cssVar, clamp(startW + e.clientX - startX, min, max) + 'px');
     });
     const end = () => {
       if (!handle.classList.contains('is-active')) return;
@@ -3088,9 +2746,7 @@
     }, { passive: true });
     document.addEventListener('pointerup', () => { for (const t of $$('table.diff.sel-old, table.diff.sel-new')) t.classList.remove('sel-old', 'sel-new'); });
     document.addEventListener('submit', (e) => {
-      const form = e.target;
-      if (form.matches('form.comment-editor')) { e.preventDefault(); submitEditor(form); }
-      else if (form.id === 'review-form') { e.preventDefault(); submitReview(); }
+      if (e.target.matches('form.comment-editor')) { e.preventDefault(); submitEditor(e.target); }
     });
     document.addEventListener('keydown', onKeyDown);
 
@@ -3105,21 +2761,10 @@
 
     $('#topbar').addEventListener('click', onTopbarClick);
     $('#banners').addEventListener('click', onBannerClick);
-    const drawer = $('#drawer');
-    drawer.addEventListener('click', onDrawerClick);
-    drawer.addEventListener('change', (e) => {
-      if (e.target.id === 'chk-this-commit') { state.drawer.thisCommitOnly = e.target.checked; renderDrawerList(); }
-      if (e.target.name === 'verdict') { saveReviewDraft(); updateBadges(); }
-    });
-    $('#review-summary').addEventListener('input', () => { saveReviewDraft(); updateBadges(); });
-    $('#drawer-backdrop').addEventListener('click', closeDrawer);
-    $('#help').addEventListener('click', (e) => { if (e.target === e.currentTarget || e.target.closest('#btn-help-close')) toggleHelp(false); });
 
-    setupResizer($('#sidebar-resizer'), { min: 200, max: 480, cssVar: '--sidebar-w', storeKey: 'ccr:sidebar-w', fromRight: false });
-    setupResizer($('#drawer-resizer'), { min: 320, max: 720, cssVar: '--drawer-w', storeKey: 'ccr:drawer-w', fromRight: true, after: applyDrawerLayout });
+    setupResizer($('#sidebar-resizer'), { min: 200, max: 480, cssVar: '--sidebar-w', storeKey: 'ccr:sidebar-w' });
 
     window.addEventListener('hashchange', () => { navigateFromHash().catch((e) => toast(e.message, 'error')); });
-    window.addEventListener('resize', applyDrawerLayout);
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') { if (state.loadedOnce) resync().catch(() => {}); startPolling(); } else stopPolling();
     });

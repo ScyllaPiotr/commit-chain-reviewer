@@ -24,22 +24,20 @@
         <span class="commit-count" id="commit-count"></span>
       </div>
       <div class="topbar-actions">
-        <button id="btn-viewmode" class="tb-btn" type="button" aria-label="Toggle unified or split view" title="Toggle view mode (u)">Unified</button>
-        <button id="btn-wrap" class="tb-btn" type="button" aria-label="Toggle line wrapping" aria-pressed="true" title="Toggle wrap (w)">Wrap</button>
+        <button id="btn-viewmode" class="tb-btn" type="button" aria-label="Toggle unified or split view" title="Toggle view mode">Unified</button>
+        <button id="btn-wrap" class="tb-btn" type="button" aria-label="Toggle line wrapping" aria-pressed="true" title="Toggle wrap">Wrap</button>
         <button id="btn-ws" class="tb-btn" type="button" aria-label="Hide whitespace changes" aria-pressed="false" title="Hide whitespace changes">Hide ws</button>
         <button id="btn-theme" class="tb-btn" type="button" aria-label="Cycle theme" title="Theme: auto → light → dark">Auto</button>
         <button id="btn-reload" class="tb-btn icon-btn" type="button" aria-label="Reload the commit chain" title="Reload chain">
           <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>
         </button>
-        <button id="btn-review" class="tb-btn btn-review" type="button" aria-label="Open the review drawer" title="Review drawer (r)">
-          <span class="label">Review</span>
-          <span class="badge badge-pending" title="Pending comments">0</span>
-          <span class="badge badge-unresolved" title="Unresolved threads">0</span>
+        <button id="btn-submit" class="tb-btn btn-submit" type="button" aria-label="Submit the pending comments as a review round" title="Nothing to submit — leave a comment first" disabled>
+          <span class="label">Submit</span>
+          <span class="badge badge-pending is-zero" title="Pending comments">0</span>
         </button>
         <button id="btn-copy-link" class="tb-btn icon-btn" type="button" aria-label="Copy a link to this view (includes the session token)" title="Copy link">
           <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="m7.775 3.275 1.25-1.25a3.5 3.5 0 1 1 4.95 4.95l-2.5 2.5a3.5 3.5 0 0 1-4.95 0 .751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018 1.998 1.998 0 0 0 2.83 0l2.5-2.5a2.002 2.002 0 0 0-2.83-2.83l-1.25 1.25a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042Zm-4.69 9.64a1.998 1.998 0 0 0 2.83 0l1.25-1.25a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042l-1.25 1.25a3.5 3.5 0 1 1-4.95-4.95l2.5-2.5a3.5 3.5 0 0 1 4.95 0 .751.751 0 0 1-.018 1.042.751.751 0 0 1-1.042.018 1.998 1.998 0 0 0-2.83 0l-2.5 2.5a1.998 1.998 0 0 0 0 2.83Z"/></svg>
         </button>
-        <button id="btn-help" class="tb-btn icon-btn" type="button" aria-label="Keyboard shortcuts and help" title="Help (?)">?</button>
       </div>
     </header>
     <aside id="sidebar" aria-label="Commits and files">
@@ -64,7 +62,6 @@
       <div id="banner-disconnected" class="banner banner-warn" hidden><span class="banner-text">Disconnected — retrying…</span></div>
       <div id="banner-reloaded" class="banner banner-info" hidden>
         <span class="banner-text"></span>
-        <button type="button" class="link-btn btn-since-round" hidden></button>
         <button type="button" class="banner-close" aria-label="Dismiss">×</button>
       </div>
       <div id="banner-compare" class="banner banner-info" hidden>
@@ -75,90 +72,14 @@
     <main id="main" tabindex="-1">
       <div id="main-inner">
         <section id="commit-header" class="commit-header card" aria-label="Commit"></section>
-        <div id="files-toolbar" class="files-toolbar" hidden>
-          <div class="progress-wrap">
-            <span id="files-progress" class="files-progress"></span>
-            <span class="progress-bar" aria-hidden="true"><span id="progress-fill" class="progress-fill"></span></span>
-          </div>
-          <span id="filter-status" class="filter-status" hidden></span>
-          <div class="toolbar-actions">
-            <button id="btn-collapse-all" class="sm-btn" type="button" aria-label="Collapse all files" title="Collapse all (Shift+X)">Collapse all</button>
-            <button id="btn-expand-all" class="sm-btn" type="button" aria-label="Expand all files" title="Expand all (Shift+X)">Expand all</button>
-            <label class="chk"><input id="chk-hide-viewed" type="checkbox"> Hide viewed</label>
-          </div>
-        </div>
+        <div id="filter-status" class="filter-status" hidden></div>
         <div id="files" class="files" aria-label="Changed files"></div>
       </div>
     </main>
     </div>
-    <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
-    <aside id="drawer" class="drawer" aria-label="Review" aria-hidden="true">
-      <div id="drawer-resizer" class="resizer resizer-v" role="separator" aria-orientation="vertical" aria-label="Resize drawer" tabindex="-1"></div>
-      <div class="drawer-head">
-        <h2 class="drawer-title">Review</h2>
-        <button id="btn-mark-seen" class="sm-btn" type="button" aria-label="Mark all comments as seen">Mark all seen</button>
-        <button id="btn-drawer-close" class="icon-btn" type="button" aria-label="Close drawer">×</button>
-      </div>
-      <div class="drawer-tabs" role="tablist">
-        <button class="tab" data-tab="pending" role="tab" type="button">Pending <span class="count">0</span></button>
-        <button class="tab" data-tab="new" role="tab" type="button">New <span class="count">0</span></button>
-        <button class="tab" data-tab="unresolved" role="tab" type="button">Unresolved <span class="count">0</span></button>
-        <button class="tab" data-tab="all" role="tab" type="button">All <span class="count">0</span></button>
-      </div>
-      <div class="drawer-options">
-        <label class="chk"><input id="chk-this-commit" type="checkbox"> This commit only</label>
-        <button id="btn-jump-first" class="link-btn" type="button" hidden>Jump to first</button>
-      </div>
-      <div id="drawer-list" class="drawer-list" role="list"></div>
-      <div id="drafts-list" class="drafts-list"></div>
-      <form id="review-form" class="review-form" autocomplete="off">
-        <fieldset class="verdicts">
-          <legend>Verdict</legend>
-          <label><input type="radio" name="verdict" value="comment" checked> Comment</label>
-          <label><input type="radio" name="verdict" value="approve"> Approve</label>
-          <label><input type="radio" name="verdict" value="request_changes"> Request changes</label>
-        </fieldset>
-        <textarea id="review-summary" rows="3" placeholder="Summary (optional, Markdown)" aria-label="Review summary"></textarea>
-        <p class="hint">Pending comments are already readable by Claude; Submit bundles them into a numbered round, records your verdict and wakes <code>ccr wait</code>.</p>
-        <button id="btn-submit-review" class="primary-btn" type="submit">Submit review (0)</button>
-      </form>
-      <section class="rounds" aria-label="Rounds">
-        <h3 class="drawer-subtitle">Rounds</h3>
-        <ol id="rounds-list" class="rounds-list"></ol>
-      </section>
-    </aside>
   </div>
   <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
   <div id="tooltip" role="tooltip" hidden></div>
-  <div id="help" class="overlay" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" hidden>
-    <div class="overlay-card">
-      <div class="overlay-head">
-        <h2>Keyboard shortcuts</h2>
-        <button id="btn-help-close" class="icon-btn" type="button" aria-label="Close help">×</button>
-      </div>
-      <div class="help-grid">
-        <dl>
-          <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>next / previous file</dd>
-          <dt><kbd>]</kbd> / <kbd>[</kbd></dt><dd>next / previous commit</dd>
-          <dt><kbd>n</kbd> / <kbd>p</kbd></dt><dd>next / previous thread in this view</dd>
-          <dt><kbd>Shift</kbd>+<kbd>N</kbd> / <kbd>P</kbd></dt><dd>next / previous unresolved thread across the chain</dd>
-          <dt><kbd>c</kbd></dt><dd>comment on the selected line or range (reply when a thread is focused)</dd>
-          <dt><kbd>v</kbd></dt><dd>toggle Viewed on the current file</dd>
-          <dt><kbd>x</kbd> / <kbd>Shift</kbd>+<kbd>X</kbd></dt><dd>collapse / expand the current file / all files</dd>
-        </dl>
-        <dl>
-          <dt><kbd>r</kbd></dt><dd>open / close the review drawer</dd>
-          <dt><kbd>u</kbd></dt><dd>toggle Unified / Split</dd>
-          <dt><kbd>w</kbd></dt><dd>toggle line wrapping</dd>
-          <dt><kbd>?</kbd></dt><dd>this help</dd>
-          <dt><kbd>Esc</kbd></dt><dd>cancel the focused editor (draft kept), else close help → drawer → selection</dd>
-          <dt><kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>Enter</kbd></dt><dd>post the focused comment</dd>
-          <dt><kbd>Shift</kbd>+click</dt><dd>commits: compare a range · line numbers: extend the selection</dd>
-        </dl>
-      </div>
-      <p class="help-foot">Pending comments are visible to Claude immediately (<code>ccr comments</code>). <strong>Submit review</strong> bundles them into a round and wakes <code>ccr wait</code>.</p>
-    </div>
-  </div>
   <div id="notice-token" class="notice" hidden>
     <div class="notice-card">
       <h1>No valid session token for this tab</h1>

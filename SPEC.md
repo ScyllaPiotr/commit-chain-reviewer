@@ -3,7 +3,7 @@
 `ccr` is a local, zero-dependency code-review tool designed for agentic workflows.
 An agent (Claude Code) prepares a chain of commits, starts `ccr`, and hands the user a URL.
 The user reviews in a GitHub-like browser UI: a commit chain, per-commit grouped diffs, inline
-line/file/commit comments, and a "Submit review" round. The agent then reads *all* comments
+line/file/commit comments, and a **Submit** round. The agent then reads *all* comments
 in one call (`ccr comments` / `ccr wait`), fixes things, replies and resolves threads via the CLI,
 reloads the diff, and the loop repeats. No GitHub detour.
 
@@ -217,9 +217,9 @@ tree file, `old` → `HEAD` at extraction.
 
 ```jsonc
 {"number": 1, "submitted_at": "…Z",
- "verdict": "request_changes",      // "approve" | "request_changes" | "comment"
+ "verdict": "request_changes",      // "approve" | "request_changes" | "comment" — the UI always sends "comment" (rounds carry no verdict)
  "summary": "Overall looks good, two nits.",   // may be ""
- "base": "<sha|null>", "head": "<sha>", "commit_shas": ["…"],   // the chain at submit time (for "changes since round N")
+ "base": "<sha|null>", "head": "<sha>", "commit_shas": ["…"],   // the chain at submit time (the sidebar's "•" marks commits added since)
  "comment_ids": ["k3f9a2", "…"]}    // computed on read: comments with round == number (roots and replies, incl. the summary comment)
 ```
 
@@ -430,7 +430,7 @@ For `kind=line`, `snippet` = the `s` text of the anchored line(s) on that side i
 ### 4.3 Outdated
 
 `outdated = anchor.commit not in {listed shas} ∪ {"combined"} ∪ ({"worktree"} if enabled)`. Outdated comments are kept,
-returned by the API with `outdated: true`, listed by `ccr comments`, and shown in the UI drawer only.
+returned by the API with `outdated: true`, listed by `ccr comments`; the UI only counts them in the *All changes* header (7.2).
 
 ### 4.4 Re-anchoring on reload
 
@@ -551,7 +551,7 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
 
 * `ccr start [--range SPEC | -n N] [--worktree | --no-worktree] [--first-parent] [--port N] [--db PATH] [--log FILE] [--open] [--idle-timeout S] [--cover FILE]`
   `--cover FILE` sets the cover letter (also on reuse). `ccr cover (TEXT | --file F | -)` sets/replaces it on a running
-  review. The cover letter is shown above "All changes" in the UI with a *Comment on the whole change* button
+  review. The cover letter is shown above "All changes" in the UI with a *Comment on the whole series* button
   (anchor `kind=review`), and `ccr export --md` prints it under `## Cover letter`.
   1. Take `<key>.lock` (`O_CREAT|O_EXCL`; ignore if older than 30 s) so concurrent starts serialise.
   2. If a live session exists: reload it with the given options (unchanged ones kept; no options → reload the pinned
@@ -675,8 +675,8 @@ Snippet block: `--context N` (default 3) rows before/after from the cached diff,
 Single page, vanilla JS, no framework, one `app.js` (≈ 2000–3000 lines is expected). Must stay fast on a diff with
 100 files / 10k lines. Everything is event-delegated (one `click`, one `pointerdown/move/up`, one `pointerover`, one
 `input` listener on `#main`; one `keydown` on `document`; `hashchange`/`popstate`). File bodies are built as one
-HTML string (all dynamic text through `esc()`) and assigned once with `innerHTML`; threads, the header card and the
-drawer are patched piecemeal. No `style=` attributes in markup (CSP); computed styles use CSSOM properties or classes
+HTML string (all dynamic text through `esc()`) and assigned once with `innerHTML`; threads and the header card are
+patched piecemeal. No `style=` attributes in markup (CSP); computed styles use CSSOM properties or classes
 (avatar colours = 8 classes `av-0…av-7` chosen by name hash).
 
 ### 7.1 Boot & token
@@ -696,30 +696,30 @@ tabs/browsers.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────────────┐
-│ ⎇ repo · branch   main..HEAD · 7 commits · +worktree   [Unified] [Wrap] [Hide ws] [☾] [⟳] [Review ●3 · 4 unresolved] [?] │
+│ ⎇ repo · branch   main..HEAD · 7 commits · +worktree   [Unified] [Wrap] [Hide ws] [☾] [⟳] [Submit ●3] │
 ├────────────┬─────────────────────────────────────────────────────────────────────────────────┤
 │ COMMITS    │ Header card: subject · body · author · date · sha (copy) · +40 −12  [💬 comment]  │
-│ ● All      │ 12 / 40 files viewed ▓▓▓░░  [Collapse all] [Expand all] [☐ Hide viewed]            │
-│ ○ 9fceb02 •│ ┌ src/fetcher.py  M  +10 −2  · 2 threads in other views   [☐ Viewed] [💬] [▾] ┐ │
-│ ○ 1a2b3c4  │ │ @@ -10,7 +10,9 @@ def foo(self):                       [⤒ 20] [expand all] [⤓ 20]│
-│ ○ …        │ │ 10  10     x = 1                                                           │ │
-│ ○ Worktree │ │ 11        - y = 2                                                    [+]   │ │
-│────────────│ │     11    + y = 3                                                          │ │
-│ FILES  [🔍]│ │ ┌ thread ─────────────────────────────────────────────────────────────┐    │ │
-│ ▾ src/ccr  │ │ │ U user · 2 min ago · Pending          [Edit][Delete][Reply][Resolve]│    │ │
-│   fetcher  │ │ │ Why not use the existing backoff helper?                            │    │ │
-│   other    │ │ │ C Claude · 1 min ago · New                                          │    │ │
-│ ▾ tests    │ │ │ Good catch — switched to `backoff.retry()` in 1a2b3c4.              │    │ │
+│ ● All      │ ┌ src/fetcher.py  M  +10 −2                                          [💬] [▾] ┐ │
+│ ○ 9fceb02 •│ │ @@ -10,7 +10,9 @@ def foo(self):                       [⤒ 20] [expand all] [⤓ 20]│
+│ ○ 1a2b3c4  │ │ 10  10     x = 1                                                           │ │
+│ ○ …        │ │ 11        - y = 2                                                    [+]   │ │
+│ ○ Worktree │ │     11    + y = 3                                                          │ │
+│────────────│ │ ┌ thread ─────────────────────────────────────────────────────────────┐    │ │
+│ FILES  [🔍]│ │ │ U user · 2 min ago · Pending          [Edit][Delete][Reply][Resolve]│    │ │
+│ ▾ src/ccr  │ │ │ Why not use the existing backoff helper?                            │    │ │
+│   fetcher  │ │ │ C Claude · 1 min ago · New                                          │    │ │
+│   other    │ │ │ Good catch — switched to `backoff.retry()` in 1a2b3c4.              │    │ │
+│ ▾ tests    │ │ │ [Reply] [Resolve]                                                   │    │ │
 └────────────┴─┴─┴────────────────────────────────────────────────────────────────────────────┘
-                                                        [Review drawer: right, pushes main on ≥1280px]
 ```
 
 **Top bar** (`--top-h`): repo name + branch, range spec (+ note tooltip), commit count; `#btn-viewmode` (label = current
-mode), `#btn-wrap` (key `w`), `#btn-ws` (Hide whitespace, `?ws=ignore`, persisted), `#btn-theme` (auto→light→dark),
+mode), `#btn-wrap`, `#btn-ws` (Hide whitespace, `?ws=ignore`, persisted), `#btn-theme` (auto→light→dark),
 `#btn-reload` (POST `/api/reload` — no confirm; afterwards a dismissible `#banner-reloaded` *"Chain reloaded: +a −r
-commits, K comments remapped, J now outdated — [Show changes since round N]"*), `#btn-review` with two badges
-(`.badge-pending` = pending **comments**, `.badge-unresolved` = unresolved threads), `#btn-copy-link`, `#btn-help` (`?`),
-`#btn-sidebar`.
+commits, K comments remapped, J now outdated"*), `#btn-submit` (bold **Submit**, green filled with white text, darker on
+hover; one `.badge-pending` badge with the pending-**comment** count, hidden at 0; disabled and muted while nothing is
+pending or a submit is in flight; click → POST `/api/submit` `{verdict: "comment", summary: ""}` — rounds carry no
+verdict — then toast *"Round N submitted · K comments"*, errors as a red toast), `#btn-copy-link`, `#btn-sidebar`.
 
 **Sidebar** (resizable 200–480px, persisted; collapsible):
 
@@ -730,11 +730,10 @@ commits, K comments remapped, J now outdated — [Show changes since round N]"*)
   `#tooltip[role=tooltip]` with full subject + body (`pre-wrap`), author, absolute date, sha. **Click** → select
   (`history.pushState` to `#<sha>`). **Shift+click** → contiguous range of *real* commits (pseudo items ignored with a
   toast) → compare view (`base = parents[0]` of the first, or omitted for a root; `#compare:<a10>..<b10>`); any single
-  click or `]`/`[` exits compare mode. Drawer rounds list offers **"Changes since round N"** → compare `round.head..range.head`
-  (toast *"previous head no longer available"* on 400).
+  click or `]`/`[` exits compare mode.
 * *File tree* for the selected commit: path compression (a directory with exactly one child directory merges with
   it, label `src/ccr/static`); files never merge; all folders start expanded; collapse state persisted
-  (`ccr:folders:<repo>`); rows show status letter (A green, M yellow, D red, R blue, T purple), `+N −M`, viewed ✓, thread
+  (`ccr:folders:<repo>`); rows show status letter (A green, M yellow, D red, R blue, T purple), `+N −M`, thread
   count. `#file-filter`: case-insensitive substring on the full path; while non-empty the tree is flat (matches only)
   **and** non-matching file cards are hidden in the main pane (`N of 40 files — clear`; zero → *"No files match"*).
   Click → `navigateTo({sha, path})`.
@@ -744,15 +743,13 @@ commits, K comments remapped, J now outdated — [Show changes since round N]"*)
 * *Header card*: subject (h1), body (`pre-wrap`), author + relative date (title = absolute), sha click-to-copy,
   parents (merges), stats, `#btn-comment-commit`. Pseudo-commits explain what they are (range / "vs HEAD").
   The **All changes** header additionally shows the cover letter (`#cover-letter`, safe Markdown; *"No cover letter"*
-  hint when empty) and `#btn-comment-review` (*Comment on the whole change*, anchor `kind=review`); review-level
-  threads render in `#commit-header .thread-block[data-key-host=review]` under the cover letter (and in the drawer). Empty
+  hint when empty), `#btn-comment-review` (*Comment on the whole series*, anchor `kind=review`) and a muted `#outdated-note`
+  (*"N comments are anchored to commits that left the series (see `ccr comments --outdated`)"*, hidden at 0); review-level
+  threads render in `#commit-header .thread-block[data-key-host=review]` under the cover letter. Empty
   commit → *"This commit has no file changes"*. Compare view → `#banner-compare` *"Compare view — comments are disabled"*.
-* *Files toolbar*: `12 / 40 files viewed` progress, Collapse all / Expand all (`Shift+X`), Hide viewed.
 * *File card* (`.file-card[data-path]`): sticky `.file-header` (`position: sticky; top: 0` inside `#main`) with path
-  (renames `old → new`), status badge, mode-change note, `+N −M`, secondary count *"N threads in other views"*
-  (click → drawer filtered by path), **Viewed** checkbox (`collapsed = viewed || manuallyCollapsed`; chevron toggles
-  manual collapse only), `.btn-comment-file`, `.btn-collapse`, copy path. Viewed key:
-  `ccr:viewed:<repo.path>|<path>|<old_blob>..<new_blob>` (auto-unviews when the diff changes; pruned after 30 days).
+  (renames `old → new`), status badge, mode-change note, `+N −M`, thread count, `.btn-comment-file`, `.btn-collapse`
+  (chevron; `state.collapsedFiles`), copy path.
   Binary → *"Binary file not shown"*; `too_large` → *"Large diff hidden (N lines) — [Load anyway]"* (fetches
   `/api/commits/{sha}/file?path=`; spinner; disabled while loading); no hunks (mode-only / `ws_only`) → note.
 * *Diff body*: created synchronously for every file with `min-height = min(2000px, (line_count + hunk_count) × --row-h)`
@@ -821,24 +818,26 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
 * **Threads** attach to a row by anchor key (7.8): for every row attach threads keyed `(new, n)` if `n` and `(old, o)` if
   `o` (old-side first). Ranges render under the **end** line; hovering the thread adds `in-range` to rows start..end.
   Threads whose row does not exist in the rendered table (drifted combined/worktree anchors, `ws_only`, too_large) go
-  to `state.orphans` and are drawer-only with *"anchor not found in current diff"*. Threads render in every view the
+  to `state.orphans` and are not rendered (`ccr comments` lists them). Threads render in every view the
   server projects them into: the UI always fetches `GET /api/comments?project=<selected view>` (5.2; refetched on every
   view change, compare views have no comments) and keys `threadsByKey`, thread rows and the gutter attachment by each
-  root's `view_anchor` (falling back to `anchor`); a root whose `view_anchor` is `null` in the current view is drawer-only
+  root's `view_anchor` (falling back to `anchor`); a root whose `view_anchor` is `null` in the current view is not rendered
   there (not an orphan); `projected` roots carry a `.tag-from` tag (*"from &lt;short sha&gt;"*, *"from All changes"*,
   *"from uncommitted changes"*) that opens the thread in the view it was written in. Replies keep posting `parent_id`
   (the server copies the root's native anchor).
 
 ### 7.4 Comments, editors, threads
 
-* **Editor** (`tr.editor` / `div.editor-block`): `form.comment-editor[data-key]` with auto-growing textarea, Markdown
-  hint, **Add comment** (Ctrl/⌘+Enter), **Cancel** (Esc; keeps the draft), **Discard** (deletes the draft). While a
+* **Editor** (`tr.editor` / `div.editor-block`): `form.comment-editor[data-key]` with auto-growing textarea, a live
+  preview `div.md-preview.md` below it (the same `renderMarkdown` as comment bodies, updated on `input` debounced 150 ms,
+  hidden while the text is empty), Markdown hint, **Add comment** (Ctrl/⌘+Enter), **Cancel** (Esc; keeps the draft — an
+  emptied editor drops it). While a
   request is in flight the buttons are disabled; on 201/200 insert the returned Comment into state, remove the draft,
   close the editor, patch only that thread; on error keep the editor open and toast the server message. No temporary ids.
   `state.openEditors: Map<key, {mode: 'new'|'reply'|'edit', id?}>` — every re-render (view toggle, expansion,
   reconciliation) recreates editor rows from this map, so editors are never lost. Drafts `localStorage['ccr:draft:'+k]`
   (k = anchor key | `reply:<rootId>` | `edit:<id>`), debounced 300 ms, deleted on success or when cancelled empty; a
-  `[+]`/Reply control whose key has a draft shows a dot. Verdict/summary draft: `ccr:draft:review:<repo>`.
+  `[+]`/Reply control whose key has a draft shows a dot.
 * **Thread** (`.thread[data-thread-id]`): comments with avatar (U / C robot; distinct colours), author, relative time
   (title = absolute, using server `now` offset), tags: `Pending` (title *"Not yet part of a submitted round — Claude can
   already read it with ccr comments"*), `R<n>`, `edited` (when `updated_at > created_at`), `moved`, `New` (7.5). Body =
@@ -849,8 +848,7 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
   root with replies says *"This also deletes N replies"* and sends `?cascade=1`), Reply, Resolve/Unresolve (root).
   Resolved threads collapse to *"✓ Resolved · N comments — Show"* unless they contain unseen comments.
 * **Counts** come from one `deriveCounts()` pass over `state.comments` after every `applyComments`: per commit and
-  per `commit|path` `{threads, pending, unresolved}` over non-outdated roots; the Review badge and `Submit review (N)`
-  count pending **comments**.
+  per `commit|path` `{threads, pending, unresolved}` over non-outdated roots; the Submit badge counts pending **comments**.
 
 ### 7.5 Live updates, seen-tracking, reconciliation
 
@@ -864,15 +862,15 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
 * `applyComments(list)` reconciles by id: per anchor key compute a signature (member ids + `updated_at` + `resolved` +
   `state`); re-render only threads whose signature changed; never touch `tr.editor` or textareas; remove comments absent
   from the list. New `author === 'claude'` ids seen in a refetch (not the initial load) → toast *"Claude replied to N
-  threads (k resolved) — Show"* → drawer **New** tab.
+  threads (k resolved) — Show"* → `navigateTo` the first such thread.
 * **Seen**: `localStorage['ccr:seen:<repo>']` = max `created_at` of comments that have been rendered while visible
-  (IntersectionObserver on `.thread` elements, 1 s) or on "Mark all seen". Newer comments get a `New` dot (comment,
+  (IntersectionObserver on `.thread` elements, 1 s). Newer comments get a `New` dot (comment,
   collapsed thread line, file header count, sidebar badge). Resolved threads with unseen comments render expanded.
 * Disconnected: `#banner-disconnected` *"Disconnected — retrying…"*; after 30 s *"Server not responding — it may have
   been stopped (ccr status)"*; on reconnect refetch and toast *"Reconnected"*. 401 → 7.1 notice. `/api/reload` 400 →
   keep the view, red toast with the git message.
 
-### 7.6 Navigation, hash, keyboard, drawer
+### 7.6 Navigation, hash, keyboard, submit
 
 * **Hash grammar** (single source of truth for the selection): `#<sha>` | `#<sha>/<encodeURIComponent(path)>` |
   `#<sha>/<path>:<o|n><line>[-<line>]` | `#compare:<a10>..<b10>`; `<sha>` = full sha / `combined` / `worktree`. Parse with
@@ -880,29 +878,25 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
   use `history.pushState`; line clicks `replaceState`; `popstate`/`hashchange` → `navigateTo`. Back/Forward move
   between commits.
 * `navigateTo({sha, path, side, line, endLine, threadId})`: select the commit if needed (await diff); `ensureRendered`;
-  expand a viewed/collapsed file without unchecking viewed; expand a collapsed resolved thread; if the row is missing
-  try expanding context to include it (else drawer-only); `scrollToRow` (`main.scrollTop = rowTop − headerOffsets −
+  expand a collapsed file; expand a collapsed resolved thread; if the row is missing
+  try expanding context to include it (else toast); `scrollToRow` (`main.scrollTop = rowTop − headerOffsets −
   120`; instant under `prefers-reduced-motion`); flash 1.5 s. All scroll targets have `scroll-margin-top`.
 * **Commit switch** remembers per sha `scrollTop` + current file; when the target commit contains the current file
   (by `path`/`old_path`) scroll to it and flash its header; else restore that commit's `scrollTop`. Selected item
   scrolled into view in the sidebar. `]`/`[` at the ends → toast *"First/Last commit"*.
-* **Keyboard** (ignored when focus is in input/textarea/contenteditable): `j`/`k` next/prev file header (`state.currentFile`
-  maintained by a throttled scroll handler), `]`/`[` commits, `n`/`p` next/prev thread in the current view (document
-  order, expanding resolved, skipping orphans; the current thread gets a focus outline and `c` opens Reply on it),
-  `Shift+N`/`Shift+P` next/prev **unresolved** thread across the chain (switching commit), `c` comment on the selected
-  line/range, `v` toggle viewed, `x` collapse/expand current file, `Shift+X` all, `r` drawer, `u` view mode, `w` wrap,
-  `?` help, `Esc` = editor cancel (when focused) else topmost of help > drawer > selection. Ctrl/⌘+Enter submits the
-  focused editor. Ends → toast *"No more threads"*.
-* **Drawer** (`#drawer`, 420px default, drag-resizable 320–720, persisted; pushes `#main` via `padding-right` on
-  viewports ≥ 1280px, overlays with a backdrop below and auto-closes on navigation): tabs `Pending (N)` / `New (N)` /
-  `Unresolved (N)` / `All`, toggle *This commit only*; threads grouped by commit (chain order), then path, line; an
-  `Outdated` group last; each row: anchor (short sha · path:side+line), 1-line snippet, first 60 body chars, author
-  badges, tags (resolved/outdated/moved/orphan). Click → `navigateTo`. `Drafts (N)` line with Open/Discard. Unresolved
-  tab has *Jump to first*. Bottom: verdict radios (Comment / Approve / Request changes), `#review-summary`, explanation
-  *"Pending comments are already readable by Claude; Submit bundles them into a numbered round, records your verdict
-  and wakes `ccr wait`."*, `#btn-submit-review` (`Submit review (N)`; disabled when N = 0 and verdict ≠ approve). After
-  submit: toast *"Round N submitted · N comments"*; `#rounds-list` shows verdict, time, count, summary and *"Changes since
-  round N"*.
+* **Keyboard**: Ctrl/⌘+Enter posts and `Esc` cancels the focused editor (draft kept) — always on. Every single-key
+  shortcut is **off by default** behind `const KEYBOARD_SHORTCUTS = false` at the top of `app.js` (the handlers stay in
+  `onKeyDown`); set to `true`, and with focus outside input/textarea/contenteditable: `j`/`k` next/prev file header
+  (`state.currentFile` maintained by a throttled scroll handler), `]`/`[` commits, `n`/`p` next/prev thread in the current
+  view (document order, expanding resolved, skipping orphans; the current thread gets a focus outline and `c` opens Reply
+  on it), `Shift+N`/`Shift+P` next/prev **unresolved** thread across the chain (switching commit), `c` comment on the
+  selected line/range, `x` collapse/expand current file, `u` view mode, `w` wrap, `Esc` clears the selection, then the
+  thread focus. Ends → toast *"No more threads"*.
+* **Submit** (`#btn-submit`, top bar): POST `/api/submit` `{verdict: "comment", summary: ""}` bundles every pending comment
+  into the next numbered round — a round is simply the batch of comments submitted together; rounds carry no verdict —
+  and wakes `ccr wait`; success → toast *"Round N submitted · K comments"* and a refetch of the review and comments,
+  error → red toast. Disabled (muted) while nothing is pending or a submit is in flight. Pending comments are already
+  readable by Claude before that (`ccr comments`).
 
 ### 7.7 Theme tokens
 
@@ -917,17 +911,16 @@ resembles GitHub dark-dimmed. `prefers-reduced-motion` disables animations. Focu
 
 | Element | Selector |
 |---|---|
-| Regions | `#app`, `#topbar`, `#sidebar`, `#main`, `#drawer`, `#toasts`, `#help`, `#tooltip` |
-| Topbar | `#btn-viewmode` (text = current mode "Unified"/"Split"), `#btn-wrap`, `#btn-ws`, `#btn-theme`, `#btn-reload`, `#btn-review` (`.badge-pending`, `.badge-unresolved`), `#btn-copy-link`, `#btn-help`, `#btn-sidebar` |
+| Regions | `#app`, `#topbar`, `#sidebar`, `#main`, `#toasts`, `#tooltip` |
+| Topbar | `#btn-viewmode` (text = current mode "Unified"/"Split"), `#btn-wrap`, `#btn-ws`, `#btn-theme`, `#btn-reload`, `#btn-submit` (`.label`, `.badge-pending`; `:disabled` while nothing is pending), `#btn-copy-link`, `#btn-sidebar` |
 | Commit list | `#commit-list .commit-item[data-sha]` (`.is-selected`, `.is-range`, `.is-new`, `.commit-badge`) |
-| File tree | `#file-tree .tree-folder[data-dir]`, `.tree-file[data-path]`, `#file-filter`, `#files-progress`, `#btn-collapse-all`, `#btn-expand-all`, `#chk-hide-viewed` |
-| Header | `#commit-header .subject`, `.sha-copy`, `#btn-comment-commit`, `#commit-header .thread-block[data-key-host="commit"]`; combined view only: `#cover-letter` (`.cover-body` rendered Markdown, or `.is-empty` with the *"No cover letter"* hint), `#btn-comment-review`, `#commit-header .thread-block[data-key-host="review"]` |
-| File card | `.file-card[data-path][data-rendered="0|1"]` → `.file-header` (`.file-path`, `.status-badge`, `.viewed input[type=checkbox]`, `.btn-comment-file`, `.btn-collapse`, `.other-views`), `.diff-body`, `.file-card.is-collapsed` |
+| File tree | `#file-tree .tree-folder[data-dir]`, `.tree-file[data-path]`, `#file-filter`, `#filter-status` (main pane: *"N of M files — clear"*) |
+| Header | `#commit-header .subject`, `.sha-copy`, `#btn-comment-commit`, `#commit-header .thread-block[data-key-host="commit"]`; combined view only: `#outdated-note` (hidden at 0), `#cover-letter` (`.cover-body` rendered Markdown, or `.is-empty` with the *"No cover letter"* hint), `#btn-comment-review`, `#commit-header .thread-block[data-key-host="review"]` |
+| File card | `.file-card[data-path][data-rendered="0|1"]` → `.file-header` (`.file-path`, `.status-badge`, `.btn-comment-file`, `.btn-collapse`), `.diff-body`, `.file-card.is-collapsed` |
 | Diff table | `table.diff[data-view]`; `tr.hunk` (`.btn-expand-up`, `.btn-expand-down`, `.btn-expand-all`); `tr.line.add|del|ctx[data-o][data-n][data-x]` (`.is-selected`, `.in-range`); `td.num.old|new[data-side][data-line]`, `td.num.empty`, `td.marker`, `td.code.old|new`, `td.code.empty`, `span.wd`, `span.cr` |
 | Gutter | `button.btn-add-comment[data-side][data-line]` (shared, moved into the hovered `td.num`) |
-| Editor | `tr.editor` / `div.editor-block` → `form.comment-editor[data-key]` (`textarea`, `.btn-submit-comment`, `.btn-cancel-comment`, `.btn-discard-comment`) |
+| Editor | `tr.editor` / `div.editor-block` → `form.comment-editor[data-key]` (`textarea`, `.md-preview`, `.btn-submit-comment`, `.btn-cancel-comment`) |
 | Thread | `tr.threads[data-key]` / `div.thread-block` → `.thread[data-thread-id]` (`.is-resolved`, `.has-new`) → `.comment[data-id][data-author]` (`.comment-meta` `.author .time .tag-pending .tag-round .tag-edited .tag-new .tag-moved`, `a.tag-from[data-sha]` on a projected root, `.comment-body`, `.comment-actions` `.act-edit .act-delete .act-reply .act-resolve`), `button.btn-reply`, `button.btn-show-resolved` |
-| Drawer | `#drawer.is-open`, `.tab[data-tab="pending|new|unresolved|all"]`, `#chk-this-commit`, `#drawer-list .drawer-item[data-thread-id]`, `#drafts-list`, `input[name=verdict][value=…]`, `#review-summary`, `#btn-submit-review`, `#rounds-list .round-item[data-round]` (`.btn-since-round`) |
 | Banners/toasts | `#banner-disconnected`, `#banner-compare`, `#banner-reloaded`, `#toasts .toast.info|error|success`, `#notice-token` |
 | Readiness | `body[data-ready="1"]` after the first full render; `body[data-loading="1"]` while the server reports `loading` |
 
@@ -941,7 +934,7 @@ state = { token, review, generation, version, startedAt, nowOffset, selectedSha,
   viewMode, wrap, wsIgnore, theme, diffs: Map<sha, CommitDiff>, fileText: Map<'sha|path', {side, lines, count}>,
   hl: Map<'sha|path|side', Line[]>, comments: Map<id, Comment>, threadsByKey: Map<key, id[]>, threadOrder: id[],
   orphans: Set<id>, openEditors: Map<key, {...}>, sel: null|{...}, currentFile: number, currentThread: id|null,
-  viewed: Set<string>, collapsedFolders: Set<string>, collapsedFiles: Set<path>, drawer: {open, tab, thisCommitOnly},
+  collapsedFolders: Set<string>, collapsedFiles: Set<path>, submitting: boolean,
   seenUntil: string, perCommitScroll: Map<sha, {top, path}> }
 ```
 
@@ -955,7 +948,7 @@ review") teaches Claude Code to:
 1. **Start**: decide the range (usually `<base>..HEAD`; add `--worktree` when `git status --porcelain` is non-empty),
    run `ccr start --repo <abs path> --range <spec> [--worktree]` and hand the user the URL **on its own line**, verbatim:
    *"Open http://127.0.0.1:PORT/?t=… (over SSH: `ssh -L PORT:127.0.0.1:PORT <host>` first), leave comments, then click
-   **Submit review** — or just tell me when you are done."* Never use `--open` (the agent cannot see the browser; the
+   **Submit** — or just tell me when you are done."* Never use `--open` (the agent cannot see the browser; the
    user may be remote).
 2. **Pre-annotate** (optional): `ccr comment --commit <sha> --path <p> --line <n> "Heads-up: …"` to explain non-obvious
    choices before the human looks.
@@ -967,7 +960,7 @@ review") teaches Claude Code to:
    Reply to all threads at once with `ccr reply --batch -` (Markdown `## <id> [resolve]` sections), citing the fix
    commit sha; use `[resolve]` only when the fix is committed; reply without resolving to push back or ask.
 5. **Reload**: `ccr reload --repo <abs>` (never with a narrower range); read the remapped/outdated list; tell the user
-   what changed and that the UI is refreshed. Repeat 3–5 until a round with verdict `approve`.
+   what changed and that the UI is refreshed. Repeat 3–5 until the user says the review is done (rounds carry no verdict).
 6. **Stop**: only when the user explicitly asks (`ccr stop` exports to Markdown first; comments are otherwise gone).
    If the conversation ends without a decision, leave the server running and say so.
 
@@ -1012,10 +1005,11 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
 * `test_e2e.py` (skipped without `chromium-browser`/`chromium`/`google-chrome`): starts a server, runs
   `node tests/e2e/driver.mjs <url>` (CDP over Node's `WebSocket`) which: loads the page (token in `?t=`), waits for
   `body[data-ready]`, asserts every lang id from the section-3 table satisfies `hljs.getLanguage`, clicks the 2nd
-  commit, hovers a diff row and clicks the gutter `[+]`, types a comment, submits it (thread appears), toggles split
-  view (thread still present), drags a 3-line range and comments, opens the drawer, submits a review with a summary,
-  then creates a claude reply via the API and asserts the toast + New tab, reloads the page and asserts the token
+  commit, hovers a diff row and clicks the gutter `[+]`, types a comment, submits it (thread appears), types into another
+  editor and checks the live preview (`<code>`) and that Cancel keeps the draft, checks that `j` does nothing (shortcuts
+  off), toggles split view (thread still present), drags a 3-line range and comments, submits the round with `#btn-submit`,
+  then creates a claude reply via the API and asserts the toast + New dot, reloads the page and asserts the token
   survives (localStorage) — prints `{ok, steps:[…], consoleErrors:[…], screenshots:[paths]}`; the test asserts `ok`,
-  zero console errors, and the API state (1 round, 3 comments).
+  zero console errors, and the API state (1 round with verdict `comment`, 3 user comments + the reply).
 
 Run: `python3 -m pytest -q`. All tests must pass with no network access.
