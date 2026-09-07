@@ -191,6 +191,9 @@ conversation ends without a decision, leave the server running and say so:
 - `ccr reload` after every batch of commits, never with a narrower range.
 - Use `--json` when acting on ids programmatically.
 - Never `ccr stop` unless told to; when stopping, remember it exports first and then deletes the data.
+- After changing ccr's own Python code, restart the server with `ccr stop --keep-db && ccr start …` (a running
+  server keeps the code it started with; `--keep-db` preserves comments, rounds and the cover letter) and hand
+  over the new URL.
 - Do not paste the token/URL into commit messages, issues or files.
 
 ## What you will read
