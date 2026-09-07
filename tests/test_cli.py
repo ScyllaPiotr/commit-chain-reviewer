@@ -494,3 +494,21 @@ def test_cover_letter_via_start_and_cover_command(cli, tmp_path):
     assert "## Cover letter\n\nRewritten cover.\n" in exported
     cli.run("stop", check=0)
     assert not pid_alive(record["pid"])
+
+
+def test_wait_reports_a_replaced_server_and_keeps_its_record(cli, ccr_session_dir):
+    """Restarting the server (stop --keep-db; start) while `ccr wait` polls must not look like a plain API error."""
+    first = cli.start("--range", "main..feature")
+    waiter = cli.popen("wait", "--since-round", "0", "--timeout", "30")
+    time.sleep(1.0)
+    cli.run("stop", "--keep-db", check=0)
+    second = cli.start("--range", "main..feature")
+    out, errtext = waiter.communicate(timeout=40)
+    assert waiter.returncode == 3, (out, errtext)
+    assert "server was replaced" in errtext or "server gone" in errtext
+    names = [n for n in os.listdir(str(ccr_session_dir)) if n.endswith(".json")]
+    with open(os.path.join(str(ccr_session_dir), names[0])) as handle:
+        assert json.load(handle)["pid"] == second["pid"]        # the new server's record survived
+    assert cli.run("status", check=0).returncode == 0
+    cli.run("stop", check=0)
+    assert not pid_alive(first["pid"]) and not pid_alive(second["pid"])

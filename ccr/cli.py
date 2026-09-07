@@ -642,6 +642,11 @@ class _Waiter:
                     return EXIT_NO_SESSION
                 time.sleep(WAIT_RETRY_SECONDS)
                 continue
+            except ApiError as exc:
+                if exc.status == 401:  # another server (new token) answers on this port now
+                    err("ccr: server was replaced while waiting (new token); run ccr status for the new URL")
+                    return EXIT_NO_SESSION
+                raise
             self.failing_since = None
             version = self.state["version"]
             if self.args.any_change:
@@ -658,8 +663,8 @@ class _Waiter:
         pid_dead = self.record is not None and not session.pid_alive(self.record.get("pid"))
         if not pid_dead and now - self.failing_since < WAIT_GONE_SECONDS:
             return False
-        if self.record is not None:
-            session.remove_record(session.paths_for(self.record["repo"]).record)
+        if self.record is not None:  # only our own record — a replacement server may have written a new one
+            session.remove_record(session.paths_for(self.record["repo"]).record, self.record.get("pid"))
         err("ccr: server gone")
         return True
 
