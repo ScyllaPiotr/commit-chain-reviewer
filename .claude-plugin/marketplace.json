@@ -1,0 +1,12 @@
+{
+  "name": "ccr-local",
+  "owner": { "name": "Piotr Szymaniak" },
+  "plugins": [
+    {
+      "name": "ccr",
+      "source": "./",
+      "description": "Commit Chain Reviewer — GitHub-like local code review for agentic workflows",
+      "version": "0.1.0"
+    }
+  ]
+}

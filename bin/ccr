@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Shim so `ccr` works straight from a checkout without `pip install`.
+# The checkout goes FIRST on sys.path, ahead of the current directory (which `python3 -m ccr` would prefer,
+# so a reviewed repository containing its own `ccr/` directory would shadow this package).
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CCR_HOME="$here" exec python3 -c 'import os, runpy, sys; sys.path[0] = os.environ.pop("CCR_HOME"); runpy.run_module("ccr", run_name="__main__", alter_sys=True)' "$@"

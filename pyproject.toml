@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ccr"
+version = "0.1.0"
+description = "Commit Chain Reviewer: a local, GitHub-like code review UI for agentic workflows"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+ccr = "ccr.cli:main"
+
+[tool.setuptools]
+packages = ["ccr"]
+
+[tool.setuptools.package-data]
+ccr = ["static/*", "static/vendor/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
