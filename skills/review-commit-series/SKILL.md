@@ -51,6 +51,11 @@ snippet and a `→ HEAD path:line` location.
    (`ccr cover --repo "$REPO" --file FILE` replaces the cover letter of a running review, e.g. after
    the chain changed.)
 
+   The cover letter is the future pull-request description: write it in that form (what, why, how it is
+   split, how to review it), treat the user's comments on it as edits to apply with `ccr cover`, and when
+   the review is done and the series is pushed, use the final text verbatim as the PR body
+   (`gh pr create --body-file <cover file>`, or `gh pr edit --body-file` for an existing PR).
+
    Success prints two lines (plus an optional `ccr: note: …`):
 
    ```
