@@ -20,7 +20,7 @@ Nothing else: no pip packages, no Node, no build step. `highlight.js` is vendore
 ## Install
 
 ccr is a **Claude Code plugin**: the checkout carries `.claude-plugin/plugin.json`, the `review-commit-series` skill
-(`skills/review-commit-series-commit-series/SKILL.md`) and the `ccr` executable in `bin/`, which Claude Code puts on PATH while the
+(`skills/review-commit-series/SKILL.md`) and the `ccr` executable in `bin/`, which Claude Code puts on PATH while the
 plugin is enabled. Pick one way to make Claude Code load it (all from the repo root):
 
 ```sh
@@ -278,7 +278,7 @@ reads static files from disk, so reloading the page is enough).
 
 ## The agent loop
 
-This is what the `review-commit-series` skill (`skills/review-commit-series-commit-series/SKILL.md`, invoked as `/review-commit-series` or by asking to see the code) makes Claude Code do; you can drive it
+This is what the `review-commit-series` skill (`skills/review-commit-series/SKILL.md`, invoked as `/review-commit-series` or by asking to see the code) makes Claude Code do; you can drive it
 by hand the same way.
 
 ```sh
