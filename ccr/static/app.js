@@ -1970,7 +1970,10 @@
       if (li) { if (para.length || quote) flush(); (list = list || []).push(li[1]); continue; }
       const q = /^>\s?(.*)$/.exec(line);
       if (q) { if (para.length || list) flush(); (quote = quote || []).push(q[1]); continue; }
-      if (list || quote) flush();
+      // Lazy continuation: a non-blank line inside a list item or quote belongs to it (CommonMark), so
+      // "- text that wraps\n  onto the next line" stays one bullet instead of breaking into a paragraph.
+      if (list) { list[list.length - 1] += ' ' + line.trim(); continue; }
+      if (quote) { quote[quote.length - 1] += ' ' + line.trim(); continue; }
       para.push(line);
     }
     flush();
