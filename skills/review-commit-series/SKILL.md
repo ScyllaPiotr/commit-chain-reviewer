@@ -1,12 +1,12 @@
 ---
-name: review
+name: review-commit-series
 description: Show the user a GitHub-like review UI of a commit chain via ccr and process their inline comments — use when the user asks to show/review the code, see the commits or the diff, look at the changes, get a review link/URL, or leave and address review comments on a commit chain.
 argument-hint: "[range] e.g. main..HEAD (optional; defaults to the branch point..HEAD)"
 ---
 
-# review — run a ccr review loop
+# review-commit-series — run a ccr review loop
 
-Invocation: `/ccr:review [range]` or plain language ("show me the code", "let me review the change").
+Invocation: `/review-commit-series [range]` or plain language ("show me the code", "let me review the change").
 `$ARGUMENTS`, when given, is the commit range to show (a spec such as `main..HEAD`, `origin/main...HEAD`
 or `-n 3`); otherwise pick the range yourself as described in step 1.
 

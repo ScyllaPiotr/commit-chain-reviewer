@@ -49,7 +49,7 @@ commit-chain-reviewer/
       vendor/               highlight.min.js, github.min.css, github-dark.min.css, lang-*.min.js
   .claude-plugin/plugin.json  Claude Code plugin manifest (name "ccr"; bin/ is put on PATH while the plugin is enabled)
   .claude-plugin/marketplace.json  single-plugin marketplace so `claude plugin install ccr@ccr-local` works from a checkout
-  skills/review/SKILL.md    Claude Code skill (`/ccr:review [range]`) describing the agent loop (section 8)
+  skills/review-commit-series-commit-series/SKILL.md    Claude Code skill (`/review-commit-series [range]`) describing the agent loop (section 8)
   tests/                    pytest suite (section 9)
     conftest.py             fixture repo builder
     test_gitx.py test_store.py test_server.py test_cli.py test_render.py
@@ -940,7 +940,7 @@ state = { token, review, generation, version, startedAt, nowOffset, selectedSha,
 
 ---
 
-## 8. Agent loop (`skills/review/SKILL.md`)
+## 8. Agent loop (`skills/review-commit-series-commit-series/SKILL.md`)
 
 The skill (frontmatter `name: review`, `argument-hint` for an optional range passed as `$ARGUMENTS`, `description` mentioning "show me the code / review UI / commit chain
 review") teaches Claude Code to:

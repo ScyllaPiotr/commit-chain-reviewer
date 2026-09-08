@@ -1,7 +1,7 @@
 {
   "name": "ccr",
   "displayName": "Commit Chain Reviewer",
-  "description": "GitHub-like code review of a commit chain in your browser, driven by Claude: /ccr:review shows the change, you comment on lines, files, commits or the cover letter, Claude reads and answers every comment from the CLI.",
+  "description": "GitHub-like code review of a commit chain in your browser, driven by Claude: /review-commit-series shows the change, you comment on lines, files, commits or the cover letter, Claude reads and answers every comment from the CLI.",
   "version": "0.1.0",
   "author": { "name": "Piotr Szymaniak" },
   "license": "MIT",

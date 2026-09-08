@@ -19,8 +19,8 @@ Nothing else: no pip packages, no Node, no build step. `highlight.js` is vendore
 
 ## Install
 
-ccr is a **Claude Code plugin**: the checkout carries `.claude-plugin/plugin.json`, the `review` skill
-(`skills/review/SKILL.md`) and the `ccr` executable in `bin/`, which Claude Code puts on PATH while the
+ccr is a **Claude Code plugin**: the checkout carries `.claude-plugin/plugin.json`, the `review-commit-series` skill
+(`skills/review-commit-series-commit-series/SKILL.md`) and the `ccr` executable in `bin/`, which Claude Code puts on PATH while the
 plugin is enabled. Pick one way to make Claude Code load it (all from the repo root):
 
 ```sh
@@ -35,7 +35,7 @@ claude --plugin-dir "$PWD"
 ```
 
 Check with `claude plugin details ccr`. Then, in Claude Code, say *"show me the code"* or run
-`/ccr:review main..HEAD`.
+`/review-commit-series main..HEAD`.
 
 To use the CLI outside Claude Code, run `bin/ccr` in place (it locates the package relative to its
 own location and ignores a `ccr/` directory in the current repository), add `bin/` to PATH, or
@@ -278,7 +278,7 @@ reads static files from disk, so reloading the page is enough).
 
 ## The agent loop
 
-This is what the `review` skill (`skills/review/SKILL.md`, invoked as `/ccr:review` or by asking to see the code) makes Claude Code do; you can drive it
+This is what the `review-commit-series` skill (`skills/review-commit-series-commit-series/SKILL.md`, invoked as `/review-commit-series` or by asking to see the code) makes Claude Code do; you can drive it
 by hand the same way.
 
 ```sh
