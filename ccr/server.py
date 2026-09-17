@@ -25,7 +25,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import __version__, gitx, session
+from . import __version__, gitx, render, session
 from .gitx import GitError
 from .store import ReviewStore, StoreError, utcnow
 
@@ -623,6 +623,9 @@ def _print_serving(store: ReviewStore, url: str, out) -> None:
     commits = sum(1 for c in review["commits"] if c["kind"] == "commit")
     suffix = ", +worktree" if review["options"]["worktree"] else ""
     out.write("ccr: serving %s  (%s, %d commits%s)\n" % (store.repo, _range_label(review["range"]), commits, suffix))
+    line = render.review_line(review)
+    if line:
+        out.write(line + "\n")
     out.write("ccr: url %s\n" % url)
     if review["range"].get("note"):
         out.write("ccr: note: %s\n" % review["range"]["note"])

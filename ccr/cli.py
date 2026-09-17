@@ -356,6 +356,9 @@ def print_serving(record: dict, review: dict) -> None:
     rng = review["range"]
     suffix = ", +worktree" if review["options"]["worktree"] else ""
     out("ccr: serving %s  (%s, %d commits%s)" % (record["repo"], range_label(rng), real_commits(review), suffix))
+    line = render.review_line(review)
+    if line:
+        out(line)
     out("ccr: url %s" % record["url"])
     if rng.get("note"):
         out("ccr: note: %s" % rng["note"])
@@ -363,7 +366,7 @@ def print_serving(record: dict, review: dict) -> None:
 
 def start_json(record: dict, review: dict, reused: bool) -> dict:
     return dict(record, counts=review["counts"], commits=real_commits(review), rounds=len(review["rounds"]),
-                reused=reused)
+                reused=reused, review=review.get("review"))
 
 
 def cmd_start(args) -> int:

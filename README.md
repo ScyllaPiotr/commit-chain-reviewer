@@ -220,8 +220,8 @@ first parent.
   context line anchors to the new side, a deleted line to the old side; click the old number of a
   context line to anchor to the old side.
 * **What**: Markdown — paragraphs, `code`, fenced blocks, bold, italic, `https://` links, lists,
-  quotes. A 7–40 hex sha of a listed commit becomes a link to that commit. A live preview under the
-  textarea shows the rendered Markdown while you type. Drafts survive a reload of the page;
+  quotes. A 7–40 hex sha of a listed commit becomes a link to that commit. The editor has **Write**
+  and **Preview** tabs and grows with what you type. Drafts survive a reload of the page;
   Ctrl/⌘+Enter posts, Esc or Cancel keeps the draft (an emptied editor drops it).
 * **Pending vs submitted**: a new comment is **Pending**. Pending comments are *already visible to the
   agent* — `ccr comments` lists them and `ccr wait --any` wakes on them — so you can also just tell the
@@ -362,6 +362,7 @@ ccr stop --repo /abs/repo                                    # 8. only when the 
 | UI says *Disconnected — retrying…*, then *Server not responding — it may have been stopped* | The server exited, was stopped, or hit its idle timeout. `ccr status` exits 3 when it is gone; `ccr logs` shows why. Start it again with `ccr start` — comments are in the database and come back — and open the freshly printed URL (the token is new). |
 | UI shows *No valid session token for this tab* | The server was restarted with a new token. Run `ccr status` (or `ccr open`) and open the printed URL again. |
 | A ccr code change does not show up | A running server keeps the Python code it started with (only the static UI files are read from disk). Restart it without losing comments: `ccr stop --keep-db && ccr start --range …` (the database, rounds and cover letter are reopened; open tabs need the new URL). |
+| `ccr: new review #N — the database also holds review #M …` | The database of this repository still held the review of a *different* change (a server that was killed, timed out, or was stopped with `--keep-db`). The new review starts empty — its own comments, its own round numbering — and the old one is kept in the file. `ccr: resuming review #N …` is the opposite case: the range still matches, so the comments and rounds are still there. |
 | `ccr: port N in use` (exit 1) | Only happens with an explicit `--port`. Drop the flag (ccr picks a free port near its default) or choose another one. |
 | `ccr: server exited with code N — last log lines:` | `ccr start` shows the tail of the server log; `ccr logs -n 100` shows more. Typical causes: `db was created for <path>; pass --db-force to reuse`, `db in use`, `session dir <d> is not private`. |
 | `cannot infer a range; pass --range or -n` / `range X..Y is empty` | No upstream or `main`/`master` to compare against, or the range has no commits. Pass `--range base..HEAD`, `-n N`, or `--worktree` for uncommitted work. |

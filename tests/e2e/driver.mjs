@@ -8,7 +8,7 @@
  * dependencies) and walks the review UI through the end-to-end scenario: load with the token in
  * `?t=`, grammar check, set a cover letter through the API and comment on the whole series from the
  * "All changes" header, select the second commit, comment on a hovered line via the gutter [+], type into
- * an editor and watch the live Markdown preview, cancel it (draft kept), see the line comment projected into
+ * an editor, watch it grow and switch to the Preview tab, cancel it (draft kept), see the line comment projected into
  * "All changes" with a "from <sha>" tag that leads back, check that single-key shortcuts are off, toggle split
  * view, drag a three-line range and comment on it, submit the pending comments as a round with the top-bar
  * Submit button, receive a Claude reply pushed through the API (toast + New dot that clears once the thread
@@ -354,32 +354,58 @@ export async function runScenario(page, url) {
     return 'pending badge=' + badge;
   });
 
-  await runner.step('live preview and Cancel keeps draft', async () => {
-    // SPEC 7.4: the preview under the textarea renders the same safe Markdown as comment bodies while typing; Cancel keeps
-    // the text as a draft (dot on the [+]); cancelling an emptied editor drops it. There is no Discard button any more.
+  await runner.step('Write/Preview tabs, auto-grow and Cancel keeps draft', async () => {
+    // SPEC 7.4: the editor shows one of the Write and Preview tabs at a time (Preview renders the same safe Markdown as
+    // comment bodies), the textarea grows with its content, and Cancel keeps the text as a draft (dot on the [+]);
+    // cancelling an emptied editor drops it. There is no Discard button any more.
     const row = `.file-card[data-path="${filePath}"] tr.line.ctx`;
-    const text = 'Draft with `code` and **bold**';
+    const text = 'Draft with `code` and **bold**' + '\nand a tail line'.repeat(8);
     await page.hover(row + ' td.code');
     await page.waitFor(`document.querySelector(${JSON.stringify(row)}).querySelector('td.num.new .btn-add-comment')`, { label: 'gutter [+] on the context row' });
     await page.click(row + ' .btn-add-comment');
     await page.waitFor(`document.querySelector('tr.editor form.comment-editor textarea')`, { label: 'editor row' });
     const key = await page.evaluate(`document.querySelector('tr.editor form.comment-editor').dataset.key`);
-    if (!(await page.evaluate(`document.querySelector('tr.editor .md-preview').hidden`))) throw new Error('empty editor shows a preview');
+    const measure = `(() => { const ta = document.querySelector('tr.editor textarea');
+      return { h: ta.clientHeight, scroll: ta.scrollHeight, hidden: ta.hidden,
+               tab: ta.closest('form').dataset.tab, preview: document.querySelector('tr.editor .md-preview').hidden }; })()`;
+    const empty = await page.evaluate(measure);
+    if (empty.tab !== 'write' || empty.preview !== true || empty.hidden) throw new Error('editor does not open on Write: ' + JSON.stringify(empty));
     await page.type(text);
+    await page.frame();
+    const grown = await page.evaluate(measure);
+    if (grown.h <= empty.h) throw new Error(`textarea did not grow with its content: ${empty.h} → ${grown.h}`);
+    if (grown.scroll > grown.h + 1) throw new Error(`textarea still scrolls at ${grown.h}px for ${grown.scroll}px of text`);
+    await page.click('tr.editor .editor-tab[data-tab="preview"]');
     await page.waitFor(`(() => { const pv = document.querySelector('tr.editor .md-preview'); const code = pv && pv.querySelector('p > code');
-      return pv && !pv.hidden && code && code.textContent === 'code' && pv.querySelector('p > strong'); })()`, { label: 'live preview rendered <code> and <strong>' });
+      return pv && !pv.hidden && document.querySelector('tr.editor textarea').hidden && code && code.textContent === 'code' && pv.querySelector('p > strong'); })()`,
+      { label: 'Preview tab shows the rendered Markdown and hides the textarea' });
     const mono = await page.evaluate(`getComputedStyle(document.querySelector('tr.editor .md-preview code')).fontFamily`);
     if (!/mono/i.test(mono)) throw new Error('preview code is not monospace: ' + mono);
     await page.shot('02c-preview');
+    await page.click('tr.editor .editor-tab[data-tab="write"]');
+    await page.waitFor(`document.querySelector('tr.editor .md-preview').hidden && !document.querySelector('tr.editor textarea').hidden`, { label: 'back on Write' });
     await page.click('tr.editor .btn-cancel-comment');
     await page.waitFor(`!document.querySelector('tr.editor')`, { label: 'editor closed' });
     if ((await page.evaluate(`localStorage.getItem(${JSON.stringify('ccr:draft:' + key)})`)) !== text) throw new Error('draft not kept on Cancel');
     await page.hover(row + ' td.code');
     await page.waitFor(`document.querySelector(${JSON.stringify(row)}).querySelector('.btn-add-comment.has-draft')`, { label: 'draft dot on [+]' });
     await page.click(row + ' .btn-add-comment');
-    await page.waitFor(`document.querySelector('tr.editor textarea') && document.querySelector('tr.editor textarea').value === ${JSON.stringify(text)} && document.querySelector('tr.editor .md-preview:not([hidden]) code')`, { label: 'draft restored with its preview' });
+    await page.waitFor(`document.querySelector('tr.editor textarea') && document.querySelector('tr.editor textarea').value === ${JSON.stringify(text)}`, { label: 'draft restored' });
+    const reopened = await page.evaluate(measure);
+    if (reopened.h < grown.h) throw new Error(`reopened editor does not fit its draft: ${reopened.h} < ${grown.h}`);
+    // Leaving the commit and coming back rebuilds the diff body from the draft: the editor must still fit it.
+    const here = await page.evaluate(`document.querySelector('#commit-list .commit-item.is-selected').dataset.sha`);
+    const away = await page.evaluate(`[...document.querySelectorAll('#commit-list .commit-item')].map((i) => i.dataset.sha).find((s) => s !== ${JSON.stringify(here)})`);
+    await page.evaluate(`location.hash = '#' + ${JSON.stringify(away)}`);
+    await page.waitFor(`!document.querySelector('tr.editor')`, { label: 'other commit shown' });
+    await page.evaluate(`location.hash = '#' + ${JSON.stringify(here)}`);
+    await page.waitFor(`document.querySelector('tr.editor textarea')`, { label: 'editor back on the original commit' });
+    const returned = await page.evaluate(measure);
+    if (returned.h < grown.h) throw new Error(`editor collapsed to ${returned.h}px for ${returned.scroll}px of draft after leaving the commit`);
     await page.evaluate(`(() => { const ta = document.querySelector('tr.editor textarea'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
-    await page.waitFor(`document.querySelector('tr.editor .md-preview').hidden`, { label: 'preview hidden once the text is empty' });
+    await page.click('tr.editor .editor-tab[data-tab="preview"]');
+    await page.waitFor(`document.querySelector('tr.editor .md-preview .preview-empty')`, { label: 'Preview of an empty editor says so' });
+    await page.click('tr.editor .editor-tab[data-tab="write"]');
     await page.click('tr.editor .btn-cancel-comment');
     await page.waitFor(`!document.querySelector('tr.editor')`, { label: 'editor closed again' });
     if ((await page.evaluate(`localStorage.getItem(${JSON.stringify('ccr:draft:' + key)})`)) !== null) throw new Error('emptied draft not dropped');

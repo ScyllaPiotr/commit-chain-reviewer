@@ -7,6 +7,7 @@ amend and rebase commits in the (per-test, disposable) repository and call ``loa
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import sqlite3
 import stat
@@ -19,6 +20,7 @@ from ccr import gitx
 from ccr.gitx import GitError
 from ccr.store import (
     COMBINED,
+    SCHEMA_VERSION,
     WORKTREE,
     NotFoundError,
     ReviewStore,
@@ -59,8 +61,9 @@ def unstage_all(repo):
 def test_review_shape_and_pseudo_commits(fixture_repo, store):
     store.set_server_info({"pid": 4242, "port": 7777, "started_at": "2026-09-03T13:00:00Z", "version": "0.1.0"})
     review = store.review()
-    assert set(review) == {"repo", "range", "options", "cover", "commits", "version", "generation", "loading", "now",
-                           "counts", "rounds", "server", "ui"}
+    assert set(review) == {"repo", "range", "review", "options", "cover", "commits", "version", "generation", "loading",
+                           "now", "counts", "rounds", "server", "ui"}
+    assert review["review"] == {"id": 1, "started_at": review["review"]["started_at"], "resumed": False, "previous": None}
     assert review["repo"] == {"path": fixture_repo.path, "name": os.path.basename(fixture_repo.path),
                               "branch": "feature", "bare": False}
     assert review["range"] == {"spec": "main..feature", "given": "main..feature", "base": fixture_repo.main,
@@ -886,7 +889,7 @@ def test_file_db_reopen_continues_version_and_keeps_ids_unique(fixture_repo, tmp
     conn = sqlite3.connect(db)
     meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
     conn.close()
-    assert meta["schema_version"] == "1" and meta["repo"] == os.path.realpath(fixture_repo.path)
+    assert meta["schema_version"] == str(SCHEMA_VERSION) and meta["repo"] == os.path.realpath(fixture_repo.path)
     assert int(meta["version"]) == version + 42
 
 
@@ -979,3 +982,105 @@ def test_comments_project_into_other_views(fixture_repo, store):
 
     other = fixture_repo.sha(RENAME)
     assert {c["id"]: c for c in store.list_comments(project=other)}[line["id"]]["view_anchor"] is None
+
+
+# --------------------------------------------------------------------------- reviews (section 4.6)
+
+def test_a_review_of_another_change_starts_empty(fixture_repo, tmp_path):
+    """A database is per repository: the next review of it must not inherit the previous one (SPEC 4.6)."""
+    db = str(tmp_path / "review.sqlite")
+    first = open_store(fixture_repo, db_path=db, worktree=False)
+    first.add_comment("on the feature chain", {"kind": "commit", "commit": fixture_repo.sha(THREE_HUNKS)})
+    first.set_cover("# Feature")
+    assert first.submit("comment", "round one")["number"] == 1
+    assert first.review_id == 1 and first.resumed is False and first.previous_review is None
+    first.close()
+
+    # "main~1..main" is the hotfix commit, which shares neither a sha nor a subject with main..feature
+    second = open_store(fixture_repo, spec="main~1..main", db_path=db, worktree=False)
+    assert second.review_id == 2 and second.resumed is False
+    assert second.previous_review == {"id": 1, "started_at": second.previous_review["started_at"],
+                                      "range": "main..feature", "comments": 2, "rounds": 1}
+    assert second.list_comments() == [] and second.review()["rounds"] == []
+    assert second.review()["counts"] == {"pending": 0, "submitted": 0, "unresolved": 0, "total": 0, "outdated": 0}
+    assert second.cover == "", "the cover letter belongs to the review, not to the repository"
+    assert second.submit("comment", "round one of the hotfix")["number"] == 1, "round numbering restarts"
+    second.close()
+
+    back = open_store(fixture_repo, db_path=db, worktree=False)          # back to the first change
+    assert (back.review_id, back.resumed, back.previous_review) == (1, True, None)
+    assert back.cover == "# Feature" and len(back.list_comments()) == 2
+    assert back.submit("comment", "round two")["number"] == 2
+    back.close()
+
+    kept = sqlite3.connect(db)
+    try:
+        assert kept.execute("SELECT COUNT(*) FROM comments WHERE review = 1").fetchone()[0] == 3, "nothing is deleted"
+        assert kept.execute("SELECT COUNT(*) FROM reviews").fetchone()[0] == 2
+    finally:
+        kept.close()
+
+
+def test_the_same_change_resumes_its_review_across_an_amend(fixture_repo, tmp_path):
+    db = str(tmp_path / "review.sqlite")
+    first = open_store(fixture_repo, db_path=db, worktree=False)
+    comment = first.add_comment("keep me", {"kind": "commit", "commit": fixture_repo.sha(BIG)})["id"]
+    first.submit("comment", "")
+    first.close()
+
+    unstage_all(fixture_repo)
+    fixture_repo.git("commit", "-q", "--amend", "--no-edit")  # same subject, new sha
+    second = open_store(fixture_repo, db_path=db, worktree=False)
+    assert (second.review_id, second.resumed, second.previous_review) == (1, True, None)
+    assert [c["id"] for c in second.list_comments()] == [comment]
+    assert second.submit("comment", "round two")["number"] == 2
+    second.close()
+
+
+def test_schema_1_database_is_migrated(fixture_repo, tmp_path):
+    """An existing single-review database keeps its comments, rounds and cover letter as review 1."""
+    db = str(tmp_path / "old.sqlite")
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      CREATE TABLE comments (
+        id TEXT PRIMARY KEY, parent_id TEXT REFERENCES comments(id) ON DELETE CASCADE,
+        author TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        state TEXT NOT NULL, round INTEGER, resolved INTEGER NOT NULL DEFAULT 0,
+        kind TEXT NOT NULL, commit_sha TEXT, path TEXT, side TEXT, line INTEGER, start_line INTEGER,
+        snippet TEXT NOT NULL DEFAULT '', moved_from TEXT);
+      CREATE TABLE rounds (number INTEGER PRIMARY KEY, submitted_at TEXT NOT NULL, verdict TEXT NOT NULL,
+        summary TEXT NOT NULL, base TEXT, head TEXT NOT NULL, commit_shas TEXT NOT NULL);
+    """)
+    sha = fixture_repo.sha(THREE_HUNKS)
+    conn.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '1')")
+    conn.execute("INSERT INTO meta (key, value) VALUES ('repo', ?)", (os.path.realpath(fixture_repo.path),))
+    conn.execute("INSERT INTO meta (key, value) VALUES ('version', '7')")
+    conn.execute("INSERT INTO meta (key, value) VALUES ('cover', '# Old cover')")
+    conn.execute("INSERT INTO meta (key, value) VALUES ('chain', ?)", (json.dumps({sha: [0, THREE_HUNKS]}),))
+    conn.execute("INSERT INTO comments (id, parent_id, author, body, created_at, updated_at, state, round, kind,"
+                 " commit_sha) VALUES ('old123', NULL, 'user', 'from schema 1', '2026-09-09T10:00:00Z',"
+                 " '2026-09-09T10:00:00Z', 'submitted', 1, 'commit', ?)", (sha,))
+    conn.execute("INSERT INTO rounds (number, submitted_at, verdict, summary, base, head, commit_shas)"
+                 " VALUES (1, '2026-09-09T10:00:00Z', 'comment', 'old round', 'base', 'head', '[]')")
+    conn.commit()
+    conn.close()
+
+    store = open_store(fixture_repo, db_path=db, worktree=False)
+    assert (store.review_id, store.resumed, store.previous_review) == (1, True, None)
+    assert store.version == 8, "the version counter continues from the old database (7) through this load"
+    assert store.cover == "# Old cover"
+    assert [c["id"] for c in store.list_comments()] == ["old123"]
+    assert [r["number"] for r in store.review()["rounds"]] == [1]
+    assert store.review()["review"]["started_at"] == "2026-09-09T10:00:00Z"
+    assert store.submit("comment", "round two")["number"] == 2
+    store.close()
+
+    conn = sqlite3.connect(db)
+    try:
+        meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
+        assert meta["schema_version"] == str(SCHEMA_VERSION) and "cover" not in meta and "chain" not in meta
+        assert conn.execute("SELECT cover FROM reviews WHERE id = 1").fetchone()[0] == "# Old cover"
+        assert conn.execute("SELECT COUNT(*) FROM rounds WHERE review = 1").fetchone()[0] == 2
+    finally:
+        conn.close()

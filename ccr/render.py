@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 __all__ = [
     "clean",
+    "review_line",
     "build_threads",
     "sort_threads",
     "select_threads",
@@ -64,6 +65,25 @@ def _short_spec(spec) -> str:
 
 def _plural(count: int, noun: str, plural: str = None) -> str:
     return "%d %s" % (count, noun if count == 1 else (plural or noun + "s"))
+
+
+def review_line(review: dict):
+    """The ``ccr:`` banner naming the review being served, or None when there is nothing to say.
+
+    One database holds every review of a repository, so a server that adopts an existing review — or
+    that opens a new one next to an unrelated one — says so; silence means a plain first review.
+    """
+    info = review.get("review") or {}
+    previous = info.get("previous")
+    if previous:
+        detail = ", ".join(filter(None, [previous.get("range"), _plural(previous["comments"], "comment"),
+                                         _plural(previous["rounds"], "round")]))
+        return "ccr: new review #%d — the database also holds review #%d (%s) of a different change" % (
+            info["id"], previous["id"], detail)
+    if info.get("resumed"):
+        detail = "%s, %s" % (_plural(review["counts"]["total"], "comment"), _plural(len(review["rounds"]), "round"))
+        return "ccr: resuming review #%d started %s (%s)" % (info["id"], info["started_at"], detail)
+    return None
 
 
 def _body_lines(body, indent: str = "") -> list:

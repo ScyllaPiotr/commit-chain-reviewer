@@ -63,6 +63,11 @@ snippet and a `→ HEAD path:line` location.
    ccr: url http://127.0.0.1:7777/?t=<token>
    ```
 
+   A `ccr: resuming review #N …` line between them means this range's earlier review — its comments and
+   its rounds — was reopened; `ccr: new review #N — the database also holds review #M …` means the
+   review of a different change was left in the database and this one starts empty. Both are fine; tell
+   the user which happened.
+
    `ccr: reusing running session (pid P)` followed by reload lines and the URL means a session already
    existed and was reloaded with your options — that is fine, continue.
    Exit 1 with `range X..Y is empty` (no commits: fix the base or add `--worktree`) or a git error about
@@ -108,8 +113,19 @@ you are woken up instead of blocking. Then act on the exit code:
 | 2 | timeout, no new round | stderr: `ccr: no new round after 590 s (rounds: R, pending unsubmitted: P, version: V)`. Re-run the same command. If it printed `ccr: UI not opened yet` (or `ccr status --repo "$REPO"` shows the UI not connected), remind the user of the URL and the SSH forward once — do not nag. |
 | 3 | `ccr: server gone` / no running session | `ccr sessions`, then `ccr logs --repo "$REPO"` for the reason. If the server crashed, `ccr start` again with the same options — the database survived, comments come back — and hand over the **new** URL (the token changed). If the user ran `ccr stop`, the review was exported to Markdown in the session directory; ask before starting a fresh one. |
 
-If the user says they are done without clicking Submit, do not wait: read
-`ccr comments --repo "$REPO" --pending` — pending comments are already visible to you.
+**Wait for Submit. Pending comments are drafts, not instructions.** They are visible to you long
+before the user is finished with them, and a comment can still be reworded or deleted before the round
+closes — so acting on one produces replies to a point the user never made and resolves threads they
+wanted left open. From their side the review session gets cleaned up underneath them while they are
+still writing in it. A draft that reads as urgent or blocking ("fix this first", "I am not reading the
+rest until …") is still a draft: it is not permission to start. On exit 2, re-run the same
+`ccr wait` and stay idle. Prefer not to read `ccr comments --pending` at all while a round is open —
+reading them invites acting on them.
+
+Only two things release you: `ccr wait` returns exit 0 with a round, or the user says in chat that they
+are done commenting. In that second case read `ccr comments --repo "$REPO" --pending` and treat those
+comments as the round.
+
 `ccr wait --any` returns on any change (a single new comment); use it only when the user asked you to
 react live.
 
@@ -190,7 +206,8 @@ conversation ends without a decision, leave the server running and say so:
 - Always start with a cover letter (`--cover FILE`); it is the review's "PR description".
 - Hand over the URL verbatim, on its own line, with the SSH hint. Open the browser (`ccr open`) only when a
   local display is available and the session is not over SSH.
-- Treat pending comments as real: the user may never click Submit.
+- Never act on pending comments: wait for `ccr wait` to return a round, or for the user to say in chat
+  that they are done commenting. An urgent-sounding draft is not an exception.
 - Process every thread of a round in one pass; reply to all of them in one `ccr reply --batch -` call.
 - `[resolve]` only for committed fixes; disagree or ask by replying without it.
 - Fixup/new commits during the review; no amend, no rebase, no force-push until the user declares the review done.
@@ -251,7 +268,7 @@ How to read it:
 - `user · new:11` = comment by the human on new-side line 11 of that commit's diff; `old:7` = deleted
   side; `new:20-24` = a range (act on the whole range); `file` / `commit` = anchored to the file / commit.
 - `→ HEAD src/fetcher.py:14 (moved)` = that line is now line 14 in HEAD. Edit at the HEAD location.
-- `pending` = not yet in a submitted round (still act on it); `R1` = submitted in round 1;
+- `pending` = not yet in a submitted round (a draft — do not act on it); `R1` = submitted in round 1;
   `unresolved`/`resolved`; `last: user` = awaiting your answer.
 - Snippet rows: `<old#> <new#> <marker> <text>`; the anchored line(s) are prefixed with `>`.
 - Matching comments are marked `★` when filters are active; `ccr wait` marks `★ new in round n`.

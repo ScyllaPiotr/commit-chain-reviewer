@@ -232,6 +232,8 @@ Submitting with zero pending comments **and** empty summary is allowed only when
 {
   "repo": {"path": "/abs/path", "name": "repo-dir-name", "branch": "feature/x", "bare": false},   // branch null when detached
   "range": {"spec": "main..HEAD", "given": "-n 5", "base": "…|null", "head": "…", "note": null, "first_parent": false},
+  "review": {"id": 3, "started_at": "…Z", "resumed": true,     // which review of this repository is served (4.6)
+             "previous": null},                                // or {"id", "started_at", "range", "comments", "rounds"}
   "options": {"worktree": true},
   "cover": "Markdown description of the whole change (the PR cover letter); \"\" when none",
   "commits": [CommitMeta, …],        // "combined" FIRST, then real commits oldest→newest, then "worktree" LAST
@@ -373,18 +375,26 @@ explicit file via `--db`. For file dbs: `PRAGMA journal_mode=WAL; PRAGMA synchro
 
 ```sql
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);          -- schema_version, repo, version
+CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY, started_at TEXT NOT NULL,
+  range_spec TEXT NOT NULL DEFAULT '', cover TEXT NOT NULL DEFAULT '', chain TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY, parent_id TEXT REFERENCES comments(id) ON DELETE CASCADE,
+  review INTEGER NOT NULL DEFAULT 1,
   author TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
   state TEXT NOT NULL, round INTEGER, resolved INTEGER NOT NULL DEFAULT 0,
   kind TEXT NOT NULL, commit_sha TEXT, path TEXT, side TEXT, line INTEGER, start_line INTEGER,
   snippet TEXT NOT NULL DEFAULT '', moved_from TEXT);                       -- moved_from: JSON or NULL
-CREATE TABLE IF NOT EXISTS rounds (number INTEGER PRIMARY KEY, submitted_at TEXT NOT NULL, verdict TEXT NOT NULL,
-  summary TEXT NOT NULL, base TEXT, head TEXT NOT NULL, commit_shas TEXT NOT NULL);   -- commit_shas: JSON array
+CREATE TABLE IF NOT EXISTS rounds (review INTEGER NOT NULL DEFAULT 1, number INTEGER NOT NULL,
+  submitted_at TEXT NOT NULL, verdict TEXT NOT NULL,
+  summary TEXT NOT NULL, base TEXT, head TEXT NOT NULL, commit_shas TEXT NOT NULL,   -- commit_shas: JSON array
+  PRIMARY KEY (review, number));
 ```
 
 On opening an existing file: `meta.schema_version` > current → exit 1 "db schema too new"; `meta.repo` ≠
-`realpath(repo)` → exit 1 `db was created for <path>; pass --db-force to reuse` (unless `--db-force`). `version` is
+`realpath(repo)` → exit 1 `db was created for <path>; pass --db-force to reuse` (unless `--db-force`).
+A schema-1 file (no `reviews` table, one review per repository) is migrated in place: `comments.review` and
+`rounds.review` default to 1 and `meta.cover` / `meta.chain` move into review 1, whose `started_at` is the
+oldest comment. `version` is
 persisted in `meta` so a restarted server continues counting (never restarts at 0). The git diff cache is a plain
 dict `(sha, full, ws) → CommitDiff` (derived data), cleared on reload.
 
@@ -449,6 +459,18 @@ For root `kind=line` comments, `head_location = map_line(repo, from_rev, HEAD_sh
 `anchor.commit` (side new) / its `parents[0]` (side old) / `range.head` or `range.base` for `combined` / `HEAD`-at-extraction
 for `worktree` side old. For `worktree` side new → `{"path", "line", "status": "live"}`. `HEAD_sha` is re-read on each
 request (`rev_parse("HEAD")`). Errors → `{"path": null, "line": null, "status": "unknown"}`.
+
+### 4.6 Reviews
+
+A database belongs to a repository (`<key>.sqlite` is keyed by its realpath) but a repository is reviewed many
+times, and a server that is killed, times out or is stopped with `--keep-db` leaves its database behind. Every
+comment and round therefore carries a `review`, and everything the store reads — comments, counts, `outdated`,
+rounds and the round *numbering* — is scoped to the one review it serves, which it picks when it opens the
+database: walking the reviews newest first, the first whose remembered chain (`reviews.chain`) shares a sha or a
+subject with the range — an amend, a rebase, a widened range or a return to a branch reviewed earlier — else a
+new review. A stored review with no comments, rounds or cover letter is adopted as-is; a range git cannot list,
+or that lists no commits, continues the newest review; nothing is ever deleted. `review()` reports
+the outcome (2.6) and `ccr start` / `ccr serve` print it (6.2).
 
 ---
 
@@ -567,7 +589,10 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
      ccr: serving /abs/repo  (main..HEAD, 7 commits, +worktree)
      ccr: url http://127.0.0.1:7777/?t=<token>
      ```
-     plus `ccr: note: <range.note>` when set. `--json` prints the session dict + review counts.
+     plus `ccr: note: <range.note>` when set, and — between the two lines, whenever the database held a review
+     already (4.6) — either `ccr: resuming review #N started <ts> (C comments, R rounds)` or
+     `ccr: new review #N — the database also holds review #M (<range>, C comments, R rounds) of a different change`.
+     `--json` prints the session dict + review counts + the `review` block.
 * `ccr serve …` — foreground; same options plus `--token T` (documented: visible in `ps`; tests only), `--verbose`,
   `--db-force`. Token source order: `--token`, `CCR_SERVE_TOKEN`, generate. Prints the two lines above (token redacted
   as `<redacted>` when it came from the environment, so logs never contain it).
@@ -828,9 +853,11 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
 
 ### 7.4 Comments, editors, threads
 
-* **Editor** (`tr.editor` / `div.editor-block`): `form.comment-editor[data-key]` with auto-growing textarea, a live
-  preview `div.md-preview.md` below it (the same `renderMarkdown` as comment bodies, updated on `input` debounced 150 ms,
-  hidden while the text is empty), Markdown hint, **Add comment** (Ctrl/⌘+Enter), **Cancel** (Esc; keeps the draft — an
+* **Editor** (`tr.editor` / `div.editor-block`): `form.comment-editor[data-key][data-tab]` with a **Write** / **Preview**
+  tab pair (`.editor-tabs > .editor-tab[data-tab]`) showing one of the two at a time: the textarea, which is sized to its
+  content on every input and on every render that creates it (`max-height: 60vh` then scrolls), or `div.md-preview.md`
+  (the same `renderMarkdown` as comment bodies, rendered when the tab is opened; empty text → *Nothing to preview*).
+  The open tab lives in `state.openEditors` so re-renders keep it. Markdown hint, **Add comment** (Ctrl/⌘+Enter), **Cancel** (Esc; keeps the draft — an
   emptied editor drops it). While a
   request is in flight the buttons are disabled; on 201/200 insert the returned Comment into state, remove the draft,
   close the editor, patch only that thread; on error keep the editor open and toast the server message. No temporary ids.
@@ -919,7 +946,7 @@ resembles GitHub dark-dimmed. `prefers-reduced-motion` disables animations. Focu
 | File card | `.file-card[data-path][data-rendered="0|1"]` → `.file-header` (`.file-path`, `.status-badge`, `.btn-comment-file`, `.btn-collapse`), `.diff-body`, `.file-card.is-collapsed` |
 | Diff table | `table.diff[data-view]`; `tr.hunk` (`.btn-expand-up`, `.btn-expand-down`, `.btn-expand-all`); `tr.line.add|del|ctx[data-o][data-n][data-x]` (`.is-selected`, `.in-range`); `td.num.old|new[data-side][data-line]`, `td.num.empty`, `td.marker`, `td.code.old|new`, `td.code.empty`, `span.wd`, `span.cr` |
 | Gutter | `button.btn-add-comment[data-side][data-line]` (shared, moved into the hovered `td.num`) |
-| Editor | `tr.editor` / `div.editor-block` → `form.comment-editor[data-key]` (`textarea`, `.md-preview`, `.btn-submit-comment`, `.btn-cancel-comment`) |
+| Editor | `tr.editor` / `div.editor-block` → `form.comment-editor[data-key][data-tab]` (`.editor-tabs > .editor-tab[data-tab]`, `textarea`, `.md-preview`, `.btn-submit-comment`, `.btn-cancel-comment`) |
 | Thread | `tr.threads[data-key]` / `div.thread-block` → `.thread[data-thread-id]` (`.is-resolved`, `.has-new`) → `.comment[data-id][data-author]` (`.comment-meta` `.author .time .tag-pending .tag-round .tag-edited .tag-new .tag-moved`, `a.tag-from[data-sha]` on a projected root, `.comment-body`, `.comment-actions` `.act-edit .act-delete .act-reply .act-resolve`), `button.btn-reply`, `button.btn-show-resolved` |
 | Banners/toasts | `#banner-disconnected`, `#banner-compare`, `#banner-reloaded`, `#toasts .toast.info|error|success`, `#notice-token` |
 | Readiness | `body[data-ready="1"]` after the first full render; `body[data-loading="1"]` while the server reports `loading` |
@@ -1006,7 +1033,8 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
   `node tests/e2e/driver.mjs <url>` (CDP over Node's `WebSocket`) which: loads the page (token in `?t=`), waits for
   `body[data-ready]`, asserts every lang id from the section-3 table satisfies `hljs.getLanguage`, clicks the 2nd
   commit, hovers a diff row and clicks the gutter `[+]`, types a comment, submits it (thread appears), types into another
-  editor and checks the live preview (`<code>`) and that Cancel keeps the draft, checks that `j` does nothing (shortcuts
+  editor, checks that it grows with its content (also after leaving the commit and coming back), that the Preview tab
+  renders it (`<code>`) and that Cancel keeps the draft, checks that `j` does nothing (shortcuts
   off), toggles split view (thread still present), drags a 3-line range and comments, submits the round with `#btn-submit`,
   then creates a claude reply via the API and asserts the toast + New dot, reloads the page and asserts the token
   survives (localStorage) — prints `{ok, steps:[…], consoleErrors:[…], screenshots:[paths]}`; the test asserts `ok`,

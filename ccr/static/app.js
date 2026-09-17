@@ -92,11 +92,6 @@
   function shortSha(sha) { return sha && HEX_RE.test(sha) ? sha.slice(0, 10) : sha; }
   const isPseudo = (sha) => sha === 'combined' || sha === 'worktree';
 
-  function debounce(fn, ms) {
-    let t = null;
-    return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
-  }
-
   function statsHtml(add, del) {
     return `<span class="stats"><span class="stat-add">+${esc(add)}</span><span class="stat-del">−${esc(del)}</span></span>`;
   }
@@ -768,6 +763,7 @@
     body.style.minHeight = '';
     card.dataset.rendered = '1';
     if (bodyObserver) bodyObserver.unobserve(card);
+    growEditors(body);
     attachGutterButton(card);
     observeThreads(card);
     restoreSelectionClasses(card);
@@ -1664,25 +1660,30 @@
 
   const cssEsc = (s) => (window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&'));
 
-  /** Run fn (which rebuilds markup inside container) while keeping editor text, caret and focus. */
+  /** Run fn (which rebuilds markup inside container) while keeping editor text, caret and focus.
+
+      Every editor left in the container is re-grown afterwards, including one this render created from a
+      draft: markup alone puts a long text in a three-row box. */
   function preserveEditors(container, fn) {
     const saved = new Map();
     if (container) {
       for (const form of $$('form.comment-editor', container)) {
         const ta = form.querySelector('textarea');
-        if (ta) saved.set(form.dataset.key, { value: ta.value, start: ta.selectionStart, end: ta.selectionEnd, focused: document.activeElement === ta, height: ta.style.height });
+        if (ta) saved.set(form.dataset.key, { value: ta.value, start: ta.selectionStart, end: ta.selectionEnd, focused: document.activeElement === ta });
       }
     }
     fn();
-    if (!saved.size || !container) return;
+    if (!container) return;
     for (const form of $$('form.comment-editor', container)) {
       const s = saved.get(form.dataset.key);
       const ta = form.querySelector('textarea');
-      if (!s || !ta) continue;
-      ta.value = s.value;
-      updatePreview(form);
-      if (s.height) ta.style.height = s.height;
-      if (s.focused) { ta.focus(); try { ta.setSelectionRange(s.start, s.end); } catch (e) { /* ignore */ } }
+      if (!ta) continue;
+      if (s) {
+        ta.value = s.value;
+        updatePreview(form);
+      }
+      autoGrow(ta);
+      if (s && s.focused) { ta.focus(); try { ta.setSelectionRange(s.start, s.end); } catch (e) { /* ignore */ } }
     }
   }
 
@@ -1761,9 +1762,12 @@
     } else if (entry.anchor && entry.anchor.kind === 'file') info = 'file';
     else if (entry.anchor && entry.anchor.kind === 'commit') info = 'commit';
     else if (entry.anchor && entry.anchor.kind === 'review') info = 'whole series';
-    return `<form class="comment-editor" data-key="${esc(key)}" data-mode="${esc(entry.mode)}" novalidate>
-      <textarea rows="3" placeholder="${entry.mode === 'reply' ? 'Reply (Markdown)…' : 'Leave a comment (Markdown)…'}" aria-label="Comment text">${esc(initial)}</textarea>
-      <div class="md-preview md"${initial.trim() ? '' : ' hidden'}>${renderMarkdown(initial)}</div>
+    const tab = entry.tab === 'preview' ? 'preview' : 'write';
+    const tabHtml = (name, label) => `<button type="button" class="editor-tab${tab === name ? ' is-active' : ''}" data-tab="${name}" role="tab" aria-selected="${tab === name}">${label}</button>`;
+    return `<form class="comment-editor" data-key="${esc(key)}" data-mode="${esc(entry.mode)}" data-tab="${tab}" novalidate>
+      <div class="editor-tabs" role="tablist">${tabHtml('write', 'Write')}${tabHtml('preview', 'Preview')}</div>
+      <textarea rows="3" placeholder="${entry.mode === 'reply' ? 'Reply (Markdown)…' : 'Leave a comment (Markdown)…'}" aria-label="Comment text"${tab === 'preview' ? ' hidden' : ''}>${esc(initial)}</textarea>
+      <div class="md-preview md"${tab === 'preview' ? '' : ' hidden'}>${tab === 'preview' ? previewHtml(initial) : ''}</div>
       <div class="editor-foot"><span class="md-hint">Markdown · Ctrl+Enter to post · Esc to cancel</span>${info ? `<span class="anchor-info">${esc(info)}</span>` : ''}
         <button type="button" class="sm-btn btn-cancel-comment" aria-label="Cancel (keeps the draft)">Cancel</button>
         <button type="submit" class="sm-btn btn-submit-comment">${label}</button></div>
@@ -1788,26 +1792,54 @@
   function focusEditor(key) {
     const form = editorForm(key);
     if (!form) return;
+    form.scrollIntoView({ block: 'nearest' });
+    if (form.dataset.tab === 'preview') return;
     const ta = form.querySelector('textarea');
     autoGrow(ta);
     ta.focus();
     ta.setSelectionRange(ta.value.length, ta.value.length);
-    form.scrollIntoView({ block: 'nearest' });
   }
 
+  /** Size a textarea to its content; `max-height` in the stylesheet caps it and turns scrolling back on. */
   function autoGrow(ta) {
+    if (!ta || ta.hidden) return;
     ta.style.height = 'auto';
-    ta.style.height = Math.min(window.innerHeight * 0.6, ta.scrollHeight + 2) + 'px';
+    ta.style.height = ta.scrollHeight + 2 + 'px';
   }
 
-  /** Live preview under the textarea: the same safe renderer as comment bodies; hidden while the text is empty. */
-  function updatePreview(form) {
-    const text = form.querySelector('textarea').value;
-    const pv = form.querySelector('.md-preview');
-    pv.hidden = !text.trim();
-    pv.innerHTML = text.trim() ? renderMarkdown(text) : '';
+  /** Size every editor inside freshly rendered markup: the HTML alone puts a long draft in a three-row box. */
+  function growEditors(root) {
+    if (!root || !state.openEditors.size) return;
+    for (const ta of root.querySelectorAll('form.comment-editor textarea')) autoGrow(ta);
   }
-  const schedulePreview = debounce((key) => { const form = editorForm(key); if (form) updatePreview(form); }, 150);
+
+  /** The Preview tab's body: the same safe renderer as comment bodies. */
+  function previewHtml(text) {
+    return text.trim() ? renderMarkdown(text) : '<p class="preview-empty">Nothing to preview</p>';
+  }
+
+  function updatePreview(form) {
+    if (form.dataset.tab !== 'preview') return;
+    form.querySelector('.md-preview').innerHTML = previewHtml(form.querySelector('textarea').value);
+  }
+
+  /** Switch an editor between Write and Preview (GitHub's pair: only one of the two is on screen). */
+  function showEditorTab(form, tab) {
+    const entry = state.openEditors.get(form.dataset.key);
+    if (entry) entry.tab = tab;
+    form.dataset.tab = tab;
+    for (const button of form.querySelectorAll('.editor-tab')) {
+      const active = button.dataset.tab === tab;
+      button.classList.toggle('is-active', active);
+      button.setAttribute('aria-selected', String(active));
+    }
+    const ta = form.querySelector('textarea');
+    const preview = form.querySelector('.md-preview');
+    ta.hidden = tab === 'preview';
+    preview.hidden = !ta.hidden;
+    if (ta.hidden) preview.innerHTML = previewHtml(ta.value);
+    else { autoGrow(ta); ta.focus(); }
+  }
 
   /** Open an editor identified by key. entry = {mode:'new', anchor} | {mode:'reply', rootId} | {mode:'edit', id, rootId}. */
   async function openEditor(key, entry) {
@@ -2609,6 +2641,7 @@
     const el = e.target;
     const hit = (sel) => el.closest(sel);
     let b;
+    if ((b = hit('.editor-tab'))) { showEditorTab(b.closest('form.comment-editor'), b.dataset.tab); return; }
     if ((b = hit('.btn-add-comment'))) { e.preventDefault(); const a = anchorForGutter(b); openEditor(anchorKey(a), { mode: 'new', anchor: a }); return; }
     if ((b = hit('.btn-collapse'))) { toggleCollapseCard(b.closest('.file-card')); return; }
     if ((b = hit('.btn-comment-file'))) {
@@ -2662,7 +2695,6 @@
     if (!form) return;
     autoGrow(ta);
     saveDraftDebounced(form.dataset.key, ta.value);
-    schedulePreview(form.dataset.key);
   }
 
   function onSidebarClick(e) {

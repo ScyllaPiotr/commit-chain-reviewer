@@ -445,3 +445,29 @@ def test_round_without_verdict_omits_the_verdict_word():
                                          "summary": "", "comment_ids": ["k3f9a2"]}]}
     text = render.render_comments(review, [], None)
     assert "- Round 1 · 2026-09-07T13:51:00Z · 1 comment\n" in text and "comment ·" not in text.split("\n")[3]
+
+
+# --------------------------------------------------------------------------- the review banner
+
+def _with_review(info):
+    return dict(REVIEW, review=info, counts=dict(REVIEW["counts"], total=12), rounds=[{"number": 1}, {"number": 2}])
+
+
+def test_review_line_says_nothing_about_a_plain_first_review():
+    assert render.review_line(_with_review({"id": 1, "started_at": "2026-09-09T10:00:00Z",
+                                            "resumed": False, "previous": None})) is None
+    assert render.review_line(REVIEW) is None
+
+
+def test_review_line_states_a_resumed_review():
+    line = render.review_line(_with_review({"id": 3, "started_at": "2026-09-09T10:00:00Z",
+                                            "resumed": True, "previous": None}))
+    assert line == "ccr: resuming review #3 started 2026-09-09T10:00:00Z (12 comments, 2 rounds)"
+
+
+def test_review_line_names_the_unrelated_review_left_in_the_database():
+    line = render.review_line(_with_review({"id": 4, "started_at": "2026-09-17T09:00:00Z", "resumed": False,
+                                            "previous": {"id": 3, "started_at": "2026-09-09T10:00:00Z",
+                                                         "range": "main..other", "comments": 24, "rounds": 1}}))
+    assert line == ("ccr: new review #4 — the database also holds review #3 "
+                    "(main..other, 24 comments, 1 round) of a different change")

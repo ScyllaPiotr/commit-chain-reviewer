@@ -1,9 +1,13 @@
 """Review state for ccr (SPEC.md section 4): comments, rounds and cached git data.
 
-A :class:`ReviewStore` owns one ``sqlite3`` connection (comments, rounds and a
-small ``meta`` table) guarded by a re-entrant lock, plus derived, in-memory
-git data: the resolved range, the commit chain with per-commit file stats and
-a cache of untrimmed CommitDiffs keyed by ``(view, ws_ignore)``.  Every
+A :class:`ReviewStore` owns one ``sqlite3`` connection (reviews, comments,
+rounds and a small ``meta`` table) guarded by a re-entrant lock, plus derived,
+in-memory git data: the resolved range, the commit chain with per-commit file
+stats and a cache of untrimmed CommitDiffs keyed by ``(view, ws_ignore)``.
+The database belongs to the repository, but every comment and round belongs to
+one *review* of it (section 4.6): on open the store adopts the stored review
+only when the range still shares commits with it, so a review of another change
+never inherits its comments, its rounds or its round numbering.  Every
 mutation bumps ``version`` (persisted in ``meta`` so a restarted server keeps
 counting) and wakes the waiters blocked in :meth:`ReviewStore.wait`; every
 successful :meth:`ReviewStore.load` bumps ``generation``.
@@ -37,13 +41,14 @@ __all__ = [
     "StoreError",
     "NotFoundError",
     "ReviewStore",
+    "SCHEMA_VERSION",
     "utcnow",
     "default_db_path",
     "COMBINED",
     "WORKTREE",
 ]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BODY_MAX_BYTES = 64 << 10
 SNIPPET_MAX_LINES = 32
 SNIPPET_MAX_BYTES = 8 << 10
@@ -73,17 +78,24 @@ _ANCHOR_COLUMNS = {"kind": "kind", "commit": "commit_sha", "path": "path", "side
 _ANCHOR_ASSIGNMENTS = ", ".join("%s = ?" % column for column in _ANCHOR_COLUMNS.values())
 _TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
+_ROUNDS_DDL = """CREATE TABLE IF NOT EXISTS rounds (review INTEGER NOT NULL DEFAULT 1, number INTEGER NOT NULL,
+  submitted_at TEXT NOT NULL, verdict TEXT NOT NULL, summary TEXT NOT NULL, base TEXT, head TEXT NOT NULL,
+  commit_shas TEXT NOT NULL, PRIMARY KEY (review, number));"""
+
+_ROUND_COLUMNS = "number, submitted_at, verdict, summary, base, head, commit_shas"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY, started_at TEXT NOT NULL,
+  range_spec TEXT NOT NULL DEFAULT '', cover TEXT NOT NULL DEFAULT '', chain TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY, parent_id TEXT REFERENCES comments(id) ON DELETE CASCADE,
+  review INTEGER NOT NULL DEFAULT 1,
   author TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
   state TEXT NOT NULL, round INTEGER, resolved INTEGER NOT NULL DEFAULT 0,
   kind TEXT NOT NULL, commit_sha TEXT, path TEXT, side TEXT, line INTEGER, start_line INTEGER,
   snippet TEXT NOT NULL DEFAULT '', moved_from TEXT);
-CREATE TABLE IF NOT EXISTS rounds (number INTEGER PRIMARY KEY, submitted_at TEXT NOT NULL, verdict TEXT NOT NULL,
-  summary TEXT NOT NULL, base TEXT, head TEXT NOT NULL, commit_shas TEXT NOT NULL);
-"""
+""" + _ROUNDS_DDL + "\n"
 
 
 def utcnow() -> str:
@@ -160,14 +172,41 @@ def _meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
 
 
+def _columns(conn: sqlite3.Connection, table: str) -> set:
+    return {row["name"] for row in conn.execute("PRAGMA table_info(%s)" % table)}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Schema 1 (one nameless review per repository) → 2 (reviews are rows and every comment carries one).
+
+    Everything a schema-1 database holds belonged to a single review, so it becomes review 1; the cover
+    letter and the remembered chain move out of ``meta`` into its row.
+    """
+    if "review" not in _columns(conn, "comments"):
+        conn.execute("ALTER TABLE comments ADD COLUMN review INTEGER NOT NULL DEFAULT 1")
+    if "review" not in _columns(conn, "rounds"):
+        conn.execute("ALTER TABLE rounds RENAME TO rounds_v1")
+        conn.execute(_ROUNDS_DDL)
+        conn.execute("INSERT INTO rounds (review, %s) SELECT 1, %s FROM rounds_v1" % (_ROUND_COLUMNS, _ROUND_COLUMNS))
+        conn.execute("DROP TABLE rounds_v1")
+    if conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0] == 0:
+        cover, chain = _meta_get(conn, "cover") or "", _meta_get(conn, "chain") or "{}"
+        started = conn.execute("SELECT MIN(created_at) FROM comments").fetchone()[0]
+        if started or cover or chain != "{}":
+            conn.execute("INSERT INTO reviews (id, started_at, cover, chain) VALUES (1, ?, ?, ?)",
+                         (started or utcnow(), cover, chain))
+        conn.execute("DELETE FROM meta WHERE key IN ('cover', 'chain')")
+
+
 def _check_meta(conn: sqlite3.Connection, repo_real: str, db_force: bool) -> None:
-    """Refuse databases written by a newer ccr or for another repository (unless forced)."""
+    """Refuse databases written by a newer ccr or for another repository (unless forced); migrate older ones."""
     stored_schema = _meta_get(conn, "schema_version")
     if stored_schema is not None and int(stored_schema) > SCHEMA_VERSION:
         raise StoreError("db schema too new (%s > %d); upgrade ccr or use another --db" % (stored_schema, SCHEMA_VERSION))
     stored_repo = _meta_get(conn, "repo")
     if stored_repo is not None and stored_repo != repo_real and not db_force:
         raise StoreError("db was created for %s; pass --db-force to reuse" % stored_repo, 409)
+    _migrate(conn)
     _meta_set(conn, "schema_version", str(SCHEMA_VERSION))
     _meta_set(conn, "repo", repo_real)
     conn.commit()
@@ -300,7 +339,12 @@ def _valid_repo_path(path) -> bool:
 # --------------------------------------------------------------------------- the store
 
 class ReviewStore:
-    """Comments, rounds and cached git data of one review session (SPEC.md section 4)."""
+    """Comments, rounds and cached git data of one review session (SPEC.md section 4).
+
+    ``review_id`` is the review the store serves; ``resumed`` says it was opened with comments or
+    rounds already in it, and ``previous_review`` describes the unrelated review that was left behind
+    in the database (both are meant for the ``ccr start`` / ``ccr serve`` banner).
+    """
 
     def __init__(self, repo, spec=None, n=None, worktree: bool = False, first_parent: bool = False,
                  db_path=None, db_force: bool = False):
@@ -327,18 +371,93 @@ class ReviewStore:
         self.db_path = default_db_path(self.repo) if db_path is None else db_path
         self._lock_fd = None
         self._conn = None
+        self.version = 0
+        self.review_id = None
+        self.review_started_at = None
+        self.resumed = False
+        self.previous_review = None
+        self.cover = ""
+        self._chain_memory = {}
         try:
             if self.db_path != ":memory:":
                 self._lock_fd = _lock_file(self.db_path + ".lock")
                 _create_private(self.db_path)
             self._conn = _open_connection(self.db_path)
             _check_meta(self._conn, os.path.realpath(self.repo), db_force)
+            self.version = int(_meta_get(self._conn, "version") or 0)
+            self._select_review()
         except Exception:
             self.close()
             raise
-        self.version = int(_meta_get(self._conn, "version") or 0)
-        self.cover = _meta_get(self._conn, "cover") or ""
-        self._chain_memory = {sha: tuple(entry) for sha, entry in json.loads(_meta_get(self._conn, "chain") or "{}").items()}
+
+    # ------------------------------------------------------------------ reviews
+
+    def _review_size(self, review_id: int) -> dict:
+        return {
+            "comments": self._conn.execute("SELECT COUNT(*) FROM comments WHERE review = ?", (review_id,)).fetchone()[0],
+            "rounds": self._conn.execute("SELECT COUNT(*) FROM rounds WHERE review = ?", (review_id,)).fetchone()[0],
+        }
+
+    def _listed_chain(self):
+        """``(shas, subjects)`` of the range this store was opened with, or None when there is nothing to compare."""
+        try:
+            commits = gitx.list_commits(self.repo, self._range["base"], self._range["head"], self.first_parent)
+        except GitError:
+            return None
+        if not commits:
+            return None
+        return {c["sha"] for c in commits}, {c["subject"] for c in commits}
+
+    @staticmethod
+    def _continues(row, chain) -> bool:
+        """True when ``chain`` is the change ``row`` was reviewing (section 4.6).
+
+        A review remembers every ``sha → (index, subject)`` it has ever listed, so an amend, a rebase or
+        a widened range still shares a sha or a subject with it while a review of another change shares
+        nothing.  Without a chain to compare (an unlistable or commit-less range) every review continues:
+        that must never be the reason one is set aside.
+        """
+        if chain is None:
+            return True
+        memory = json.loads(row["chain"] or "{}")
+        if not memory:
+            return False
+        shas, subjects = chain
+        return bool(shas & set(memory)) or bool(subjects & {entry[1] for entry in memory.values()})
+
+    def _adopt_review(self, row, resumed: bool) -> None:
+        self.review_id, self.review_started_at, self.resumed = row["id"], row["started_at"], resumed
+        self.cover = row["cover"] or ""
+        self._chain_memory = {sha: tuple(entry) for sha, entry in json.loads(row["chain"] or "{}").items()}
+
+    def _select_review(self) -> None:
+        """Adopt the stored review of this change (newest first), else open a new one.
+
+        One database serves one repository (``default_db_path``), so without this every review of that
+        repository would inherit the previous one's comments, rounds and "outdated" threads.
+        """
+        chain = None
+        newest_used = None
+        for row in self._conn.execute("SELECT * FROM reviews ORDER BY id DESC"):
+            size = self._review_size(row["id"])
+            if not (size["comments"] or size["rounds"] or row["cover"]):
+                self._adopt_review(row, False)          # nothing in it to inherit or to lose
+                break
+            if chain is None:
+                chain = self._listed_chain()
+            if self._continues(row, chain):
+                self._adopt_review(row, True)
+                break
+            if newest_used is None:
+                newest_used = dict(size, id=row["id"], started_at=row["started_at"], range=row["range_spec"] or None)
+        else:
+            self.previous_review = newest_used
+            self.review_started_at = utcnow()
+            self.review_id = self._conn.execute(
+                "INSERT INTO reviews (started_at) VALUES (?)", (self.review_started_at,)).lastrowid
+        self._conn.execute("UPDATE reviews SET range_spec = ? WHERE id = ?",
+                           (self._range.get("given") or self._range["spec"] or "", self.review_id))
+        self._conn.commit()
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -369,7 +488,7 @@ class ReviewStore:
             raise StoreError("cover exceeds %d bytes" % MAX_TEXT_BYTES)
         text = text.strip("\n")
         with self._mutate():
-            _meta_set(self._conn, "cover", text)
+            self._conn.execute("UPDATE reviews SET cover = ? WHERE id = ?", (text, self.review_id))
             self.cover = text
             self.generation += 1
         return text
@@ -485,7 +604,8 @@ class ReviewStore:
                     remapped.append(root["id"])
                 else:
                     outdated.append(root["id"])
-            _meta_set(self._conn, "chain", json.dumps({sha: list(entry) for sha, entry in memory.items()}))
+            self._conn.execute("UPDATE reviews SET chain = ? WHERE id = ?",
+                               (json.dumps({sha: list(entry) for sha, entry in memory.items()}), self.review_id))
             self._chain_memory = memory
             self._data = fresh
             self._diff_cache = fresh["cache"]
@@ -588,23 +708,26 @@ class ReviewStore:
 
     def _all_comments(self) -> list:
         listed = self._listed()
-        rows = self._conn.execute("SELECT * FROM comments ORDER BY created_at, rowid").fetchall()
+        rows = self._conn.execute("SELECT * FROM comments WHERE review = ? ORDER BY created_at, rowid",
+                                  (self.review_id,)).fetchall()
         return [self._row_to_comment(row, listed) for row in rows]
 
     def _fetch(self, comment_id) -> dict:
         row = None
         if isinstance(comment_id, str):
-            row = self._conn.execute("SELECT * FROM comments WHERE id = ?", (comment_id,)).fetchone()
+            row = self._conn.execute("SELECT * FROM comments WHERE id = ? AND review = ?",
+                                     (comment_id, self.review_id)).fetchone()
         if row is None:
             raise NotFoundError("comment %r not found" % (comment_id,))
         return self._row_to_comment(row, self._listed())
 
     def _rounds(self) -> list:
         ids_by_round = {}
-        for row in self._conn.execute("SELECT id, round FROM comments WHERE round IS NOT NULL ORDER BY created_at, rowid"):
+        for row in self._conn.execute("SELECT id, round FROM comments WHERE review = ? AND round IS NOT NULL"
+                                      " ORDER BY created_at, rowid", (self.review_id,)):
             ids_by_round.setdefault(row["round"], []).append(row["id"])
         rounds = []
-        for row in self._conn.execute("SELECT * FROM rounds ORDER BY number"):
+        for row in self._conn.execute("SELECT * FROM rounds WHERE review = ? ORDER BY number", (self.review_id,)):
             rounds.append({
                 "number": row["number"],
                 "submitted_at": row["submitted_at"],
@@ -618,7 +741,7 @@ class ReviewStore:
         return rounds
 
     def _round_count(self) -> int:
-        return self._conn.execute("SELECT COUNT(*) FROM rounds").fetchone()[0]
+        return self._conn.execute("SELECT COUNT(*) FROM rounds WHERE review = ?", (self.review_id,)).fetchone()[0]
 
     def _counts(self) -> dict:
         comments = self._all_comments()
@@ -633,7 +756,8 @@ class ReviewStore:
 
     def _root_counts(self) -> dict:
         rows = self._conn.execute(
-            "SELECT commit_sha, COUNT(*) AS n FROM comments WHERE parent_id IS NULL AND commit_sha IS NOT NULL GROUP BY commit_sha")
+            "SELECT commit_sha, COUNT(*) AS n FROM comments WHERE review = ? AND parent_id IS NULL"
+            " AND commit_sha IS NOT NULL GROUP BY commit_sha", (self.review_id,))
         return {row["commit_sha"]: row["n"] for row in rows}
 
     def _ui(self) -> dict:
@@ -657,6 +781,8 @@ class ReviewStore:
                     "bare": self.bare,
                 },
                 "range": dict(self._range, first_parent=self.first_parent),
+                "review": {"id": self.review_id, "started_at": self.review_started_at,
+                           "resumed": self.resumed, "previous": self.previous_review},
                 "options": {"worktree": self.worktree},
                 "cover": self.cover,
                 "commits": commits,
@@ -892,11 +1018,11 @@ class ReviewStore:
     def _insert_comment(self, comment_id, parent_id, author, body, state, round_number, anchor, snippet) -> None:
         now = utcnow()
         self._conn.execute(
-            "INSERT INTO comments (id, parent_id, author, body, created_at, updated_at, state, round, resolved,"
+            "INSERT INTO comments (id, parent_id, review, author, body, created_at, updated_at, state, round, resolved,"
             " kind, commit_sha, path, side, line, start_line, snippet, moved_from)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, NULL)",
-            (comment_id, parent_id, author, body, now, now, state, round_number, anchor["kind"], anchor["commit"],
-             anchor["path"], anchor["side"], anchor["line"], anchor["start_line"], snippet))
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, NULL)",
+            (comment_id, parent_id, self.review_id, author, body, now, now, state, round_number, anchor["kind"],
+             anchor["commit"], anchor["path"], anchor["side"], anchor["line"], anchor["start_line"], snippet))
 
     def add_comment(self, body, anchor=None, author: str = "user", parent_id=None) -> dict:
         """Create a root comment (validated anchor) or a reply (anchor copied from the root)."""
@@ -1091,7 +1217,8 @@ class ReviewStore:
             if ref in (COMBINED, WORKTREE) or _is_full_sha(ref):
                 return ref
             if _is_hex_prefix(ref):
-                rows = self._conn.execute("SELECT DISTINCT commit_sha FROM comments WHERE commit_sha LIKE ?", (ref + "%",)).fetchall()
+                rows = self._conn.execute("SELECT DISTINCT commit_sha FROM comments WHERE review = ? AND commit_sha LIKE ?",
+                                          (self.review_id, ref + "%")).fetchall()
                 if len(rows) == 1:
                     return rows[0]["commit_sha"]
             raise
@@ -1140,16 +1267,19 @@ class ReviewStore:
             raise StoreError("summary exceeds 64 KiB")
         with self._lock:
             data = self._require_data()
-            pending = self._conn.execute("SELECT COUNT(*) FROM comments WHERE state = 'pending'").fetchone()[0]
+            pending = self._conn.execute("SELECT COUNT(*) FROM comments WHERE review = ? AND state = 'pending'",
+                                         (self.review_id,)).fetchone()[0]
             if not pending and not summary and verdict != "approve":
                 raise StoreError("nothing to submit: no pending comments and no summary")
             number = self._round_count() + 1
             with self._mutate():
                 self._conn.execute(
-                    "INSERT INTO rounds (number, submitted_at, verdict, summary, base, head, commit_shas) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (number, utcnow(), verdict, summary, data["range"]["base"], data["range"]["head"],
+                    "INSERT INTO rounds (review, number, submitted_at, verdict, summary, base, head, commit_shas)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (self.review_id, number, utcnow(), verdict, summary, data["range"]["base"], data["range"]["head"],
                      json.dumps([c["sha"] for c in data["commits"]])))
-                self._conn.execute("UPDATE comments SET state = 'submitted', round = ? WHERE state = 'pending'", (number,))
+                self._conn.execute("UPDATE comments SET state = 'submitted', round = ? WHERE review = ? AND state = 'pending'",
+                                   (number, self.review_id))
                 if summary:
                     review_anchor = {"kind": "review", "commit": None, "path": None, "side": None, "line": None, "start_line": None}
                     self._insert_comment(self._new_id(), None, "user", summary, "submitted", number, review_anchor, "")

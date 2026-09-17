@@ -100,7 +100,7 @@ def test_browser_review_flow(live, tmp_path):
     assert report["consoleErrors"] == [], pretty
     assert report["ok"] is True and report["exit_code"] == 0, pretty
     expected_steps = ["load page", "hljs languages", "first render shows All changes", "cover letter and review comment",
-                      "click 2nd commit", "hover row and click [+]", "type and submit comment", "live preview and Cancel keeps draft",
+                      "click 2nd commit", "hover row and click [+]", "type and submit comment", "Write/Preview tabs, auto-grow and Cancel keeps draft",
                       "thread projected into All changes", "toggle split view keeps thread",
                       "drag 3-line range and comment", "submit round from the top bar", "claude reply → toast + New dot",
                       "reload keeps token"]

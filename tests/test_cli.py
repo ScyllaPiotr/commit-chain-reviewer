@@ -512,3 +512,29 @@ def test_wait_reports_a_replaced_server_and_keeps_its_record(cli, ccr_session_di
     assert cli.run("status", check=0).returncode == 0
     cli.run("stop", check=0)
     assert not pid_alive(first["pid"]) and not pid_alive(second["pid"])
+
+
+def test_a_new_review_does_not_inherit_the_one_left_in_the_database(cli, fixture_repo):
+    """SPEC 4.6: a server that dies without `ccr stop` leaves its database behind; the next review starts clean."""
+    first = cli.start("--range", "main..feature")
+    cli.run("comment", "--commit", fixture_repo.sha(FEATURE_SUBJECTS[0]), "on the feature chain", check=0)
+    assert api(first, "POST", "/api/submit", {"verdict": "comment", "summary": "round one"})["number"] == 1
+    os.kill(first["pid"], signal.SIGKILL)
+    assert wait_for(lambda: not pid_alive(first["pid"]))
+
+    second = cli.start("--range", "main~1..main")
+    assert second["review"]["id"] == 2 and second["review"]["resumed"] is False
+    assert second["review"]["previous"] == {"id": 1, "started_at": second["review"]["previous"]["started_at"],
+                                            "range": "main..feature", "comments": 2, "rounds": 1}
+    assert second["counts"]["total"] == 0 and second["rounds"] == 0
+    assert cli.run("comments", check=0).stdout == "ccr: no comments match\n"
+    reloaded = cli.run("reload", check=0).stdout
+    assert "0 now outdated" in reloaded and "left the range" not in reloaded
+    assert api(second, "POST", "/api/submit", {"verdict": "comment", "summary": "its own first round"})["number"] == 1
+
+    cli.run("stop", "--keep-db", check=0)
+    resumed = cli.start("--range", "main~1..main")
+    assert resumed["review"]["id"] == 2 and resumed["review"]["resumed"] is True
+    assert resumed["counts"]["total"] == 1 and resumed["rounds"] == 1
+    cli.run("stop", check=0)
+    assert not pid_alive(second["pid"]) and not pid_alive(resumed["pid"])
