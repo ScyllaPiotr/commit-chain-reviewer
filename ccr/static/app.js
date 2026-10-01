@@ -1794,6 +1794,14 @@
     return tags.join('');
   }
 
+  /** A thread's reply buttons: [Reply], or in PR mode [Ask AI] and, on a review thread on GitHub, [GH reply]. */
+  function replyButtonsHtml(root, cls, plainLabel) {
+    const key = `reply:${root.id}`;
+    const buttons = !prMode() ? [[null, 'Reply', plainLabel]] : [['question', 'Ask AI', 'Ask AI about this thread']]
+      .concat(githubThreadOf(root) ? [['github', 'GH reply', 'GH reply in this thread, for your pending review']] : []);
+    return buttons.map(([intent, text, label]) => `<button type="button" class="${cls}${cls === 'btn-reply' && hasDraftFor(key, intent) ? ' has-draft' : ''}"${intent ? ` data-intent="${intent}"` : ''} aria-label="${label}">${text}</button>`).join('');
+  }
+
   function commentHtml(c, root) {
     const editKey = `edit:${c.id}`;
     const editing = state.openEditors.has(editKey);
@@ -1805,7 +1813,7 @@
         <div class="comment-actions" role="group" aria-label="Comment actions">
           ${isPosted(c) || isMirrored(c) ? '' : '<button type="button" class="act-edit" aria-label="Edit comment">Edit</button>'}
           ${fromGitHub ? '' : '<button type="button" class="act-delete" aria-label="Delete comment">Delete</button>'}
-          <button type="button" class="act-reply" aria-label="Reply to thread">Reply</button>
+          ${replyButtonsHtml(root ? c : rootOf(c), 'act-reply', 'Reply to thread')}
           ${root ? `<button type="button" class="act-resolve" aria-label="${c.resolved ? 'Unresolve' : 'Resolve'} thread">${c.resolved ? 'Unresolve' : 'Resolve'}</button>` : ''}
         </div>
       </div>
@@ -1828,12 +1836,13 @@
       const what = root.resolved ? '<span class="tick">✓</span> Resolved'
         : `GitHub ${root.github.kind === 'review' ? 'review' : 'thread'} by @${esc(root.github.login)}${root.github.outdated ? ' · outdated' : ''}`;
       const link = isPosted(root) ? ' ' + githubTagHtml(root) : isMirrored(root) ? ' ' + mirroredTagsHtml(root, false) : '';
-      inner = `<div class="resolved-line">${what} · ${members.length} comment${members.length === 1 ? '' : 's'}${link} <button type="button" class="link-btn btn-show-resolved">Show</button></div>`;
+      const ask = prMode() && !commentsDisabled() ? ' <button type="button" class="link-btn btn-reply" data-intent="question" aria-label="Ask AI about this thread">Ask AI</button>' : '';
+      inner = `<div class="resolved-line">${what} · ${members.length} comment${members.length === 1 ? '' : 's'}${link} <button type="button" class="link-btn btn-show-resolved">Show</button>${ask}</div>`;
     } else {
       inner = a.kind === 'line' && a.start_line ? `<div class="range-note">Lines ${esc(a.start_line)}–${esc(a.line)} (${esc(a.side)} side)</div>` : '';
       inner += members.map((c) => commentHtml(c, c.id === rootId)).join('');
       if (!commentsDisabled()) {
-        inner += `<div class="thread-foot"><button type="button" class="btn-reply${hasDraft(`reply:${rootId}`) ? ' has-draft' : ''}" aria-label="Reply">Reply</button>
+        inner += `<div class="thread-foot">${replyButtonsHtml(root, 'btn-reply', 'Reply')}
           <button type="button" class="btn-resolve-thread" aria-label="${root.resolved ? 'Unresolve' : 'Resolve'} thread">${root.resolved ? 'Unresolve' : 'Resolve'}</button>
           ${root.resolved || isQuiet(root) ? '<button type="button" class="link-btn btn-hide-resolved">Hide</button>' : ''}</div>`;
       }
@@ -1979,7 +1988,7 @@
     focusEditor(key);
   }
 
-  /** Open an editor identified by key. entry = {mode:'new', anchor, intent?} | {mode:'reply', rootId} | {mode:'edit', id, rootId}. */
+  /** Open an editor identified by key. entry = {mode:'new', anchor, intent?} | {mode:'reply', rootId, intent?} | {mode:'edit', id, rootId}. */
   async function openEditor(key, entry) {
     if (commentsDisabled()) { toast('Comments are disabled in compare view', 'error'); return; }
     state.openEditors.set(key, entry);
@@ -2805,7 +2814,15 @@
     if (hit('a.tag-from') && thread) { e.preventDefault(); navigateTo({ threadId: thread.dataset.threadId, native: true }); return; }
     if ((b = hit('.act-edit')) && comment) { const c = state.comments.get(comment.dataset.id); openEditor(`edit:${c.id}`, { mode: 'edit', id: c.id, rootId: c.parent_id || c.id }); return; }
     if ((b = hit('.act-delete')) && comment) { deleteComment(comment.dataset.id); return; }
-    if ((hit('.act-reply') || hit('.btn-reply')) && thread) { openEditor(`reply:${thread.dataset.threadId}`, { mode: 'reply', rootId: thread.dataset.threadId }); return; }
+    if ((b = hit('.act-reply') || hit('.btn-reply')) && thread) {
+      const rootId = thread.dataset.threadId;
+      const key = `reply:${rootId}`;
+      if (b.closest('.resolved-line')) state.expandedResolved.add(rootId); // a collapsed thread opens for the question
+      const form = state.openEditors.has(key) && editorForm(key);
+      if (form && b.dataset.intent) { setEditorIntent(form, b.dataset.intent); focusEditor(key); }
+      else openEditor(key, { mode: 'reply', rootId, intent: b.dataset.intent });
+      return;
+    }
     if ((hit('.act-resolve') || hit('.btn-resolve-thread')) && thread) { toggleResolved(thread.dataset.threadId); return; }
     if (hit('.btn-show-resolved') && thread) { state.expandedResolved.add(thread.dataset.threadId); patchThreadById(thread.dataset.threadId); return; }
     if (hit('.btn-hide-resolved') && thread) { state.expandedResolved.delete(thread.dataset.threadId); patchThreadById(thread.dataset.threadId); return; }

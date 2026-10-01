@@ -325,8 +325,8 @@ into a worktree of its own, uses the pull request body as the cover letter and r
 `ccr start --range <merge base>..HEAD --pr <url>`, so **All changes** is exactly the diff GitHub shows. The agent
 changes no code; each comment you leave is one of two kinds:
 
-* **Question** — the **Ask AI** gutter button (and every comment on a commit or on the whole pull request, and
-  every reply outside a GitHub thread). The agent answers it in the thread; nothing goes to GitHub.
+* **Question** — an **Ask AI** button: in the gutter, on a file, a commit, the whole pull request, or a thread
+  (every reply outside a GitHub thread is one too). The agent answers it in the thread; nothing goes to GitHub.
 * **GitHub comment** — the **GH comment** gutter button, on a line, a range or a file (the file header has **Ask
   AI** and **GH comment** too). After you click **Submit**, the agent checks it — its claims against the code,
   whether it fits its line — and if it holds, `ccr gh-post` puts it **verbatim** into your **pending** review on
@@ -335,12 +335,14 @@ changes no code; each comment you leave is one of two kinds:
   comment (which makes it pending again) or tell it to post as it is, and submit again.
 
 **What others said** comes in too: `ccr gh-sync` (the agent runs it when it starts the review and before every
-round) mirrors the pull request's review threads and review bodies into ccr, read-only. A thread shows on its
-line in **All changes** while GitHub still has one there; an outdated one sits collapsed on its file, as on GitHub.
-Ask the agent about any of them, or reply on GitHub right from ccr: the reply editor of a review thread has an
-*Ask AI | GH reply* switch, and a GitHub reply is checked and posted into your pending review like a GitHub
-comment. Comments from GitHub cannot be edited or deleted in ccr, nor can a thread that holds one. Within a thread the two conversations read apart: what is or goes on GitHub sits on grey, your questions
-and the agent's answers on blue, and the editor takes the colour of what you are writing.
+round) mirrors the pull request's review threads and review bodies into ccr, read-only. A thread shows on its line
+in **All changes** while GitHub still has one there; an outdated one sits collapsed on its file, as on GitHub. Ask
+the agent about any of them with the thread's **Ask AI** (a collapsed thread has one too), or reply on GitHub right
+from ccr with **GH reply** (the reply editor's *Ask AI | GH reply* switch changes your mind); a GitHub reply is
+checked and posted into your pending review like a GitHub comment. Comments from GitHub cannot be edited or deleted
+in ccr, nor can a thread that holds one. Within a thread the two conversations read apart: what is or goes on GitHub
+sits on grey, your questions and the agent's answers on blue, and the editor takes the colour of what you are
+writing.
 
 The editor has an *Ask AI | GH comment* switch that keeps what you typed. GitHub only takes comments on the
 lines its pull request diff shows, so a GitHub comment on any other line is refused right away (keep it as a

@@ -223,8 +223,9 @@ comment** you check and, when it holds, post verbatim into the user's pending Gi
 3. `ccr start --repo "$REPO" --range "$BASE..HEAD" --pr <url> --cover "$SCRATCH/ccr-cover.md"` prints
    `ccr: pr <url> (<owner/repo#N>): questions for Claude, GitHub comments for your pending review` before the URL.
    Then `ccr gh-sync --repo "$REPO"` mirrors the pull request's review threads and review bodies into ccr (read
-   only). Hand over the URL as in step 1.4 and add: "**Ask AI** asks me, **GH comment** drafts a comment for your
-   pending GitHub review, and in a GitHub thread Reply offers **GH reply**; you submit that review on GitHub."
+   only). Hand over the URL as in step 1.4 and add: "**Ask AI** asks me, also in a thread; **GH comment** drafts a
+   comment for your pending GitHub review, and **GH reply** a reply in a GitHub thread; you submit that review on
+   GitHub."
 
 ### Every round
 

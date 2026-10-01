@@ -497,6 +497,8 @@ table.diff tr.threads .thread + .thread, table.diff tr.threads .thread + .editor
 .thread-foot { display: flex; gap: 8px; margin-top: 6px; align-items: center; }
 .thread-foot .btn-reply, .thread-foot .btn-resolve-thread { position: relative; border: 1px solid var(--border); background: var(--bg-2); border-radius: 4px; font-size: 12px; padding: 1px 8px; color: var(--fg); }
 .thread-foot .btn-reply:hover, .thread-foot .btn-resolve-thread:hover { background: var(--bg-3); }
+.thread-foot .btn-reply[data-intent="question"] { border-color: var(--accent); color: var(--accent); }
+.thread-foot .btn-reply[data-intent="github"] { border-color: var(--github); }
 .thread .editor-block { margin-top: 8px; }
 .comment .comment-editor { margin-top: 4px; }
 

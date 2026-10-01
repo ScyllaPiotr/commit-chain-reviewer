@@ -704,7 +704,17 @@ export async function runPrScenario(page, url) {
     const mine = JSON.stringify(`#main .thread[data-thread-id="${githubId}"]`);
     await page.waitFor(`document.querySelector(${mine}) && document.querySelector(${mine}).textContent.includes('Because 50 is too small.')`, { label: "nyh's reply under the posted comment" });
     if (await page.evaluate(`document.querySelector(${mine}).querySelectorAll('.act-delete').length`)) throw new Error('a thread holding a GitHub reply offers Delete');
-    await page.click(`#main .thread[data-thread-id="${await page.evaluate(`${nyh}.dataset.threadId`)}"] .btn-reply`);
+    const replies = (sel) => `[...document.querySelectorAll(${JSON.stringify(sel)})].map((b) => b.dataset.intent + ':' + b.textContent).join(',')`;
+    const nyhId = await page.evaluate(`${nyh}.dataset.threadId`);
+    const offers = await page.evaluate(`[${replies(`#main .thread[data-thread-id="${nyhId}"] .thread-foot .btn-reply`)},
+      ${replies(`#main .thread[data-thread-id="${nyhId}"] .comment[data-author="github"] .act-reply`)},
+      ${replies(`#main .thread[data-thread-id="${await page.evaluate(`${threadOf('What is value 6 for?')}.dataset.threadId`)}"] .thread-foot .btn-reply`)}]`);
+    if (offers.join(' / ') !== 'question:Ask AI,github:GH reply / question:Ask AI,github:GH reply,question:Ask AI,github:GH reply / question:Ask AI') throw new Error('reply buttons: ' + offers.join(' / '));
+    const oldId = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(card + ' .thread-block[data-key-host="file"] .thread')})].find((t) => /GitHub thread by @nyh · outdated/.test(t.textContent)).dataset.threadId`);
+    await page.click(`#main .thread[data-thread-id="${oldId}"] .resolved-line .btn-reply[data-intent="question"]`);
+    await page.waitFor(`(() => { const t = document.querySelector('#main .thread[data-thread-id="${oldId}"]'); return t && t.textContent.includes('An old remark') && t.querySelector('form.comment-editor[data-mode="reply"][data-channel="claude"] textarea'); })()`, { label: 'Ask AI on a collapsed thread opens it with a question editor' });
+    await page.click(`#main .thread[data-thread-id="${oldId}"] .btn-cancel-comment`);
+    await page.click(`#main .thread[data-thread-id="${nyhId}"] .thread-foot .btn-reply[data-intent="question"]`);
     await page.waitFor(`document.querySelector('.editor-block form.comment-editor[data-mode="reply"] .intent-btn[data-intent="github"]')`, { label: 'reply editor with the GitHub switch' });
     const switchText = await page.evaluate(`[...document.querySelectorAll('.editor-block form.comment-editor[data-mode="reply"] .intent-btn')].map((b) => b.textContent).join('|')`);
     if (switchText !== 'Ask AI|GH reply') throw new Error('reply switch: ' + switchText);
@@ -714,8 +724,10 @@ export async function runPrScenario(page, url) {
     await page.waitFor(`document.querySelector('.editor-block form.comment-editor[data-mode="reply"][data-intent="github"][data-channel="github"] .btn-submit-comment').textContent === 'Add GH reply' && document.querySelector('.editor-block form.comment-editor[data-mode="reply"] textarea').value === 'Agreed, see the design.'`, { label: 'switched to a GitHub reply' });
     await page.click('.editor-block form.comment-editor[data-mode="reply"] .btn-submit-comment');
     await page.waitFor(`${nyh} && [...${nyh}.querySelectorAll('.comment[data-author="user"][data-channel="github"]')].some((c) => c.textContent.includes('Agreed, see the design.') && c.querySelector('.tag-github:not(.is-posted)'))`, { label: 'GitHub reply in the thread, not posted yet' });
-    await page.click(`#main .thread[data-thread-id="${await page.evaluate(`${nyh}.dataset.threadId`)}"] .btn-reply`);
-    await page.waitFor(`document.querySelector('.editor-block form.comment-editor[data-mode="reply"][data-channel="claude"] textarea')`, { label: 'the next reply is a question again' });
+    await page.click(`#main .thread[data-thread-id="${nyhId}"] .thread-foot .btn-reply[data-intent="github"]`);
+    await page.waitFor(`document.querySelector('.editor-block form.comment-editor[data-mode="reply"][data-intent="github"] textarea')`, { label: 'GH reply opens a GitHub reply' });
+    await page.click(`#main .thread[data-thread-id="${nyhId}"] .thread-foot .btn-reply[data-intent="question"]`);
+    await page.waitFor(`document.querySelector('.editor-block form.comment-editor[data-mode="reply"][data-channel="claude"]:not([data-intent]) textarea')`, { label: 'Ask AI turns the open editor into a question' });
     await page.type('Which spec does radek mean?');
     await page.click('.editor-block form.comment-editor[data-mode="reply"] .btn-submit-comment');
     await page.waitFor(`${nyh} && [...${nyh}.querySelectorAll('.comment[data-author="user"][data-channel="claude"]')].some((c) => c.textContent.includes('Which spec does radek mean?') && c.querySelector('.tag-question'))`, { label: 'question in the GitHub thread' });
