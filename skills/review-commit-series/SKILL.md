@@ -1,6 +1,6 @@
 ---
 name: review-commit-series
-description: Show the user a GitHub-like review UI of a commit chain via ccr and process their inline comments — use when the user asks to show/review the code, see the commits or the diff, look at the changes, get a review link/URL, or leave and address review comments on a commit chain.
+description: Show the user a GitHub-like review UI of a commit chain via ccr and process their inline comments — use when the user asks to show/review the code, see the commits or the diff, look at the changes, get a review link/URL, or leave and address review comments on a commit chain; also to read or review someone else's GitHub pull request in that UI (PR mode), with inline questions for Claude and GitHub comments posted to the user's pending review.
 argument-hint: "[range] e.g. main..HEAD (optional; defaults to the branch point..HEAD)"
 ---
 
@@ -199,6 +199,59 @@ export in a specific place, run `ccr export --repo "$REPO" --md -o <file>` befor
 conversation ends without a decision, leave the server running and say so:
 "ccr is still serving `<url>`; run `ccr stop` when you are finished."
 
+## PR mode — someone else's pull request
+
+Use it when the user wants to read or review a GitHub pull request they did not write ("review PR #N with ccr",
+"let me look at this PR"). You change no code. Every comment is either a **question** you answer, or a **GitHub
+comment** you check and, when it holds, post verbatim into the user's pending GitHub review.
+
+### Setup
+
+1. Fetch the pull request head into a review ref and give it a worktree of its own (a ccr session belongs to one
+   worktree, so it never collides with the user's own reviews in the clone); `gh pr view <N> --json
+   url,author,baseRefName,headRefOid,body` gives the rest:
+
+   ```sh
+   git -C "$CLONE" fetch <remote> pull/<N>/head:refs/review/pr-<N> <base branch>
+   git -C "$CLONE" worktree add --detach "$SCRATCH/pr-<N>" refs/review/pr-<N>
+   REPO="$SCRATCH/pr-<N>"; BASE=$(git -C "$REPO" merge-base <remote>/<base branch> HEAD)
+   ```
+
+   `BASE` must be the merge base GitHub's "Files changed" uses — `ccr gh-post` refuses to post otherwise.
+2. The cover letter is the pull request body verbatim, followed by one line
+   `PR: <url> by @<author> (the cover letter above is the PR body, verbatim)`.
+3. `ccr start --repo "$REPO" --range "$BASE..HEAD" --pr <url> --cover "$SCRATCH/ccr-cover.md"` prints
+   `ccr: pr <url> (<owner/repo#N>): questions for Claude, GitHub comments for your pending review` before the URL.
+   Hand over the URL as in step 1.4 and add: "`?` asks me, `GH` drafts a comment for your pending GitHub review;
+   you submit that review on GitHub."
+
+### Every round
+
+The `ccr wait` header ends with `— <g> GitHub comments to check and post` when the round has some, and every root
+says what it is right after its author: `question`, `GitHub comment (not posted)` or `GitHub comment (posted: <url>)`.
+
+- **Questions and replies**: answer from the code, citing `path:line`, and change no file. Reply without
+  `[resolve]`; the user resolves.
+- **GitHub comments**: check one before posting it — every factual claim holds at HEAD (verify each `file:line`),
+  it asks something of this pull request and fits the line it is on, and it has no typo or broken Markdown.
+  `ccr gh-post --repo "$REPO" --dry-run <id>` shows where GitHub will anchor it (the pull request diff's
+  `path:line`, side, the lines there) and its verbatim body, and asks GitHub nothing.
+  - Sound → `ccr gh-post --repo "$REPO" <id>`: it posts the body verbatim into the user's pending review (starting
+    one when there is none), one comment at a time, re-reads the review after each and records the post. Reply in
+    the thread with the link it printed, `[resolve]`.
+  - Not sound → do not post, and never post a reworded version. Reply with what is wrong and one corrected wording,
+    without `[resolve]`. The user edits the comment (an edit makes it pending again) or answers "post it as it is",
+    and submits again; then check the text as it is now, and post.
+  - `<id>: ERROR …` → nothing was posted, unless the line says it was posted but not recorded (then run the same
+    `ccr gh-post` again: it finds the comment and records it). Say in the thread what was refused and how to fix
+    it (a line outside the pull request diff, or one that moved since, goes where it belongs, in **All changes**).
+    `warning: …` lines → the comment is posted, but tell the user what the re-read found.
+- Pending comments are drafts here too: `ccr gh-post` refuses a GitHub comment until the user submits it.
+- Never submit, edit or delete the GitHub review or anything in it yourself, and post nothing but the user's
+  submitted GitHub comments: the user submits the review on GitHub, with the verdict and the body they choose.
+
+When the user is done, ask whether to stop the server (step 6) and offer to remove the worktree and the review ref.
+
 ## Rules
 
 - Always `--repo <absolute path>`; never depend on the current directory.
@@ -218,6 +271,9 @@ conversation ends without a decision, leave the server running and say so:
   server keeps the code it started with; `--keep-db` preserves comments, rounds and the cover letter) and hand
   over the new URL.
 - Do not paste the token/URL into commit messages, issues or files.
+- PR mode: no code changes; post only with `ccr gh-post`, only the user's submitted GitHub comments that passed your
+  check, and verbatim; never write GitHub comments yourself (`ccr comment --github` is not for you) and never submit
+  the GitHub review.
 
 ## What you will read
 
@@ -268,6 +324,8 @@ How to read it:
 - `user · new:11` = comment by the human on new-side line 11 of that commit's diff; `old:7` = deleted
   side; `new:20-24` = a range (act on the whole range); `file` / `commit` = anchored to the file / commit.
 - `→ HEAD src/fetcher.py:14 (moved)` = that line is now line 14 in HEAD. Edit at the HEAD location.
+- PR mode: `question` / `GitHub comment (not posted)` / `GitHub comment (posted: <url>)` right after the author say
+  what a root is for; the header line carries `— PR <owner/repo#N>`.
 - `pending` = not yet in a submitted round (a draft — do not act on it); `R1` = submitted in round 1;
   `unresolved`/`resolved`; `last: user` = awaiting your answer.
 - Snippet rows: `<old#> <new#> <marker> <text>`; the anchored line(s) are prefixed with `>`.
@@ -320,6 +378,9 @@ non-outdated root that is exactly what `--unanswered` selects.
 | Fix my own comment | `ccr edit --repo "$REPO" <id> "text"` · `ccr delete --repo "$REPO" <id> [--cascade]` |
 | Re-anchor a thread | `ccr move --repo "$REPO" <id> --commit <sha> [--path P [--line N]]` |
 | Pick up new commits | `ccr reload --repo "$REPO"` |
+| PR mode: link the review to a pull request | `ccr start --repo "$REPO" --range "$BASE..HEAD" --pr <url>` |
+| PR mode: where a GitHub comment would go | `ccr gh-post --repo "$REPO" --dry-run <id>` |
+| PR mode: post GitHub comments to the pending review | `ccr gh-post --repo "$REPO" <id>…` |
 | Server log | `ccr logs --repo "$REPO" -n 100` |
 | All sessions on this machine | `ccr sessions` |
 | Save the review | `ccr export --repo "$REPO" --md -o review.md` |

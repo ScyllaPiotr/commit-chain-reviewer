@@ -114,7 +114,18 @@ export class CDP {
  * `errors` collects everything that counts as a console error for the report.
  */
 export class Page {
-  constructor(cdp, shotsDir) { this.cdp = cdp; this.shotsDir = shotsDir; this.errors = []; this.screenshots = []; }
+  constructor(cdp, shotsDir) { this.cdp = cdp; this.shotsDir = shotsDir; this.errors = []; this.expected = []; this.screenshots = []; }
+
+  /** Console errors minus the ones a step announced with `expected` (each pattern excuses one error). */
+  unexpectedErrors() {
+    const patterns = [...this.expected];
+    return this.errors.filter((error) => {
+      const i = patterns.findIndex((p) => p.test(error));
+      if (i < 0) return true;
+      patterns.splice(i, 1);
+      return false;
+    });
+  }
 
   async init() {
     await this.cdp.send('Page.enable');
@@ -515,11 +526,161 @@ export async function runScenario(page, url) {
   });
 }
 
+/** The pull request the PR-mode server is linked to (mirrors PR_URL in test_e2e.py). */
+export const PR_URL = 'https://github.com/o/r/pull/7';
+
+/** PR mode (spec section 10) against the same fixture, linked to PR_URL: questions for Claude and GitHub comments. */
+export async function runPrScenario(page, url) {
+  const runner = new Runner(page, page.report);
+  const card = '.file-card[data-path="src/app.py"]';
+  const row = (n) => `${card} tr.line[data-n="${n}"]`;
+  const isShown = (sel) => `(() => { const el = document.querySelector(${JSON.stringify(sel)}); return Boolean(el) && getComputedStyle(el).display !== 'none'; })()`;
+  const editorLabel = `document.querySelector('tr.editor .btn-submit-comment').textContent`;
+  const threadOf = (text) => `[...document.querySelectorAll('#main .thread')].find((t) => t.textContent.includes(${JSON.stringify(text)}))`;
+  let githubId = null;
+
+  await runner.step('load page in PR mode', async () => {
+    await page.navigate(url);
+    await page.waitFor(`document.querySelector('.file-card[data-rendered="1"] table.diff')`);
+    const link = await page.evaluate(`(() => { const a = document.querySelector('#pr-link'); return { hidden: a.hidden, text: a.textContent, href: a.href, target: a.target }; })()`);
+    if (link.hidden || link.text !== 'PR #7' || link.href !== PR_URL || link.target !== '_blank') throw new Error('PR link: ' + JSON.stringify(link));
+    return link.text;
+  });
+
+  await runner.step('question about the whole pull request', async () => {
+    const label = await page.evaluate(`document.querySelector('#btn-comment-review').textContent.trim()`);
+    if (!label.endsWith('Ask about the whole pull request')) throw new Error('review button label: ' + label);
+    await page.click('#btn-comment-review');
+    await page.waitFor(`document.querySelector('#commit-header form.comment-editor[data-key="review:"] textarea')`, { label: 'review editor' });
+    const editor = await page.evaluate(`(() => { const f = document.querySelector('#commit-header form.comment-editor'); return { label: f.querySelector('.btn-submit-comment').textContent, intent: Boolean(f.querySelector('.editor-intent')), info: f.querySelector('.anchor-info').textContent }; })()`);
+    if (editor.label !== 'Ask' || editor.intent || editor.info !== 'whole pull request') throw new Error('review editor: ' + JSON.stringify(editor));
+    await page.type('Why does the series need two commits?');
+    await page.click('#commit-header form.comment-editor .btn-submit-comment');
+    await page.waitFor(`document.querySelector('#commit-header .thread-block[data-key-host="review"] .thread .tag-question')`, { label: 'review question tagged' });
+    return 'tagged Question';
+  });
+
+  await runner.step('click 2nd commit', async () => {
+    await page.click('#commit-list .commit-item:nth-child(2)');
+    await page.waitFor(`document.querySelector('#commit-list .commit-item:nth-child(2)').classList.contains('is-selected') && document.querySelector(${JSON.stringify(card + '[data-rendered="1"] table.diff')})`);
+    return await page.evaluate(`document.querySelector('#commit-header .subject').textContent.trim()`);
+  });
+
+  await runner.step('gutter forks into ? and GH', async () => {
+    await page.hover(row(5) + ' td.code');
+    const q = row(5) + ' td.num.new .btn-add-comment[data-intent="question"]';
+    const g = row(5) + ' td.num.new .btn-add-comment[data-intent="github"]';
+    await page.waitFor(`${isShown(q)} && ${isShown(g)}`, { label: 'both gutter buttons in the hovered row' });
+    const boxes = await page.evaluate(`[${JSON.stringify(q)}, ${JSON.stringify(g)}].map((s) => { const el = document.querySelector(s); const r = el.getBoundingClientRect(); return { text: el.textContent, left: r.left, right: r.right, label: el.getAttribute('aria-label') }; })`);
+    if (boxes[0].text !== '?' || boxes[1].text !== 'GH' || boxes[0].right > boxes[1].left) throw new Error('gutter buttons: ' + JSON.stringify(boxes));
+    if (await page.evaluate(`Boolean(document.querySelector('#main .btn-add-comment:not([data-intent])'))`)) throw new Error('a plain [+] is left in PR mode');
+    await page.shot('pr-01-gutter');
+    return boxes.map((b) => b.label).join(' | ');
+  });
+
+  await runner.step('GitHub comment on a line', async () => {
+    await page.click(row(5) + ' .btn-add-comment[data-intent="github"]');
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-intent="github"] textarea')`, { label: 'GitHub editor' });
+    const label = await page.evaluate(editorLabel);
+    if (label !== 'Add GitHub comment') throw new Error('submit label ' + label);
+    if (!(await page.evaluate(`Boolean(document.querySelector('tr.editor .intent-btn.is-active[data-intent="github"]'))`))) throw new Error('GitHub not selected in the switch');
+    await page.type('Why 500?');
+    await page.click('tr.editor .btn-submit-comment');
+    await page.waitFor(`!document.querySelector('tr.editor') && ${threadOf('Why 500?')} && ${threadOf('Why 500?')}.querySelector('.tag-github:not(.is-posted)')`, { label: 'GitHub thread tagged not posted' });
+    githubId = await page.evaluate(`${threadOf('Why 500?')}.dataset.threadId`);
+    const status = await page.evaluate(`ccrState.comments.get(${JSON.stringify(githubId)}).github.status`);
+    if (status !== 'local') throw new Error('github status ' + status);
+    await page.shot('pr-02-github-comment');
+    return githubId;
+  });
+
+  await runner.step('question with the editor switch', async () => {
+    await page.hover(row(6) + ' td.code');
+    await page.click(row(6) + ' .btn-add-comment[data-intent="question"]');
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor:not([data-intent]) textarea')`, { label: 'question editor' });
+    if ((await page.evaluate(editorLabel)) !== 'Ask') throw new Error('question label ' + (await page.evaluate(editorLabel)));
+    await page.type('What is value 6 for?');
+    await page.click('tr.editor .intent-btn[data-intent="github"]');
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-intent="github"]') && document.querySelector('tr.editor textarea').value === 'What is value 6 for?'`, { label: 'switched to GitHub, text kept' });
+    if ((await page.evaluate(editorLabel)) !== 'Add GitHub comment') throw new Error('label after switching');
+    await page.click('tr.editor .intent-btn[data-intent="question"]');
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor:not([data-intent])') && ${editorLabel} === 'Ask'`, { label: 'switched back' });
+    await page.click('tr.editor .btn-submit-comment');
+    await page.waitFor(`!document.querySelector('tr.editor') && ${threadOf('What is value 6 for?')} && ${threadOf('What is value 6 for?')}.querySelector('.tag-question')`, { label: 'question thread' });
+    return 'switch kept the text';
+  });
+
+  await runner.step('a draft keeps its kind', async () => {
+    const gh = row(7) + ' .btn-add-comment[data-intent="github"]';
+    const q = row(7) + ' .btn-add-comment[data-intent="question"]';
+    await page.hover(row(7) + ' td.code');
+    await page.click(gh);
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-intent="github"] textarea')`, { label: 'GitHub editor on line 7' });
+    const key = await page.evaluate(`document.querySelector('tr.editor form.comment-editor').dataset.key`);
+    await page.type('A GitHub draft');
+    await page.click('tr.editor .btn-cancel-comment');
+    await page.waitFor(`!document.querySelector('tr.editor')`, { label: 'editor closed, draft kept' });
+    await page.hover(row(7) + ' td.code');
+    await page.waitFor(`document.querySelector(${JSON.stringify(gh + '.has-draft')}) && !document.querySelector(${JSON.stringify(q + '.has-draft')})`, { label: 'the dot is on GH only' });
+    if ((await page.evaluate(`localStorage.getItem(${JSON.stringify('ccr:draft-intent:' + key)})`)) !== 'github') throw new Error('draft intent not stored');
+    await page.click(gh);
+    await page.waitFor(`document.querySelector('tr.editor textarea') && document.querySelector('tr.editor textarea').value === 'A GitHub draft'`, { label: 'draft restored' });
+    await page.evaluate(`(() => { const ta = document.querySelector('tr.editor textarea'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    await page.click('tr.editor .btn-cancel-comment');
+    await page.waitFor(`!document.querySelector('tr.editor') && localStorage.getItem(${JSON.stringify('ccr:draft-intent:' + key)}) === null`, { label: 'emptied draft dropped with its kind' });
+    return key;
+  });
+
+  await runner.step('a line outside the pull request diff stays a question', async () => {
+    await page.click(`${card} tr.hunk[data-gap="1"] .btn-expand-all`);
+    await page.waitFor(`document.querySelector(${JSON.stringify(row(10) + '[data-x="1"]')})`, { label: 'context line 10 expanded' });
+    await page.hover(row(10) + ' td.code');
+    await page.click(row(10) + ' .btn-add-comment[data-intent="github"]');
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-intent="github"] textarea')`, { label: 'GitHub editor on a context line' });
+    await page.type('Unrelated to the change');
+    page.expected.push(/status of 400 \(Bad Request\) .*\/api\/comments$/); // the refusal is the point of this step
+    await page.click('tr.editor .btn-submit-comment');
+    await page.waitFor(`[...document.querySelectorAll('#toasts .toast.error')].some((t) => /is not in the pull request diff/.test(t.textContent))`, { label: 'refusal toast' });
+    if (!(await page.evaluate(`Boolean(document.querySelector('tr.editor textarea')) && !document.querySelector('tr.editor form').classList.contains('is-busy')`))) throw new Error('editor closed or stuck after the refusal');
+    await page.click('tr.editor .intent-btn[data-intent="question"]');
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor:not([data-intent])')`, { label: 'question again' });
+    await page.click('tr.editor .btn-submit-comment');
+    await page.waitFor(`!document.querySelector('tr.editor') && ${threadOf('Unrelated to the change')}`, { label: 'posted as a question' });
+    return 'refused for GitHub, accepted as a question';
+  });
+
+  await runner.step('file header forks too', async () => {
+    const buttons = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(card + ' .file-header .btn-comment-file')})].map((b) => b.dataset.intent + ':' + b.textContent)`);
+    if (buttons.join(',') !== 'question:?,github:GH') throw new Error('file buttons ' + buttons);
+    await page.click(card + ' .file-header .btn-comment-file[data-intent="github"]');
+    await page.waitFor(`document.querySelector(${JSON.stringify(card + ' .thread-block[data-key-host="file"] form.comment-editor[data-intent="github"] textarea')})`, { label: 'file GitHub editor' });
+    await page.type('Please split this file.');
+    await page.click(card + ' .thread-block[data-key-host="file"] .btn-submit-comment');
+    await page.waitFor(`document.querySelector(${JSON.stringify(card + ' .thread-block[data-key-host="file"] .thread .tag-github')})`, { label: 'file GitHub thread' });
+    return buttons.join(' ');
+  });
+
+  await runner.step('posted comment links to GitHub', async () => {
+    const posted = await page.api(`/api/comments/${githubId}/github`, { method: 'POST', body: JSON.stringify({ posted: { url: PR_URL + '#discussion_r42', comment_id: 42 } }) });
+    if (!posted || posted.github.status !== 'posted') throw new Error('not recorded: ' + JSON.stringify(posted));
+    await page.waitFor(`[...document.querySelectorAll('#toasts .toast')].some((t) => /1 GitHub comment posted to your pending review/.test(t.textContent))`, { label: 'posted toast', timeout: 15000 });
+    const link = `#main .thread[data-thread-id="${githubId}"] a.tag-github.is-posted`;
+    await page.waitFor(`document.querySelector(${JSON.stringify(link)})`, { label: 'GitHub link tag' });
+    const tag = await page.evaluate(`(() => { const a = document.querySelector(${JSON.stringify(link)}); return { href: a.href, target: a.target, edit: Boolean(a.closest('.comment').querySelector('.act-edit')), del: Boolean(a.closest('.comment').querySelector('.act-delete')) }; })()`);
+    if (tag.href !== PR_URL + '#discussion_r42' || tag.target !== '_blank' || tag.edit || !tag.del) throw new Error('posted tag: ' + JSON.stringify(tag));
+    const submitTitle = await page.evaluate(`document.querySelector('#btn-submit').title`);
+    if (!submitTitle.startsWith('Send 5 pending comments to Claude')) throw new Error('submit title: ' + submitTitle);
+    await page.shot('pr-03-posted');
+    return tag.href;
+  });
+}
+
 /** Entry point: launch, run, always kill the browser, print the report. */
 export async function main(argv) {
   const url = argv[2];
   const shotsDir = argv[3] || join(process.cwd(), 'shots');
-  if (!url) { process.stderr.write('usage: node driver.mjs <url-with-?t=token> [shots-dir]\n'); return 2; }
+  const scenario = argv[4] === 'pr' ? runPrScenario : runScenario;
+  if (!url) { process.stderr.write('usage: node driver.mjs <url-with-?t=token> [shots-dir] [review|pr]\n'); return 2; }
   mkdirSync(shotsDir, { recursive: true });
   const report = { ok: true, steps: [], consoleErrors: [], screenshots: [] };
   let browser = null;
@@ -539,12 +700,12 @@ export async function main(argv) {
     page = await openPage(browser.ws, shotsDir);
     page.token = new URL(url).searchParams.get('t');
     page.report = report;
-    await runScenario(page, url);
+    await scenario(page, url);
   } catch (e) {
     report.ok = false;
     report.steps.push({ name: 'driver', ok: false, detail: e.stack || String(e) });
   } finally {
-    if (page) { report.consoleErrors = page.errors; report.screenshots = page.screenshots; }
+    if (page) { report.consoleErrors = page.unexpectedErrors(); report.screenshots = page.screenshots; }
     cleanup();
   }
   if (report.consoleErrors.length) report.ok = false;

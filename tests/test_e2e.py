@@ -25,6 +25,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DRIVER = os.path.join(ROOT, "tests", "e2e", "driver.mjs")
 TOKEN = "e2e0123456789abcdef0123456789abc"
 COVER = "# Why\n\nThe **cover** letter set by the e2e driver.\n\n- retries\n- `backoff`"  # mirrors COVER in driver.mjs
+PR_URL = "https://github.com/o/r/pull/7"  # mirrors PR_URL in driver.mjs
 CHROME_CANDIDATES = ("chromium-browser", "chromium", "google-chrome", "google-chrome-stable")
 DRIVER_TIMEOUT = 240
 
@@ -46,8 +47,10 @@ pytestmark = pytest.mark.skipif(
 class LiveServer:
     """A serving ``ReviewServer`` on an ephemeral port with an in-memory store."""
 
-    def __init__(self, repo):
+    def __init__(self, repo, pr=None):
         self.store = ReviewStore(repo.path, "main..feature", None, worktree=True, db_path=":memory:")
+        if pr:
+            self.store.set_pr(pr)
         self.store.load()
         self.httpd = make_server(self.store, TOKEN, 0)
         self.store.set_server_info({"pid": os.getpid(), "port": self.httpd.port, "started_at": utcnow(),
@@ -72,10 +75,10 @@ def live(fixture_repo):
     server.close()
 
 
-def run_driver(url: str, shots_dir: str) -> dict:
+def run_driver(url: str, shots_dir: str, scenario: str = "review") -> dict:
     """Run the CDP driver in its own process group (so a timeout also kills the browser) and parse its report."""
-    proc = subprocess.Popen(["node", DRIVER, url, shots_dir], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, start_new_session=True)
+    proc = subprocess.Popen(["node", DRIVER, url, shots_dir, scenario], cwd=ROOT, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
         stdout, stderr = proc.communicate(timeout=DRIVER_TIMEOUT)
     except subprocess.TimeoutExpired:
@@ -137,3 +140,36 @@ def test_browser_review_flow(live, tmp_path):
     reply = by_author["claude"][0]
     assert reply["parent_id"] == roots[0]["id"] and reply["anchor"] == roots[0]["anchor"]
     assert reply["body"] == "Fixed in the next commit."
+
+
+@pytest.fixture
+def live_pr(fixture_repo):
+    server = LiveServer(fixture_repo, pr=PR_URL)
+    yield server
+    server.close()
+
+
+def test_browser_pr_mode_flow(live_pr, tmp_path):
+    report = run_driver(live_pr.url, str(tmp_path / "shots"), "pr")
+    pretty = json.dumps({k: v for k, v in report.items() if k != "stderr"}, indent=1, ensure_ascii=False)
+    failed = [s for s in report["steps"] if not s["ok"]]
+    assert not failed, "failed steps: %s\n%s\n%s" % ([s["name"] for s in failed], pretty, report["stderr"])
+    assert report["consoleErrors"] == [] and report["ok"] is True and report["exit_code"] == 0, pretty
+    assert [s["name"] for s in report["steps"]] == [
+        "load page in PR mode", "question about the whole pull request", "click 2nd commit", "gutter forks into ? and GH",
+        "GitHub comment on a line", "question with the editor switch", "a draft keeps its kind",
+        "a line outside the pull request diff stays a question",
+        "file header forks too", "posted comment links to GitHub"], pretty
+    assert len(report["screenshots"]) == 3, pretty
+
+    # -- what the browser left: five pending user comments, two of them GitHub comments (one recorded as posted)
+    comments = {c["body"]: c for c in live_pr.store.list_comments()}
+    assert set(comments) == {"Why does the series need two commits?", "Why 500?", "What is value 6 for?",
+                             "Unrelated to the change", "Please split this file."}, pretty
+    assert all(c["author"] == "user" and c["state"] == "pending" for c in comments.values())
+    assert comments["Why 500?"]["github"]["status"] == "posted" and comments["Why 500?"]["anchor"]["line"] == 5
+    assert comments["Please split this file."]["github"] == {"status": "local"}
+    assert comments["Please split this file."]["anchor"]["kind"] == "file"
+    for question in ("Why does the series need two commits?", "What is value 6 for?", "Unrelated to the change"):
+        assert comments[question]["github"] is None, question
+    assert comments["Unrelated to the change"]["anchor"]["line"] == 10

@@ -51,6 +51,9 @@
   --status-a: #1a7f37; --status-m: #9a6700; --status-d: #cf222e; --status-r: #0969da; --status-t: #8250df;
   --av-0: #0969da; --av-1: #1a7f37; --av-2: #8250df; --av-3: #bf3989; --av-4: #cf222e; --av-5: #bc4c00; --av-6: #1b7c83; --av-7: #57606a;
   --scrollbar: rgba(0,0,0,.25);
+  --github: #24292f;
+  --github-fg: #ffffff;
+  --github-bg: #eaeef2;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
@@ -90,6 +93,9 @@
   --status-a: #57ab5a; --status-m: #c69026; --status-d: #e5534b; --status-r: #539bf5; --status-t: #b083f0;
   --av-0: #539bf5; --av-1: #57ab5a; --av-2: #b083f0; --av-3: #e275ad; --av-4: #e5534b; --av-5: #e0823d; --av-6: #39c5cf; --av-7: #768390;
   --scrollbar: rgba(255,255,255,.25);
+  --github: #cdd9e5;
+  --github-fg: #22272e;
+  --github-bg: rgba(205, 217, 229, .15);
 }
 
 /* ------------------------------------------------------------------ base */
@@ -168,6 +174,7 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
 .range-spec { font-family: var(--mono); font-size: 12px; color: var(--fg-muted); background: var(--bg-3); padding: 1px 6px; border-radius: 4px; }
 .range-spec.has-note { border-bottom: 1px dashed var(--pending); cursor: help; }
 .commit-count { color: var(--fg-muted); font-size: 13px; }
+.pr-link { font-size: 12px; font-weight: 600; color: var(--github-fg); background: var(--github); border-radius: 10px; padding: 1px 8px; }
 .topbar-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 /* Submit: green filled like GitHub's review button; a hover darkens it, disabled (nothing pending) keeps the colour muted by opacity */
 .btn-submit, .btn-submit:hover { background: var(--success); border-color: transparent; color: #fff; }
@@ -401,12 +408,23 @@ table.diff tr.threads .thread + .thread, table.diff tr.threads .thread + .editor
 .btn-add-comment.is-visible, tr.line:hover .btn-add-comment, tr.line:focus-within .btn-add-comment, tr.line.is-selected .btn-add-comment { display: inline-flex; }
 .btn-add-comment:hover { transform: scale(1.1); }
 .btn-add-comment.is-parked { display: none !important; }
+/* PR mode forks [+] into a question [?] at the code edge and a GitHub comment [GH] right of it */
+.btn-add-comment[data-intent="github"] { right: -35px; background: var(--github); color: var(--github-fg); font-size: 10px; }
+.file-header .btn-comment-file[data-intent] { font-weight: 700; font-size: 12px; }
+.file-header .btn-comment-file[data-intent="github"] { font-size: 10px; }
 
 /* ------------------------------------------------------------------ editor */
 .comment-editor { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .comment-editor:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
 .comment-editor.is-busy { opacity: .7; }
-.comment-editor .editor-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border-muted); }
+.comment-editor .editor-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border-muted); }
+.comment-editor .editor-tabs { display: flex; gap: 2px; }
+.comment-editor .editor-intent { display: inline-flex; margin-bottom: 4px; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.comment-editor .intent-btn { border: 0; background: var(--bg-2); color: var(--fg-muted); font-size: 11px; padding: 1px 8px; }
+.comment-editor .intent-btn + .intent-btn { border-left: 1px solid var(--border); }
+.comment-editor .intent-btn.is-active { background: var(--accent-bg); color: var(--accent); font-weight: 600; }
+.comment-editor .intent-btn.is-active[data-intent="github"] { background: var(--github); color: var(--github-fg); }
+.comment-editor[data-intent="github"] { border-color: var(--github); }
 .comment-editor .editor-tab { background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 2px 8px 4px; font-size: 12px; color: var(--fg-muted); }
 .comment-editor .editor-tab:hover { color: var(--fg); }
 .comment-editor .editor-tab.is-active { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
@@ -432,7 +450,7 @@ table.diff tr.threads .thread + .thread, table.diff tr.threads .thread + .editor
 .comment-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--fg-muted); }
 .comment-meta .author { color: var(--fg); font-weight: 600; }
 .comment-meta .time { cursor: default; }
-.comment-meta .tag { font-size: 10px; line-height: 16px; padding: 0 6px; border-radius: 8px; font-weight: 600; }
+.comment-meta .tag, .resolved-line .tag { font-size: 10px; line-height: 16px; padding: 0 6px; border-radius: 8px; font-weight: 600; }
 .tag-pending { background: var(--pending-bg); color: var(--pending); cursor: help; }
 .tag-round { background: var(--bg-3); color: var(--fg-muted); }
 .tag-edited { color: var(--fg-muted); font-style: italic; font-weight: 400; }
@@ -441,6 +459,10 @@ table.diff tr.threads .thread + .thread, table.diff tr.threads .thread + .editor
 .tag-outdated { background: var(--danger-bg); color: var(--danger); }
 .tag-from { background: var(--accent-bg); color: var(--accent); text-decoration: none; } /* projected thread: links to the view it was written in */
 .tag-from:hover, .tag-from:focus-visible { text-decoration: underline; }
+.tag-question { background: var(--accent-bg); color: var(--accent); }
+.tag-github { background: var(--github-bg); color: var(--fg); }
+.tag-github.is-posted { background: var(--github); color: var(--github-fg); text-decoration: none; }
+.tag-github.is-posted:hover, .tag-github.is-posted:focus-visible { text-decoration: underline; }
 .comment-body { margin-top: 4px; }
 /* rendered Markdown (comment bodies and the cover letter share the renderer and these rules) */
 .md { word-break: break-word; }

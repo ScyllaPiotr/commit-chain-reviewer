@@ -538,3 +538,93 @@ def test_a_new_review_does_not_inherit_the_one_left_in_the_database(cli, fixture
     assert resumed["counts"]["total"] == 1 and resumed["rounds"] == 1
     cli.run("stop", check=0)
     assert not pid_alive(second["pid"]) and not pid_alive(resumed["pid"])
+
+
+# --------------------------------------------------------------------------- PR mode (section 10)
+
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def fake_github(tmp_path, repo):
+    """A fake ``gh`` on PATH serving pull request o/r#7 of ``repo``: ``(env for the CLI, state file)``."""
+    from fake_gh import new_state
+    state = tmp_path / "gh-state.json"
+    state.write_text(json.dumps(new_state(head=repo.feature, base=repo.main)))
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "gh"
+    shim.write_text("#!%s\nimport sys\nsys.path.insert(0, %r)\nimport fake_gh\nsys.exit(fake_gh.main(sys.argv[1:]))\n"
+                    % (sys.executable, TESTS_DIR))
+    shim.chmod(0o755)
+    env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], FAKE_GH_STATE=str(state))
+    return env, state
+
+
+def test_pr_mode_questions_and_github_comments(cli, fixture_repo, tmp_path, ccr_session_dir):
+    repo = fixture_repo
+    env, state_file = fake_github(tmp_path, repo)
+    github_state = lambda: json.loads(state_file.read_text())
+    bad = cli.run("start", "--range", "main..feature", "--pr", "o/r")
+    assert bad.returncode == 1 and bad.stderr == "ccr: not a pull request URL or OWNER/REPO#N reference: 'o/r'\n"
+    assert not any(name.endswith(".json") for name in os.listdir(str(ccr_session_dir)))
+    record = cli.start("--range", "main..feature", "--pr", "https://github.com/o/r/pull/7")
+    assert "ccr: pr https://github.com/o/r/pull/7 (o/r#7): questions for Claude" in open(record["log"]).read()
+    assert "ccr: pr https://github.com/o/r/pull/7\n" in cli.run("status", check=0).stdout
+
+    three = repo.sha(THREE_HUNKS)
+    on_line = ("comment", "--commit", three, "--path", "src/app.py", "--line")
+    created = cli.run(*on_line, "5", "--as", "user", "--github", "Why 500?", check=0).stdout
+    assert created.endswith("(%s src/app.py new:5, GitHub comment)\n" % three[:10])
+    remark = comment_id(created)
+    question = comment_id(cli.run(*on_line, "6", "--as", "user", "What is value 6 for?", check=0).stdout)
+    outside = cli.run(*on_line, "10", "--as", "user", "--github", "Not in the diff")
+    assert outside.returncode == 1 and "is not in the pull request diff" in outside.stderr
+    assert "the user's to write" in cli.run(*on_line, "5", "--github", "From Claude").stderr
+
+    listing = cli.run("comments", check=0).stdout
+    assert listing.startswith("# Review comments — repo (main..feature) — PR o/r#7 — 2 threads")
+    assert "[id: %s] user · GitHub comment (not posted) · new:5 → HEAD src/app.py:5 · pending" % remark in listing
+    assert "[id: %s] user · question · new:6 → HEAD src/app.py:6 · pending" % question in listing
+
+    early = cli.run("gh-post", remark, question, env=env)
+    assert early.returncode == 1 and early.stdout == (
+        "%s: ERROR comment %s is still pending in ccr; it can be posted once the user submits it\n"
+        "%s: ERROR comment %s is not a GitHub comment\n" % (remark, remark, question, question))
+    assert api(record, "POST", "/api/submit", {"verdict": "comment", "summary": ""})["number"] == 1
+    header = cli.run("wait", "--since-round", "0", "--timeout", "5", check=0).stdout.splitlines()[0]
+    assert header == "ccr: round 1 — 2 new comments in 2 threads — 1 GitHub comment to check and post"
+
+    assert cli.run("edit", remark, "Why 500, not 50?", check=0).returncode == 0
+    edited = cli.run("gh-post", remark, env=env)
+    assert edited.returncode == 1 and "still pending in ccr" in edited.stdout, "an edit after Submit is a draft again"
+    assert api(record, "POST", "/api/submit", {"verdict": "comment", "summary": ""})["comment_ids"] == [remark]
+
+    dry = cli.run("gh-post", "--dry-run", remark, env=env, check=0).stdout
+    assert dry == ("%s: would post to o/r#7 src/app.py:5 (RIGHT), commit %s\n       5 | value_05 = 500  # changed\n"
+                   "  body:\n    Why 500, not 50?\n" % (remark, repo.feature[:10]))
+    assert github_state()["calls"] == [], "a dry run asks GitHub nothing"
+
+    posted = cli.run("gh-post", remark, remark, env=env, check=0).stdout.splitlines()
+    review = github_state()["reviews"][0]
+    url = review["comments"][0]["url"]
+    assert posted == ["ccr: started your pending review on o/r#7",
+                      "%s: posted src/app.py:5 (RIGHT) → %s" % (remark, url),
+                      "ccr: your pending review is on GitHub, to submit with a verdict there: "
+                      "https://github.com/o/r/pull/7/files"], "a repeated id is posted once"
+    assert review["state"] == "PENDING" and review["commit"] == repo.feature
+    assert [(c["path"], c["line"], c["side"], c["body"]) for c in review["comments"]] == [
+        ("src/app.py", 5, "RIGHT", "Why 500, not 50?")]
+    assert cli.run("gh-post", remark, env=env, check=0).stdout == "%s: already posted → %s\n" % (remark, url)
+    again = json.loads(cli.run("gh-post", "--json", remark, env=env, check=0).stdout)
+    assert again[0]["already"] is True and again[0]["github"]["url"] == url
+    assert len(github_state()["reviews"][0]["comments"]) == 1
+
+    after = cli.run("comments", check=0).stdout
+    assert "[id: %s] user · GitHub comment (posted: %s) · new:5" % (remark, url) in after
+    frozen = cli.run("edit", remark, "Reworded")
+    assert frozen.returncode == 1 and "change it there" in frozen.stderr
+
+    relinked = cli.run("start", "--range", "main..feature", "--pr", "o/r#8", check=0).stdout
+    assert relinked.startswith("ccr: reusing running session (pid %d)" % record["pid"])
+    assert api(record, "GET", "/api/review")["pr"]["number"] == 8
+    cli.run("stop", check=0)

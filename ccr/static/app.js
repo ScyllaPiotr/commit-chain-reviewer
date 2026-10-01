@@ -91,6 +91,10 @@
 
   function shortSha(sha) { return sha && HEX_RE.test(sha) ? sha.slice(0, 10) : sha; }
   const isPseudo = (sha) => sha === 'combined' || sha === 'worktree';
+  /** PR mode (spec section 10): the review is linked to a GitHub pull request, so a comment is a question for Claude
+   *  or a GitHub comment for the user's pending review there. */
+  const prMode = () => Boolean(state.review && state.review.pr);
+  const isPosted = (c) => Boolean(c && c.github && c.github.status === 'posted');
 
   function statsHtml(add, del) {
     return `<span class="stats"><span class="stat-add">+${esc(add)}</span><span class="stat-del">−${esc(del)}</span></span>`;
@@ -341,6 +345,13 @@
     spec.classList.toggle('has-note', Boolean(r.range.note));
     const n = realCommits().length;
     $('#commit-count').textContent = `${n} commit${n === 1 ? '' : 's'}${r.options.worktree ? ' · +worktree' : ''}`;
+    const pr = $('#pr-link');
+    pr.hidden = !r.pr;
+    if (r.pr) {
+      pr.textContent = `PR #${r.pr.number}`;
+      pr.href = r.pr.url;
+      pr.title = `${r.pr.owner}/${r.pr.repo}#${r.pr.number} on GitHub: questions go to Claude, GitHub comments to your pending review there`;
+    }
     document.title = `${r.repo.name} — ccr`;
   }
 
@@ -352,7 +363,10 @@
     badge.classList.toggle('is-zero', n === 0);
     const btn = $('#btn-submit');
     btn.disabled = n === 0 || state.submitting;
-    btn.title = n ? `Submit ${n} pending comment${n === 1 ? '' : 's'} as a review round` : 'Nothing to submit — leave a comment first';
+    const what = `${n} pending comment${n === 1 ? '' : 's'}`;
+    btn.title = !n ? 'Nothing to submit — leave a comment first'
+      : prMode() ? `Send ${what} to Claude: questions get answered, GitHub comments get checked and posted to your pending GitHub review`
+        : `Submit ${what} as a review round`;
   }
 
   /* ==================================================================== sidebar: commit chain */
@@ -599,10 +613,14 @@
       // "All changes" gets only the whole-series button: a commit-level comment on the combined view would just
       // duplicate a review-level one.
       if (diff.kind !== 'combined') {
-        const label = diff.kind === 'worktree' ? 'Comment on the uncommitted changes' : 'Comment on this commit';
+        const label = diff.kind === 'worktree' ? 'Comment on the uncommitted changes' : prMode() ? 'Ask about this commit' : 'Comment on this commit';
         meta += `<button type="button" id="btn-comment-commit" class="sm-btn" aria-label="${label}">💬 ${label}</button>`;
       }
-      if (diff.kind === 'combined') meta += '<button type="button" id="btn-comment-review" class="sm-btn" aria-label="Comment on the whole series" title="A review-level comment about the whole series, not tied to any commit">💬 Comment on the whole series</button>';
+      if (diff.kind === 'combined') {
+        const [label, title] = prMode() ? ['Ask about the whole pull request', 'A question for Claude about the whole pull request, not tied to any commit']
+          : ['Comment on the whole series', 'A review-level comment about the whole series, not tied to any commit'];
+        meta += `<button type="button" id="btn-comment-review" class="sm-btn" aria-label="${label}" title="${title}">💬 ${label}</button>`;
+      }
     }
     meta += '</span></div>';
     parts.push(meta);
@@ -689,8 +707,17 @@
       ${f.binary ? '<span class="mode-note">binary</span>' : statsHtml(f.additions, f.deletions)}
       ${c && c.threads ? `<span class="tcount${c.hasNew ? ' has-new' : ''}" title="Threads in this view">💬 ${esc(c.threads)}</span>` : ''}
       <span class="spacer"></span>
-      ${commentsDisabled() ? '' : `<button type="button" class="hdr-btn btn-comment-file${hasDraft(`file:${state.viewSha}|${f.path}`) ? ' has-draft' : ''}" aria-label="Comment on this file" title="Comment on this file">💬</button>`}
+      ${commentsDisabled() ? '' : fileCommentButtonsHtml(f)}
     </div>`;
+  }
+
+  /** The file header's comment button; PR mode forks it into a question for Claude and a GitHub comment. */
+  function fileCommentButtonsHtml(f) {
+    const key = `file:${state.viewSha}|${f.path}`;
+    const dot = (intent) => (hasDraftFor(key, intent) ? ' has-draft' : '');
+    if (!prMode()) return `<button type="button" class="hdr-btn btn-comment-file${dot(null)}" aria-label="Comment on this file" title="Comment on this file">💬</button>`;
+    return `<button type="button" class="hdr-btn btn-comment-file${dot('question')}" data-intent="question" aria-label="Ask Claude about this file" title="Ask Claude about this file">?</button>`
+      + `<button type="button" class="hdr-btn btn-comment-file${dot('github')}" data-intent="github" aria-label="GitHub comment on this file" title="GitHub comment on this file, for your pending review">GH</button>`;
   }
 
   function fileNoteHtml(f) {
@@ -1199,33 +1226,45 @@
 
   /* ==================================================================== 4. gutter [+] and selection */
 
+  /** The gutter button(s): one [+], or in PR mode a question for Claude [?] and a GitHub comment [GH]. */
+  const GUTTER_BUTTONS = {
+    plain: { intent: null, text: '+', label: 'Add comment' },
+    question: { intent: 'question', text: '?', label: 'Ask Claude about this line' },
+    github: { intent: 'github', text: 'GH', label: 'GitHub comment on this line, for your pending review' },
+  };
+
   function attachGutterButton(card) {
     const body = card.querySelector('.diff-body');
-    const old = card.querySelector('.btn-add-comment');
-    if (old) old.remove();
+    for (const old of card.querySelectorAll('.btn-add-comment')) old.remove();
     if (commentsDisabled() || !body.querySelector('table.diff')) return;
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'btn-add-comment is-parked';
-    btn.setAttribute('aria-label', 'Add comment');
-    btn.textContent = '+';
-    body.prepend(btn);
+    for (const spec of prMode() ? [GUTTER_BUTTONS.github, GUTTER_BUTTONS.question] : [GUTTER_BUTTONS.plain]) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn-add-comment is-parked';
+      if (spec.intent) btn.dataset.intent = spec.intent;
+      btn.setAttribute('aria-label', spec.label);
+      btn.title = spec.label;
+      btn.textContent = spec.text;
+      body.prepend(btn);
+    }
   }
 
-  /** Move a card's shared [+] into the number cell for (row, side). */
+  /** Move a card's shared gutter button(s) into the number cell for (row, side). */
   function placeGutterButton(row, side, show) {
     const card = row.closest('.file-card');
-    const btn = card && card.querySelector('.btn-add-comment');
-    if (!btn) return;
+    const buttons = card ? card.querySelectorAll('.btn-add-comment') : [];
     const cell = row.querySelector(`td.num.${side}[data-line]`);
-    if (!cell) return;
+    if (!buttons.length || !cell) return;
     const line = cell.dataset.line;
-    btn.dataset.side = side;
-    btn.dataset.line = line;
-    btn.classList.remove('is-parked');
-    btn.classList.toggle('is-visible', Boolean(show));
-    btn.classList.toggle('has-draft', hasDraft(lineKey(state.viewSha, card.dataset.path, side, +line)));
-    if (btn.parentElement !== cell) cell.appendChild(btn);
+    const key = lineKey(state.viewSha, card.dataset.path, side, +line);
+    for (const btn of buttons) {
+      btn.dataset.side = side;
+      btn.dataset.line = line;
+      btn.classList.remove('is-parked');
+      btn.classList.toggle('is-visible', Boolean(show));
+      btn.classList.toggle('has-draft', hasDraftFor(key, btn.dataset.intent || null));
+      if (btn.parentElement !== cell) cell.appendChild(btn);
+    }
   }
 
   function gutterSideFor(row, td) {
@@ -1435,7 +1474,7 @@
   function signatures() {
     const sig = new Map();
     for (const [key, ids] of state.threadsByKey) {
-      sig.set(key, ids.map((id) => threadMembers(id).map((c) => `${c.id}:${c.updated_at}:${c.resolved ? 1 : 0}:${c.state}:${c.round}`).join(',')).join(';'));
+      sig.set(key, ids.map((id) => threadMembers(id).map((c) => `${c.id}:${c.updated_at}:${c.resolved ? 1 : 0}:${c.state}:${c.round}:${c.github ? c.github.status : ''}`).join(',')).join(';'));
     }
     return sig;
   }
@@ -1484,6 +1523,7 @@
   function applyComments(list, { initial = false, patch = true } = {}) {
     const before = signatures();
     const prevIds = state.knownIds;
+    const wasLocal = new Set([...state.comments.values()].filter((c) => c.github && c.github.status === 'local').map((c) => c.id));
     state.comments = new Map(list.map((c) => [c.id, c]));
     reindex();
     const after = signatures();
@@ -1500,6 +1540,12 @@
         const [first] = threads;
         toast(`Claude replied to ${threads.size} thread${threads.size === 1 ? '' : 's'}${resolved ? ` (${resolved} resolved)` : ''}`, 'info',
           { action: { label: 'Show', fn: () => navigateTo({ threadId: first }) }, timeout: 10000 });
+      }
+      const posted = list.filter((c) => isPosted(c) && wasLocal.has(c.id)).length;
+      if (posted && prMode()) {
+        const files = state.review.pr.url + '/files';
+        toast(`${posted} GitHub comment${posted === 1 ? '' : 's'} posted to your pending review — submit it on GitHub`, 'success',
+          { action: { label: 'Open on GitHub', fn: () => window.open(files, '_blank', 'noopener') }, timeout: 10000 });
       }
     }
     state.knownIds = new Set(list.map((c) => c.id));
@@ -1689,8 +1735,18 @@
 
   /* ---- thread & comment markup */
 
+  /** The tag of a GitHub comment: "not posted" until Claude posts it, then a link to it in the pending review. */
+  function githubTagHtml(c) {
+    if (isPosted(c)) {
+      return `<a class="tag tag-github is-posted" href="${esc(c.github.url)}" target="_blank" rel="noopener noreferrer" title="In your pending review on GitHub since ${esc(fmtAbs(c.github.posted_at))}; change or submit it there">GitHub ↗</a>`;
+    }
+    return '<span class="tag tag-github" title="A GitHub comment: once you submit, Claude checks it and posts it verbatim to your pending review on GitHub">GitHub · not posted</span>';
+  }
+
   function commentTags(c, root) {
     const tags = [];
+    if (root && c.github) tags.push(githubTagHtml(c));
+    else if (root && prMode() && c.author === 'user') tags.push('<span class="tag tag-question" title="A question for Claude: it is answered here, nothing goes to GitHub">Question</span>');
     if (c.state === 'pending') tags.push(`<span class="tag tag-pending" title="${esc(NEW_DOT_TITLE)}">Pending</span>`);
     else if (c.round != null) tags.push(`<span class="tag tag-round" title="Submitted in round ${esc(c.round)}">R${esc(c.round)}</span>`);
     if (c.updated_at > c.created_at) tags.push(`<span class="tag tag-edited" title="Edited ${esc(fmtAbs(c.updated_at))}">edited</span>`);
@@ -1711,7 +1767,7 @@
     return `<div class="comment" data-id="${esc(c.id)}" data-author="${esc(c.author)}">
       <div class="comment-meta">${avatarHtml(c.author, name)}<span class="author">${esc(name)}</span>${timeHtml(c.created_at)}${commentTags(c, root)}
         <div class="comment-actions" role="group" aria-label="Comment actions">
-          <button type="button" class="act-edit" aria-label="Edit comment">Edit</button>
+          ${isPosted(c) ? '' : '<button type="button" class="act-edit" aria-label="Edit comment">Edit</button>'}
           <button type="button" class="act-delete" aria-label="Delete comment">Delete</button>
           <button type="button" class="act-reply" aria-label="Reply to thread">Reply</button>
           ${root ? `<button type="button" class="act-resolve" aria-label="${c.resolved ? 'Unresolve' : 'Resolve'} thread">${c.resolved ? 'Unresolve' : 'Resolve'}</button>` : ''}
@@ -1733,7 +1789,7 @@
     const rangeAttrs = a.kind === 'line' && a.start_line ? ` data-range-start="${esc(a.start_line)}" data-range-end="${esc(a.line)}" data-range-side="${esc(a.side)}"` : '';
     let inner;
     if (collapsed) {
-      inner = `<div class="resolved-line"><span class="tick">✓</span> Resolved · ${members.length} comment${members.length === 1 ? '' : 's'} <button type="button" class="link-btn btn-show-resolved">Show</button></div>`;
+      inner = `<div class="resolved-line"><span class="tick">✓</span> Resolved · ${members.length} comment${members.length === 1 ? '' : 's'}${isPosted(root) ? ' ' + githubTagHtml(root) : ''} <button type="button" class="link-btn btn-show-resolved">Show</button></div>`;
     } else {
       inner = a.kind === 'line' && a.start_line ? `<div class="range-note">Lines ${esc(a.start_line)}–${esc(a.line)} (${esc(a.side)} side)</div>` : '';
       inner += members.map((c) => commentHtml(c, c.id === rootId)).join('');
@@ -1749,41 +1805,69 @@
 
   /* ---- editors */
 
+  /** What a new comment is in PR mode: 'github' (a line or file only) or 'question'; null outside PR mode and for
+   *  replies and edits. */
+  function editorIntent(entry) {
+    if (!prMode() || entry.mode !== 'new') return null;
+    const kind = entry.anchor && entry.anchor.kind;
+    return (kind === 'line' || kind === 'file') && entry.intent === 'github' ? 'github' : 'question';
+  }
+
   function editorHtml(key) {
     const entry = state.openEditors.get(key) || { mode: 'new' };
     const draft = getDraft(key);
-    const original = entry.mode === 'edit' ? ((state.comments.get(entry.id) || {}).body || '') : '';
+    const editing = entry.mode === 'edit' ? state.comments.get(entry.id) || {} : null;
+    const original = editing ? editing.body || '' : '';
     const initial = draft != null ? draft : original;
-    const label = entry.mode === 'edit' ? 'Save' : entry.mode === 'reply' ? 'Reply' : 'Add comment';
+    const intent = editorIntent(entry);
+    const github = intent === 'github' || Boolean(editing && editing.github);
+    const label = entry.mode === 'edit' ? 'Save' : entry.mode === 'reply' ? 'Reply' : intent === 'github' ? 'Add GitHub comment'
+      : intent === 'question' ? 'Ask' : 'Add comment';
+    const placeholder = entry.mode === 'reply' ? 'Reply (Markdown)…' : github ? 'GitHub comment, posted verbatim to your pending review once Claude has checked it (Markdown)…'
+      : intent === 'question' ? 'Ask Claude (Markdown)…' : 'Leave a comment (Markdown)…';
+    const kind = entry.anchor && entry.anchor.kind;
+    const intentButton = (name, text) => `<button type="button" class="intent-btn${intent === name ? ' is-active' : ''}" data-intent="${name}" aria-pressed="${intent === name}">${text}</button>`;
+    const intentSwitch = intent && (kind === 'line' || kind === 'file')
+      ? `<div class="editor-intent" role="group" aria-label="What this comment is">${intentButton('question', 'Question')}${intentButton('github', 'GitHub comment')}</div>` : '';
     let info = '';
     if (entry.anchor && entry.anchor.kind === 'line') {
       const a = entry.anchor;
       info = `${a.side}:${a.start_line ? `${a.start_line}–` : ''}${a.line}`;
     } else if (entry.anchor && entry.anchor.kind === 'file') info = 'file';
     else if (entry.anchor && entry.anchor.kind === 'commit') info = 'commit';
-    else if (entry.anchor && entry.anchor.kind === 'review') info = 'whole series';
+    else if (entry.anchor && entry.anchor.kind === 'review') info = prMode() ? 'whole pull request' : 'whole series';
     const tab = entry.tab === 'preview' ? 'preview' : 'write';
     const tabHtml = (name, label) => `<button type="button" class="editor-tab${tab === name ? ' is-active' : ''}" data-tab="${name}" role="tab" aria-selected="${tab === name}">${label}</button>`;
-    return `<form class="comment-editor" data-key="${esc(key)}" data-mode="${esc(entry.mode)}" data-tab="${tab}" novalidate>
-      <div class="editor-tabs" role="tablist">${tabHtml('write', 'Write')}${tabHtml('preview', 'Preview')}</div>
-      <textarea rows="3" placeholder="${entry.mode === 'reply' ? 'Reply (Markdown)…' : 'Leave a comment (Markdown)…'}" aria-label="Comment text"${tab === 'preview' ? ' hidden' : ''}>${esc(initial)}</textarea>
+    const hint = github ? 'Markdown · posted verbatim to your pending GitHub review once Claude has checked it' : 'Markdown · Ctrl+Enter to post · Esc to cancel';
+    return `<form class="comment-editor" data-key="${esc(key)}" data-mode="${esc(entry.mode)}" data-tab="${tab}"${github ? ' data-intent="github"' : ''} novalidate>
+      <div class="editor-head"><div class="editor-tabs" role="tablist">${tabHtml('write', 'Write')}${tabHtml('preview', 'Preview')}</div>${intentSwitch}</div>
+      <textarea rows="3" placeholder="${placeholder}" aria-label="Comment text"${tab === 'preview' ? ' hidden' : ''}>${esc(initial)}</textarea>
       <div class="md-preview md"${tab === 'preview' ? '' : ' hidden'}>${tab === 'preview' ? previewHtml(initial) : ''}</div>
-      <div class="editor-foot"><span class="md-hint">Markdown · Ctrl+Enter to post · Esc to cancel</span>${info ? `<span class="anchor-info">${esc(info)}</span>` : ''}
+      <div class="editor-foot"><span class="md-hint">${hint}</span>${info ? `<span class="anchor-info">${esc(info)}</span>` : ''}
         <button type="button" class="sm-btn btn-cancel-comment" aria-label="Cancel (keeps the draft)">Cancel</button>
         <button type="submit" class="sm-btn btn-submit-comment">${label}</button></div>
     </form>`;
   }
 
   const draftKey = (key) => `ccr:draft:${key}`;
+  const draftIntentKey = (key) => `ccr:draft-intent:${key}`;
   const getDraft = (key) => storage.get(draftKey(key));
   const hasDraft = (key) => Boolean((getDraft(key) || '').trim());
-  const delDraft = (key) => storage.del(draftKey(key));
+  /** A draft for `key` written as `intent` ('github' or 'question' in PR mode; null matches any draft). */
+  const hasDraftFor = (key, intent) => hasDraft(key) && (!intent || (storage.get(draftIntentKey(key)) === 'github' ? 'github' : 'question') === intent);
+  const delDraft = (key) => { storage.del(draftKey(key)); storage.del(draftIntentKey(key)); };
+  function saveDraft(key, value) {
+    if (!value.trim()) { delDraft(key); return; }
+    storage.set(draftKey(key), value);
+    const entry = state.openEditors.get(key);
+    if (entry && editorIntent(entry) === 'github') storage.set(draftIntentKey(key), 'github'); else storage.del(draftIntentKey(key));
+  }
   const draftTimers = new Map();
   function saveDraftDebounced(key, value) {
     clearTimeout(draftTimers.get(key));
     draftTimers.set(key, setTimeout(() => {
       draftTimers.delete(key);
-      if (value.trim()) storage.set(draftKey(key), value); else storage.del(draftKey(key));
+      saveDraft(key, value);
     }, 300));
   }
 
@@ -1841,7 +1925,18 @@
     else { autoGrow(ta); ta.focus(); }
   }
 
-  /** Open an editor identified by key. entry = {mode:'new', anchor} | {mode:'reply', rootId} | {mode:'edit', id, rootId}. */
+  /** Switch an open new-comment editor between a question and a GitHub comment (PR mode), keeping its text. */
+  function setEditorIntent(form, intent) {
+    const key = form && form.dataset.key;
+    const entry = key && state.openEditors.get(key);
+    if (!entry || entry.mode !== 'new' || entry.intent === intent) return;
+    entry.intent = intent;
+    saveDraft(key, form.querySelector('textarea').value);
+    patchKey(key);
+    focusEditor(key);
+  }
+
+  /** Open an editor identified by key. entry = {mode:'new', anchor, intent?} | {mode:'reply', rootId} | {mode:'edit', id, rootId}. */
   async function openEditor(key, entry) {
     if (commentsDisabled()) { toast('Comments are disabled in compare view', 'error'); return; }
     state.openEditors.set(key, entry);
@@ -1863,10 +1958,7 @@
   function closeEditor(key) {
     const form = editorForm(key);
     const entry = state.openEditors.get(key);
-    if (form) {
-      const ta = form.querySelector('textarea');
-      if (ta.value.trim()) storage.set(draftKey(key), ta.value); else delDraft(key);
-    }
+    if (form) saveDraft(key, form.querySelector('textarea').value);
     clearTimeout(draftTimers.get(key));
     state.openEditors.delete(key);
     if (!entry) return;
@@ -1881,9 +1973,9 @@
   function updateDraftDots() {
     for (const b of $$('#main .btn-add-comment[data-line]')) {
       const card = b.closest('.file-card');
-      b.classList.toggle('has-draft', hasDraft(lineKey(state.viewSha, card.dataset.path, b.dataset.side, +b.dataset.line)));
+      b.classList.toggle('has-draft', hasDraftFor(lineKey(state.viewSha, card.dataset.path, b.dataset.side, +b.dataset.line), b.dataset.intent || null));
     }
-    for (const b of $$('#main .btn-comment-file')) b.classList.toggle('has-draft', hasDraft(`file:${state.viewSha}|${b.closest('.file-card').dataset.path}`));
+    for (const b of $$('#main .btn-comment-file')) b.classList.toggle('has-draft', hasDraftFor(`file:${state.viewSha}|${b.closest('.file-card').dataset.path}`, b.dataset.intent || null));
     const bc = $('#btn-comment-commit');
     if (bc) bc.classList.toggle('has-draft', hasDraft(`commit:${state.viewSha}`));
     const br = $('#btn-comment-review');
@@ -1906,7 +1998,10 @@
     state.inflight.add(key);
     try {
       let c;
-      if (entry.mode === 'new') c = await api('/api/comments', { method: 'POST', body: { body, anchor: entry.anchor } });
+      if (entry.mode === 'new') {
+        const github = editorIntent(entry) === 'github' ? { github: true } : {};
+        c = await api('/api/comments', { method: 'POST', body: Object.assign({ body, anchor: entry.anchor }, github) });
+      }
       else if (entry.mode === 'reply') {
         const root = state.comments.get(entry.rootId);
         c = await api('/api/comments', { method: 'POST', body: { body, parent_id: entry.rootId, anchor: root ? root.anchor : undefined } });
@@ -1930,7 +2025,8 @@
     const c = state.comments.get(id);
     if (!c) return;
     const replies = c.parent_id ? [] : threadMembers(id).filter((m) => m.id !== id);
-    const msg = replies.length ? `Delete this comment? This also deletes ${replies.length} repl${replies.length === 1 ? 'y' : 'ies'}.` : 'Delete this comment?';
+    let msg = replies.length ? `Delete this comment? This also deletes ${replies.length} repl${replies.length === 1 ? 'y' : 'ies'}.` : 'Delete this comment?';
+    if (isPosted(c)) msg += ' It is deleted from ccr only: the comment stays in your pending review on GitHub.';
     if (!window.confirm(msg)) return;
     try {
       await api(`/api/comments/${encodeURIComponent(id)}${replies.length ? '?cascade=1' : ''}`, { method: 'DELETE' });
@@ -2642,13 +2738,14 @@
     const hit = (sel) => el.closest(sel);
     let b;
     if ((b = hit('.editor-tab'))) { showEditorTab(b.closest('form.comment-editor'), b.dataset.tab); return; }
-    if ((b = hit('.btn-add-comment'))) { e.preventDefault(); const a = anchorForGutter(b); openEditor(anchorKey(a), { mode: 'new', anchor: a }); return; }
+    if ((b = hit('.intent-btn'))) { setEditorIntent(b.closest('form.comment-editor'), b.dataset.intent); return; }
+    if ((b = hit('.btn-add-comment'))) { e.preventDefault(); const a = anchorForGutter(b); openEditor(anchorKey(a), { mode: 'new', anchor: a, intent: b.dataset.intent }); return; }
     if ((b = hit('.btn-collapse'))) { toggleCollapseCard(b.closest('.file-card')); return; }
     if ((b = hit('.btn-comment-file'))) {
       const card = b.closest('.file-card');
       const a = { kind: 'file', commit: state.viewSha, path: card.dataset.path, side: null, line: null, start_line: null };
       expandCard(card, fileForPath(card.dataset.path));
-      openEditor(anchorKey(a), { mode: 'new', anchor: a }); return;
+      openEditor(anchorKey(a), { mode: 'new', anchor: a, intent: b.dataset.intent }); return;
     }
     if (hit('#btn-comment-commit')) { const a = { kind: 'commit', commit: state.viewSha, path: null, side: null, line: null, start_line: null }; openEditor(anchorKey(a), { mode: 'new', anchor: a }); return; }
     if (hit('#btn-comment-review')) { openEditor('review:', { mode: 'new', anchor: { kind: 'review' } }); return; }

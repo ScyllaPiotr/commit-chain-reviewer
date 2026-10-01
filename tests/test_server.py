@@ -644,3 +644,43 @@ def test_comments_route_projects_into_a_view(live):
     assert projected["id"] == created["id"] and projected["projected"] is True
     assert projected["view_anchor"]["commit"] == "combined" and projected["view_anchor"]["path"] == "src/app.py"
     assert live.get("/api/comments?project=nosuchview").status == 404
+
+
+def test_pr_mode_routes(live):
+    repo = live.repo
+    anchor = line_anchor(repo.sha(THREE_HUNKS), "src/app.py", 5)
+    outside = live.post("/api/comments", {"body": "x", "anchor": anchor, "github": True})
+    assert outside.status == 409 and "not linked to a GitHub pull request" in outside.json["error"]
+    assert live.post("/api/pr", {"url": "not a pr"}).status == 400
+    before = live.get("/api/state").json
+    linked = live.post("/api/pr", {"url": "https://github.com/o/r/pull/7/files"})
+    assert linked.status == 200 and linked.json["pr"]["url"] == "https://github.com/o/r/pull/7"
+    review = live.get("/api/review").json
+    assert review["pr"]["number"] == 7 and review["generation"] == before["generation"] + 1
+
+    root = add_comment(live, "Why 500?", anchor, github=True)
+    assert root["github"] == {"status": "local"}
+    assert live.post("/api/comments", {"body": "x", "anchor": anchor, "github": "yes"}).status == 400
+    refused = live.post("/api/comments", {"body": "x", "anchor": line_anchor(repo.sha(THREE_HUNKS), "src/app.py", 10),
+                                          "github": True})
+    assert refused.status == 400 and "is not in the pull request diff" in refused.json["error"]
+
+    target = live.get("/api/comments/%s/github" % root["id"])
+    assert target.status == 200 and target.json["line"] == 5 and target.json["side"] == "RIGHT"
+    assert target.json["body"] == "Why 500?" and target.json["commit"] == repo.feature
+    question = add_comment(live, "What is this?")
+    assert live.get("/api/comments/%s/github" % question["id"]).status == 409
+    assert live.get("/api/comments/nope/github").status == 404
+    switched = live.request("PATCH", "/api/comments/%s" % question["id"], body={"github": True})
+    assert switched.status == 200 and switched.json["github"] == {"status": "local"}
+
+    posted = live.post("/api/comments/%s/github" % root["id"],
+                       {"posted": {"url": "https://github.com/o/r/pull/7#discussion_r1", "comment_id": 1}})
+    assert posted.status == 200 and posted.json["github"]["status"] == "posted"
+    assert posted.json["github"]["url"] == "https://github.com/o/r/pull/7#discussion_r1"
+    again = live.post("/api/comments/%s/github" % root["id"], {"posted": {"url": "https://github.com/x"}})
+    assert again.status == 409
+    frozen = live.request("PATCH", "/api/comments/%s" % root["id"], body={"body": "Reworded"})
+    assert frozen.status == 409 and "change it there" in frozen.json["error"]
+    assert live.post("/api/comments/%s/github" % question["id"], {}).status == 400
+    assert live.request("PUT", "/api/comments/%s/github" % root["id"]).status in (404, 501)

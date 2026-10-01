@@ -12,6 +12,10 @@ mutation bumps ``version`` (persisted in ``meta`` so a restarted server keeps
 counting) and wakes the waiters blocked in :meth:`ReviewStore.wait`; every
 successful :meth:`ReviewStore.load` bumps ``generation``.
 
+A review linked to a GitHub pull request (PR mode, section 10) also records,
+per GitHub comment, whether it has been posted to the user's pending review
+and where; :meth:`ReviewStore.github_target` says where GitHub will anchor one.
+
 Diff data is cached untrimmed and trimmed only when served (``commit_diff`` /
 ``compare``); anchor validation, snippet capture and re-anchoring always work
 on the untrimmed, whitespace-sensitive diff.  Errors raised to callers are
@@ -34,7 +38,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from functools import partial
 
-from . import __version__, gitx
+from . import __version__, github, gitx
 from .gitx import GitError
 
 __all__ = [
@@ -48,7 +52,7 @@ __all__ = [
     "WORKTREE",
 ]
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 BODY_MAX_BYTES = 64 << 10
 SNIPPET_MAX_LINES = 32
 SNIPPET_MAX_BYTES = 8 << 10
@@ -67,6 +71,10 @@ WORKTREE = "worktree"
 COMPARE_PREFIX = "compare:"
 SNIPPET_CUT_MARK = "…"
 UNKNOWN_LOCATION = {"path": None, "line": None, "status": "unknown"}
+NO_PR = "this review is not linked to a GitHub pull request (start ccr with --pr URL)"
+GITHUB_LOCAL = {"status": "local"}
+_GITHUB_RECORD_KEYS = ("url", "comment_id", "node_id", "thread_id", "review_id", "path", "subject_type", "line", "side",
+                       "start_line", "start_side", "commit")
 
 _META_KEYS = ("sha", "short_sha", "kind", "parents", "is_merge", "shallow_boundary", "author",
               "author_date", "commit_date", "subject", "body")
@@ -87,14 +95,15 @@ _ROUND_COLUMNS = "number, submitted_at, verdict, summary, base, head, commit_sha
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY, started_at TEXT NOT NULL,
-  range_spec TEXT NOT NULL DEFAULT '', cover TEXT NOT NULL DEFAULT '', chain TEXT NOT NULL DEFAULT '{}');
+  range_spec TEXT NOT NULL DEFAULT '', cover TEXT NOT NULL DEFAULT '', chain TEXT NOT NULL DEFAULT '{}',
+  pr TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY, parent_id TEXT REFERENCES comments(id) ON DELETE CASCADE,
   review INTEGER NOT NULL DEFAULT 1,
   author TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
   state TEXT NOT NULL, round INTEGER, resolved INTEGER NOT NULL DEFAULT 0,
   kind TEXT NOT NULL, commit_sha TEXT, path TEXT, side TEXT, line INTEGER, start_line INTEGER,
-  snippet TEXT NOT NULL DEFAULT '', moved_from TEXT);
+  snippet TEXT NOT NULL DEFAULT '', moved_from TEXT, github TEXT);
 """ + _ROUNDS_DDL + "\n"
 
 
@@ -177,11 +186,16 @@ def _columns(conn: sqlite3.Connection, table: str) -> set:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Schema 1 (one nameless review per repository) → 2 (reviews are rows and every comment carries one).
+    """Schema 1 (one nameless review per repository) → 2 (reviews are rows and every comment carries one) → 3.
 
     Everything a schema-1 database holds belonged to a single review, so it becomes review 1; the cover
-    letter and the remembered chain move out of ``meta`` into its row.
+    letter and the remembered chain move out of ``meta`` into its row.  Schema 3 adds the pull request a
+    review is linked to and the GitHub state of a comment (PR mode), both empty for existing rows.
     """
+    if "pr" not in _columns(conn, "reviews"):
+        conn.execute("ALTER TABLE reviews ADD COLUMN pr TEXT NOT NULL DEFAULT ''")
+    if "github" not in _columns(conn, "comments"):
+        conn.execute("ALTER TABLE comments ADD COLUMN github TEXT")
     if "review" not in _columns(conn, "comments"):
         conn.execute("ALTER TABLE comments ADD COLUMN review INTEGER NOT NULL DEFAULT 1")
     if "review" not in _columns(conn, "rounds"):
@@ -330,6 +344,11 @@ def _moved_from(anchor: dict) -> str:
     return json.dumps({"commit": anchor["commit"], "line": anchor["line"]})
 
 
+def _posted_message(comment: dict) -> str:
+    return "comment %s is posted to your pending GitHub review (%s); change it there" % (
+        comment["id"], comment["github"].get("url") or "no url")
+
+
 def _valid_repo_path(path) -> bool:
     if not isinstance(path, str) or not path or "\0" in path or path.startswith("/"):
         return False
@@ -377,6 +396,7 @@ class ReviewStore:
         self.resumed = False
         self.previous_review = None
         self.cover = ""
+        self.pr = None
         self._chain_memory = {}
         try:
             if self.db_path != ":memory:":
@@ -428,6 +448,7 @@ class ReviewStore:
     def _adopt_review(self, row, resumed: bool) -> None:
         self.review_id, self.review_started_at, self.resumed = row["id"], row["started_at"], resumed
         self.cover = row["cover"] or ""
+        self.pr = json.loads(row["pr"]) if row["pr"] else None
         self._chain_memory = {sha: tuple(entry) for sha, entry in json.loads(row["chain"] or "{}").items()}
 
     def _select_review(self) -> None:
@@ -492,6 +513,21 @@ class ReviewStore:
             self.cover = text
             self.generation += 1
         return text
+
+    def set_pr(self, reference) -> dict:
+        """Link the review to a GitHub pull request (a URL or ``OWNER/REPO#N``), which turns on PR mode.
+
+        Bumps ``generation`` as well as ``version`` so open pages re-render for the mode.
+        """
+        try:
+            pr = github.parse_pr(reference)
+        except ValueError as exc:
+            raise StoreError(str(exc)) from None
+        with self._mutate():
+            self._conn.execute("UPDATE reviews SET pr = ? WHERE id = ?", (json.dumps(pr), self.review_id))
+            self.pr = pr
+            self.generation += 1
+        return dict(pr)
 
     def set_server_info(self, info: dict) -> None:
         """Record the ``server`` block of ``review()``/``state()`` (pid, port, started_at, version)."""
@@ -704,6 +740,7 @@ class ReviewStore:
             "snippet": row["snippet"],
             "moved_from": json.loads(row["moved_from"]) if row["moved_from"] else None,
             "outdated": listed is not None and anchor["commit"] is not None and anchor["commit"] not in listed,
+            "github": json.loads(row["github"]) if row["github"] else None,
         }
 
     def _all_comments(self) -> list:
@@ -785,6 +822,7 @@ class ReviewStore:
                            "resumed": self.resumed, "previous": self.previous_review},
                 "options": {"worktree": self.worktree},
                 "cover": self.cover,
+                "pr": dict(self.pr) if self.pr else None,
                 "commits": commits,
                 "version": self.version,
                 "generation": self.generation,
@@ -1015,20 +1053,35 @@ class ReviewStore:
             if self._conn.execute("SELECT 1 FROM comments WHERE id = ?", (candidate,)).fetchone() is None:
                 return candidate
 
-    def _insert_comment(self, comment_id, parent_id, author, body, state, round_number, anchor, snippet) -> None:
+    def _insert_comment(self, comment_id, parent_id, author, body, state, round_number, anchor, snippet,
+                        github_state=None) -> None:
         now = utcnow()
         self._conn.execute(
             "INSERT INTO comments (id, parent_id, review, author, body, created_at, updated_at, state, round, resolved,"
-            " kind, commit_sha, path, side, line, start_line, snippet, moved_from)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, NULL)",
+            " kind, commit_sha, path, side, line, start_line, snippet, moved_from, github)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
             (comment_id, parent_id, self.review_id, author, body, now, now, state, round_number, anchor["kind"],
-             anchor["commit"], anchor["path"], anchor["side"], anchor["line"], anchor["start_line"], snippet))
+             anchor["commit"], anchor["path"], anchor["side"], anchor["line"], anchor["start_line"], snippet,
+             json.dumps(github_state) if github_state else None))
 
-    def add_comment(self, body, anchor=None, author: str = "user", parent_id=None) -> dict:
-        """Create a root comment (validated anchor) or a reply (anchor copied from the root)."""
+    def _check_github_root(self, author: str, parent_id, anchor: dict, snippet: str) -> None:
+        """A GitHub comment is a root written by the user that GitHub can anchor (section 10.2)."""
+        if parent_id is not None:
+            raise StoreError("a reply stays in ccr; only a root comment can be a GitHub comment")
+        if author != "user":
+            raise StoreError("GitHub comments are the user's to write")
+        self._github_target({"anchor": anchor, "outdated": False, "snippet": snippet})
+
+    def add_comment(self, body, anchor=None, author: str = "user", parent_id=None, github=False) -> dict:
+        """Create a root comment (validated anchor) or a reply (anchor copied from the root).
+
+        ``github`` makes the root a GitHub comment of PR mode: a draft for the user's pending GitHub review.
+        """
         text = _validate_body(body)
         if author not in AUTHORS:
             raise StoreError("author must be 'user' or 'claude'")
+        if github is not None and not isinstance(github, bool):
+            raise StoreError("github must be a boolean")
         with self._lock:
             self._require_data()
             if parent_id is not None:
@@ -1038,25 +1091,34 @@ class ReviewStore:
                 anchor_fields, snippet = root["anchor"], root["snippet"]
             else:
                 anchor_fields, snippet = self._validate_anchor(anchor)
+            if github:
+                self._check_github_root(author, parent_id, anchor_fields, snippet)
             if author == "claude":
                 state, round_number = "submitted", self._round_count()
             else:
                 state, round_number = "pending", None
             comment_id = self._new_id()
             with self._mutate():
-                self._insert_comment(comment_id, parent_id, author, text, state, round_number, anchor_fields, snippet)
+                self._insert_comment(comment_id, parent_id, author, text, state, round_number, anchor_fields, snippet,
+                                     GITHUB_LOCAL if github else None)
             return self._fetch(comment_id)
 
-    def edit_comment(self, comment_id, body=None, resolved=None, anchor=None) -> dict:
-        """Change the body, the resolved flag (roots only) and/or the anchor (roots only; sets ``moved_from``)."""
-        if body is None and resolved is None and anchor is None:
-            raise StoreError("nothing to edit: pass body, resolved or anchor")
+    def edit_comment(self, comment_id, body=None, resolved=None, anchor=None, github=None) -> dict:
+        """Change the body, the resolved flag (roots only), the anchor (roots only; sets ``moved_from``) and/or
+        whether a root is a GitHub comment; a GitHub comment that is posted only changes its resolved flag."""
+        if body is None and resolved is None and anchor is None and github is None:
+            raise StoreError("nothing to edit: pass body, resolved, anchor or github")
+        if github is not None and not isinstance(github, bool):
+            raise StoreError("github must be a boolean")
         with self._lock:
             current = self._fetch(comment_id)
+            posted = (current["github"] or {}).get("status") == "posted"
             assignments, params, edited = [], [], False
             if body is not None:
                 text = _validate_body(body)
                 if text != current["body"]:
+                    if posted:
+                        raise StoreError(_posted_message(current), 409)
                     assignments.append("body = ?")
                     params.append(text)
                     edited = True
@@ -1074,10 +1136,25 @@ class ReviewStore:
                 new_anchor, snippet = self._validate_anchor(anchor)
                 if new_anchor == current["anchor"]:
                     new_anchor = None
+                elif posted:
+                    raise StoreError(_posted_message(current), 409)
                 else:
                     assignments += [_ANCHOR_ASSIGNMENTS, "snippet = ?", "moved_from = ?"]
                     params += _anchor_params(new_anchor) + [snippet, _moved_from(current["anchor"])]
                     edited = True
+            to_github = current["github"] is not None if github is None else github
+            if to_github != (current["github"] is not None):
+                if posted:
+                    raise StoreError(_posted_message(current), 409)
+                assignments.append("github = ?")
+                params.append(json.dumps(GITHUB_LOCAL) if to_github else None)
+                edited = True
+            if to_github and not posted and (github or new_anchor is not None):
+                self._check_github_root(current["author"], current["parent_id"], new_anchor or current["anchor"],
+                                        current["snippet"] if new_anchor is None else snippet)
+            if to_github and not posted and edited and current["state"] == "submitted":
+                # what the agent checked is not what would be posted any more: it is a draft again (10.1)
+                assignments += ["state = 'pending'", "round = NULL"]
             if edited:
                 # "edited" is defined as updated_at > created_at (2.4); with second precision an edit made in
                 # the creation second must still become visible, hence the push to the next second.
@@ -1101,6 +1178,111 @@ class ReviewStore:
                     raise StoreError("thread has replies", 409)
             with self._mutate():
                 self._conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
+
+    # ------------------------------------------------------------------ GitHub comments (PR mode)
+
+    def _github_line(self, anchor: dict, data: dict, line: int):
+        """``(path, line)`` of an anchored line in "All changes", or StoreError when it has no place there."""
+        if anchor["commit"] == COMBINED:
+            return anchor["path"], line
+        src_old, src_new = self._view_revs(data, anchor["commit"])
+        path = anchor["path"]
+        if anchor["side"] == "old":  # the old side of a file renamed by the commit carries its old name
+            path = (_find_file(self._view_diff(anchor["commit"], False), path) or {}).get("old_path") or path
+        from_rev, to_rev = (src_new, data["range"]["head"]) if anchor["side"] == "new" else (src_old, data["range"]["base"])
+        mapped = self._map(from_rev, to_rev, path, line) if from_rev else None
+        if not mapped or mapped["status"] not in ("same", "moved") or mapped["line"] is None:
+            raise StoreError("line %d of %s is changed again later in the pull request, so its diff has no place for "
+                             "it; comment on it in All changes" % (line, anchor["path"]))
+        return mapped["path"], mapped["line"]
+
+    def _github_target(self, comment: dict) -> dict:
+        """Where GitHub anchors a GitHub comment: a file, or a line range of the pull request diff (section 10.2).
+
+        That diff is "All changes", and GitHub takes only the lines it shows (changed lines and their context),
+        so a line anchored on a commit is carried there as projection carries it, and refused when it cannot be.
+        """
+        if self.pr is None:
+            raise StoreError(NO_PR, 409)
+        anchor = comment["anchor"]
+        if anchor["kind"] not in ("line", "file"):
+            raise StoreError("a GitHub review comment goes on a line or a file")
+        if anchor["commit"] == WORKTREE:
+            raise StoreError("uncommitted changes are not part of the pull request")
+        if comment["outdated"]:
+            raise StoreError("the comment is anchored to a commit that left the review", 409)
+        data = self._require_data()
+        if data["range"]["base"] is None:
+            raise StoreError("the review has no base commit, so it is not the diff of a pull request", 409)
+        target = {"commit": data["range"]["head"], "base": data["range"]["base"], "path": anchor["path"],
+                  "subject_type": "FILE", "line": None, "side": None, "start_line": None, "start_side": None, "lines": []}
+        combined = self._view_diff(COMBINED, False)
+        if anchor["kind"] == "file":
+            file_diff = _find_file(combined, anchor["path"])
+            if file_diff is None:
+                raise StoreError("%s is not part of the pull request diff" % anchor["path"])
+            return dict(target, path=file_diff["path"])
+        side = anchor["side"]
+        path, end = self._github_line(anchor, data, anchor["line"])
+        start = end
+        if anchor["start_line"] is not None:
+            start_path, start = self._github_line(anchor, data, anchor["start_line"])
+            if start_path != path or start >= end:
+                raise StoreError("the range %d-%d of %s does not stay one range in the pull request diff; comment on it "
+                                 "in All changes" % (anchor["start_line"], anchor["line"], anchor["path"]))
+        file_diff = _find_file(combined, path)
+        key = "o" if side == "old" else "n"
+        hunk_of = {} if file_diff is None else {row[key]: index for index, hunk in enumerate(file_diff["hunks"])
+                                                for row in hunk["lines"] if row[key] is not None}
+        if start not in hunk_of or end not in hunk_of:
+            span = str(end) if start == end else "%d-%d" % (start, end)
+            raise StoreError("%s:%s (%s side) is not in the pull request diff, and GitHub takes comments only on the "
+                             "lines that diff shows" % (path, span, side))
+        if hunk_of[start] != hunk_of[end]:
+            raise StoreError("a GitHub comment range must stay within one hunk of the pull request diff")
+        github_side = "RIGHT" if side == "new" else "LEFT"
+        lines = [{"line": number, "text": text} for number, text in _side_rows(file_diff, side) if start <= number <= end]
+        if comment.get("snippet") and _cap_snippet([row["text"] for row in lines]) != comment["snippet"]:
+            raise StoreError("%s:%s (%s side) no longer reads as it did when the comment was written, so the pull "
+                             "request moved under it; put the comment where it belongs again"
+                             % (path, end if start == end else "%d-%d" % (start, end), side), 409)
+        return dict(target, path=file_diff["path"], subject_type="LINE", line=end, side=github_side,
+                    start_line=start if start < end else None, start_side=github_side if start < end else None,
+                    lines=lines)
+
+    def _github_root(self, comment_id) -> dict:
+        comment = self._fetch(comment_id)
+        if comment["parent_id"] is not None or comment["github"] is None:
+            raise StoreError("comment %s is not a GitHub comment" % comment_id, 409)
+        return comment
+
+    def github_target(self, comment_id) -> dict:
+        """A GitHub comment's body, state and pull request, plus - unless it is posted already - the place GitHub
+        will anchor it at (section 10.2)."""
+        with self._lock:
+            comment = self._github_root(comment_id)
+            info = {"id": comment["id"], "body": comment["body"], "state": comment["state"],
+                    "github": comment["github"], "pr": dict(self.pr) if self.pr else None}
+            if comment["github"].get("status") == "posted":
+                return info
+            return dict(self._github_target(comment), **info)
+
+    def record_github_post(self, comment_id, posted) -> dict:
+        """Remember that a GitHub comment now lives in the user's pending review (``posted``: where and as what)."""
+        if not isinstance(posted, dict):
+            raise StoreError("posted must be an object")
+        url = posted.get("url")
+        if not isinstance(url, str) or not url.startswith("https://"):
+            raise StoreError("posted.url must be an https URL")
+        record = {key: posted.get(key) for key in _GITHUB_RECORD_KEYS}
+        with self._lock:
+            comment = self._github_root(comment_id)
+            if comment["github"].get("status") == "posted":
+                raise StoreError(_posted_message(comment), 409)
+            record.update(status="posted", posted_at=utcnow())
+            with self._mutate():
+                self._conn.execute("UPDATE comments SET github = ? WHERE id = ?", (json.dumps(record), comment_id))
+            return self._fetch(comment_id)
 
     def _locate_one(self, comment: dict, data: dict, head_sha: str) -> dict:
         """Section 4.5: where the anchored line lives at ``HEAD``."""

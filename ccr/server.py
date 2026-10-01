@@ -444,6 +444,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             route = lambda: self._patch_comment(parts[1], body)
         elif depth == 2 and head == "comments" and method == "DELETE":
             route = lambda: self._delete_comment(parts[1], query)
+        elif depth == 3 and head == "comments" and parts[2] == "github" and method == "GET":
+            route = lambda: self._send_json(200, self.server.store.github_target(parts[1]))
+        elif depth == 3 and head == "comments" and parts[2] == "github" and method == "POST":
+            route = lambda: self._send_json(200, self.server.store.record_github_post(parts[1], body.get("posted")))
         if route is None:
             raise HttpError(404, "not found")
         route()
@@ -460,10 +464,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         }
         post_routes = {
             "comments": lambda: self._send_json(201, store.add_comment(
-                body.get("body"), body.get("anchor"), body.get("author") or "user", body.get("parent_id"))),
+                body.get("body"), body.get("anchor"), body.get("author") or "user", body.get("parent_id"),
+                github=body.get("github"))),
             "submit": lambda: self._send_json(201, store.submit(body.get("verdict"), body.get("summary"))),
             "reload": lambda: self._reload(body),
             "cover": lambda: self._send_json(200, {"cover": store.set_cover(body.get("text")), "version": store.version}),
+            "pr": lambda: self._send_json(200, {"pr": store.set_pr(body.get("url")), "version": store.version}),
             "shutdown": self._shutdown,
         }
         if method == "GET":
@@ -533,7 +539,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _patch_comment(self, comment_id: str, body: dict) -> None:
         comment = self.server.store.edit_comment(comment_id, body=body.get("body"), resolved=body.get("resolved"),
-                                                 anchor=body.get("anchor"))
+                                                 anchor=body.get("anchor"), github=body.get("github"))
         self._send_json(200, comment)
 
     def _delete_comment(self, comment_id: str, query: dict) -> None:
@@ -623,9 +629,9 @@ def _print_serving(store: ReviewStore, url: str, out) -> None:
     commits = sum(1 for c in review["commits"] if c["kind"] == "commit")
     suffix = ", +worktree" if review["options"]["worktree"] else ""
     out.write("ccr: serving %s  (%s, %d commits%s)\n" % (store.repo, _range_label(review["range"]), commits, suffix))
-    line = render.review_line(review)
-    if line:
-        out.write(line + "\n")
+    for line in (render.review_line(review), render.pr_line(review)):
+        if line:
+            out.write(line + "\n")
     out.write("ccr: url %s\n" % url)
     if review["range"].get("note"):
         out.write("ccr: note: %s\n" % review["range"]["note"])
@@ -634,7 +640,8 @@ def _print_serving(store: ReviewStore, url: str, out) -> None:
 
 def serve(repo, spec=None, n=None, worktree: bool = False, first_parent: bool = False, port=None, db=None,
           db_force: bool = False, token=None, log=None, verbose: bool = False,
-          idle_timeout: float = DEFAULT_IDLE_TIMEOUT, open_browser: bool = False, cover=None, out=None, err=None) -> int:
+          idle_timeout: float = DEFAULT_IDLE_TIMEOUT, open_browser: bool = False, cover=None, pr=None,
+          out=None, err=None) -> int:
     """Run ``ccr serve`` in the foreground (section 5.2 lifecycle); returns the process exit code.
 
     Range and database problems raise :class:`GitError` / :class:`StoreError` /
@@ -654,6 +661,8 @@ def serve(repo, spec=None, n=None, worktree: bool = False, first_parent: bool = 
         if cover is not None:
             with open(cover, "r", encoding="utf-8") as handle:
                 store.set_cover(handle.read())
+        if pr is not None:
+            store.set_pr(pr)
         httpd = _bind(store, token, paths.key, port, verbose, idle_timeout)
     except BaseException:
         store.close()

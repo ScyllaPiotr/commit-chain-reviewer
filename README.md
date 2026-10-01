@@ -7,6 +7,10 @@ commits — and click **Submit**. The agent reads every comment in one call (`cc
 `ccr comments`), fixes the code, replies to and resolves threads from the CLI, reloads the diff, and
 the loop repeats until you have nothing left to ask. No GitHub detour, no network, no accounts.
 
+It also works the other way round, for a pull request someone else wrote: in **PR mode** you ask the agent
+questions inline, and the comments meant for the author go — checked by the agent, verbatim — into your pending
+review on GitHub, which you submit there ([below](#pr-mode-reviewing-someone-elses-pull-request)).
+
 ## Requirements
 
 | | |
@@ -104,7 +108,7 @@ merge-base <sha>`. Empty ranges without `--worktree` and ranges above 2000 commi
 
 | Command | Description |
 |---|---|
-| `ccr start [--range SPEC \| -n N] [--worktree \| --no-worktree] [--first-parent] [--port N] [--db PATH] [--log FILE] [--open] [--idle-timeout S] [--cover FILE]` | Start a background server and print the URL. `--cover FILE` sets the cover letter (the Markdown description of the whole change, shown above **All changes**). When a session is already running, reload it with the given options instead (`ccr: reusing running session`). `--worktree` adds uncommitted changes (staged, unstaged and untracked) as a pseudo-commit; `--first-parent` follows only first parents through merges; `--open` launches a browser; `--idle-timeout` (default 86400 s, 0 = never) stops a server nobody talks to. `--json` prints the session record plus the review counts. A bad range fails immediately with the git message; a crashing server prints `ccr: server exited with code N — last log lines:` and the log tail. |
+| `ccr start [--range SPEC \| -n N] [--worktree \| --no-worktree] [--first-parent] [--port N] [--db PATH] [--log FILE] [--open] [--idle-timeout S] [--cover FILE] [--pr URL]` | Start a background server and print the URL. `--pr URL` (or `OWNER/REPO#N`) links the review to a GitHub pull request: PR mode, see below. `--cover FILE` sets the cover letter (the Markdown description of the whole change, shown above **All changes**). When a session is already running, reload it with the given options instead (`ccr: reusing running session`). `--worktree` adds uncommitted changes (staged, unstaged and untracked) as a pseudo-commit; `--first-parent` follows only first parents through merges; `--open` launches a browser; `--idle-timeout` (default 86400 s, 0 = never) stops a server nobody talks to. `--json` prints the session record plus the review counts. A bad range fails immediately with the git message; a crashing server prints `ccr: server exited with code N — last log lines:` and the log tail. |
 | `ccr serve …` | Run the server in the foreground. Same options as `start`, plus `--token T` (visible in `ps` — tests only), `--verbose` (request log) and `--db-force`. |
 | `ccr stop [--all] [--keep-db] [--purge]` | Export the review to Markdown, shut the server down, delete the session file and the default database. `--keep-db` keeps the SQLite file; `--purge` also removes exports and logs; `--all` does it for every live session. |
 | `ccr status [--json]` | URL, range (+ note), commit count, comment counts, rounds with the last verdict, whether the UI is connected / last seen, log and db paths. |
@@ -117,7 +121,8 @@ merge-base <sha>`. Empty ranges without `--worktree` and ranges above 2000 commi
 | `ccr wait [--since-round N] [--since-version V] [--timeout S] [--any] [--json]` | Block until a round numbered > `N` exists (default `N` = the round count at call time), then print `ccr: round n — verdict — k new comments in j threads` followed by the threads touched in that round (earlier comments as context, new ones marked `★ new in round n`). Default timeout 590 s (0 = forever); on timeout stderr gets `ccr: no new round after S s (rounds: R, pending unsubmitted: P, version: V)` and the exit code is 2. `--any` returns on any change (`version > V`, default `V` = version at call time) and prints `ccr: version V→W · pending P · unresolved U · rounds R` plus the threads touched since the call. Exit 3 when the server is gone. After 30 s with no browser seen it prints `ccr: UI not opened yet` once. |
 | `ccr reply ID (BODY \| --file F \| -) [--resolve] [--as claude\|user] [--force]` | Reply to a thread; `--resolve` resolves it after a successful reply. An identical reply by the same author is refused unless `--force`. |
 | `ccr reply --batch (FILE \| -) [--json]` | Post many replies at once, from JSON (`[{"id","body","resolve"?}, …]`) or Markdown (`## <id> [resolve]` headings, each followed by its body). Prints `<id>: replied[, resolved]` or `<id>: ERROR …` per item, continues on error, exit 1 if any failed. |
-| `ccr comment (--review \| --commit REV [--path P [--line N [--side new\|old] [--start-line M]]]) (BODY \| --file F \| -) [--as claude\|user]` | Create a comment on the whole review, a commit, a file, a line or a range (`--start-line M` < `N`). `REV` is a listed sha, a short sha, `combined`, `worktree`, or any rev that resolves to a listed commit. `--side` defaults to `new`. |
+| `ccr comment (--review \| --commit REV [--path P [--line N [--side new\|old] [--start-line M]]]) (BODY \| --file F \| -) [--as claude\|user] [--github]` | Create a comment on the whole review, a commit, a file, a line or a range (`--start-line M` < `N`). `REV` is a listed sha, a short sha, `combined`, `worktree`, or any rev that resolves to a listed commit. `--side` defaults to `new`. `--github` (PR mode, with `--as user`) makes it a GitHub comment. |
+| `ccr gh-post ID [ID…] [--dry-run] [--json]` | PR mode: post submitted GitHub comments verbatim into your pending review on the pull request, one at a time, starting the review when you have none; never submits it. `--dry-run` shows where each would go and what it says without asking GitHub anything. |
 | `ccr resolve ID [ID…]` / `ccr unresolve ID [ID…]` | Set or clear the resolved flag of threads. |
 | `ccr edit ID (BODY \| --file F \| -)` | Replace a comment body (shown as `edited` in the UI). |
 | `ccr delete ID [ID…] [--cascade]` | Delete comments; a root with replies requires `--cascade`. |
@@ -311,11 +316,40 @@ ccr stop --repo /abs/repo                                    # 8. only when the 
   existing comment anchored; the sidebar's `•` dot marks the commits added since the last round.
   Squash after approval.
 
+## PR mode: reviewing someone else's pull request
+
+Without GitHub Copilot's inline help, the same UI is a convenient way to read a pull request somebody else wrote
+with the agent at your side. Ask the agent to review the pull request with ccr: it fetches the pull request head
+into a worktree of its own, uses the pull request body as the cover letter and runs
+`ccr start --range <merge base>..HEAD --pr <url>`, so **All changes** is exactly the diff GitHub shows. The agent
+changes no code; each comment you leave is one of two kinds:
+
+* **Question** — the `?` gutter button (and every comment on a commit or on the whole pull request, and every
+  reply). The agent answers it in the thread; nothing goes to GitHub.
+* **GitHub comment** — the `GH` gutter button, on a line, a range or a file (the file header has `?` and `GH`
+  too). After you click **Submit**, the agent checks it — its claims against the code, whether it fits its line —
+  and if it holds, `ccr gh-post` puts it **verbatim** into your **pending** review on the pull request, starting
+  the review when you have none. If the check finds a problem nothing is posted: the agent replies with the problem
+  and a corrected wording, and you edit the comment (which makes it pending again) or tell it to post as it is, and
+  submit again.
+
+The editor has a *Question | GitHub comment* switch that keeps what you typed. GitHub only takes comments on the
+lines its pull request diff shows, so a GitHub comment on any other line is refused right away (keep it as a
+question, or write it in **All changes**). Threads show *Question*, *GitHub · not posted* or, once posted, a
+*GitHub ↗* link to the comment; a posted comment can no longer be edited in ccr, only on GitHub. **Submitting the
+review** — with its verdict and its body — **is yours, in the GitHub UI**: ccr only ever starts your pending
+review and adds comments to it, through the `gh` CLI and your `gh auth` login, and checks after every comment
+that it landed exactly where intended and that nothing else in the review changed.
+
 ## Security model
 
 * The server binds **127.0.0.1 only** and refuses requests whose `Host` (and, when present,
   `Origin`/`Referer`) is not `127.0.0.1`, `localhost` or `[::1]` — ports are not compared, so SSH port
   forwarding works. Cross-site fetches are rejected; there are no CORS headers.
+* The server never reaches the network. Only `ccr gh-post` (PR mode) talks to GitHub, through the `gh` CLI and your
+  `gh auth` login: it reads the pull request and your pending review, starts that review when you have none and adds
+  review threads to it. It never submits or edits anything there, and deletes nothing but an empty pending review it
+  started itself a moment earlier, when the comment it was started for did not get in.
 * Every `/api/*` call must carry the per-process random token in the `X-CCR-Token` header. The URL's
   `?t=` is only how the browser receives the token on the first page load; the page immediately
   stores it in `localStorage` and strips it from the address bar. Without a valid token the UI shows

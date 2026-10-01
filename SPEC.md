@@ -7,6 +7,10 @@ line/file/commit comments, and a **Submit** round. The agent then reads *all* co
 in one call (`ccr comments` / `ccr wait`), fixes things, replies and resolves threads via the CLI,
 reloads the diff, and the loop repeats. No GitHub detour.
 
+**PR mode** (section 10) points the same UI at someone else's GitHub pull request: the agent changes no code,
+a comment is either a question it answers or a GitHub comment it checks and then posts verbatim into the user's
+pending review on the pull request, and the user submits that review on GitHub.
+
 Design constraints:
 
 * **Python 3.10+ standard library only** on the server/CLI side (no pip deps). Vanilla ES2020 JS,
@@ -37,6 +41,7 @@ commit-chain-reviewer/
     cli.py                  argparse CLI (section 6)
     server.py               ThreadingHTTPServer + request handler, routing, auth, static files (section 5)
     gitx.py                 git subprocess wrappers + unified-diff parser -> plain dicts (section 3)
+    github.py               PR mode: pull request references and posting through `gh api` (section 10)
     store.py                ReviewStore: review data cache, comments, rounds, version + Condition (section 4)
     session.py              session-file discovery, background start/stop, port pick, token gen (section 6.1)
     render.py               Markdown/JSON rendering of comments for `ccr comments|wait|export` (section 6.3)
@@ -52,7 +57,8 @@ commit-chain-reviewer/
   skills/review-commit-series/SKILL.md    Claude Code skill (`/review-commit-series [range]`) describing the agent loop (section 8)
   tests/                    pytest suite (section 9)
     conftest.py             fixture repo builder
-    test_gitx.py test_store.py test_server.py test_cli.py test_render.py
+    test_gitx.py test_store.py test_server.py test_cli.py test_render.py test_github.py
+    fake_gh.py              an in-memory GitHub behind a fake `gh` (PR mode tests; no network)
     e2e/driver.mjs          headless-Chromium CDP driver (Node 22, no deps)
     test_e2e.py             runs the driver against a live server (skipped if chromium is missing)
 ```
@@ -193,6 +199,7 @@ serialisation; anchor validation and snippet capture use untrimmed data.
   "snippet": "    y = 3",           // server-captured text of the anchored line(s) at creation; "" when not a line anchor or unresolvable; ranges joined by "\n"; capped at 32 lines / 8 KiB (last line "…" when cut)
   "moved_from": null,               // {"commit": sha, "line": n|null} after automatic re-anchoring or `ccr move`
   "outdated": false,                // computed on read: anchor.commit not in the current review. Not stored.
+  "github": null,                   // PR mode (10.1): null, or {"status": "local"} / {"status": "posted", …} on a GitHub comment
   "head_location": {"path": "src/fetcher.py", "line": 14, "status": "same"}   // only with ?locate=1 (section 4.5); root line anchors only
 }
 ```
@@ -236,6 +243,7 @@ Submitting with zero pending comments **and** empty summary is allowed only when
              "previous": null},                                // or {"id", "started_at", "range", "comments", "rounds"}
   "options": {"worktree": true},
   "cover": "Markdown description of the whole change (the PR cover letter); \"\" when none",
+  "pr": null,                        // PR mode (10.1): {"url", "host", "owner", "repo", "number"} of the linked pull request
   "commits": [CommitMeta, …],        // "combined" FIRST, then real commits oldest→newest, then "worktree" LAST
   "version": 17, "generation": 2, "loading": false, "now": "…Z",
   "counts": {"pending": 3, "submitted": 5, "unresolved": 4, "total": 8, "outdated": 0},   // root comments only, except total (all comments) and pending (all pending comments)
@@ -376,14 +384,15 @@ explicit file via `--db`. For file dbs: `PRAGMA journal_mode=WAL; PRAGMA synchro
 ```sql
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);          -- schema_version, repo, version
 CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY, started_at TEXT NOT NULL,
-  range_spec TEXT NOT NULL DEFAULT '', cover TEXT NOT NULL DEFAULT '', chain TEXT NOT NULL DEFAULT '{}');
+  range_spec TEXT NOT NULL DEFAULT '', cover TEXT NOT NULL DEFAULT '', chain TEXT NOT NULL DEFAULT '{}',
+  pr TEXT NOT NULL DEFAULT '');                                              -- pr: JSON or ''  (schema 3)
 CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY, parent_id TEXT REFERENCES comments(id) ON DELETE CASCADE,
   review INTEGER NOT NULL DEFAULT 1,
   author TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
   state TEXT NOT NULL, round INTEGER, resolved INTEGER NOT NULL DEFAULT 0,
   kind TEXT NOT NULL, commit_sha TEXT, path TEXT, side TEXT, line INTEGER, start_line INTEGER,
-  snippet TEXT NOT NULL DEFAULT '', moved_from TEXT);                       -- moved_from: JSON or NULL
+  snippet TEXT NOT NULL DEFAULT '', moved_from TEXT, github TEXT);          -- moved_from, github: JSON or NULL
 CREATE TABLE IF NOT EXISTS rounds (review INTEGER NOT NULL DEFAULT 1, number INTEGER NOT NULL,
   submitted_at TEXT NOT NULL, verdict TEXT NOT NULL,
   summary TEXT NOT NULL, base TEXT, head TEXT NOT NULL, commit_shas TEXT NOT NULL,   -- commit_shas: JSON array
@@ -394,7 +403,7 @@ On opening an existing file: `meta.schema_version` > current → exit 1 "db sche
 `realpath(repo)` → exit 1 `db was created for <path>; pass --db-force to reuse` (unless `--db-force`).
 A schema-1 file (no `reviews` table, one review per repository) is migrated in place: `comments.review` and
 `rounds.review` default to 1 and `meta.cover` / `meta.chain` move into review 1, whose `started_at` is the
-oldest comment. `version` is
+oldest comment. A schema-2 file gains the empty `reviews.pr` and `comments.github` columns. `version` is
 persisted in `meta` so a restarted server continues counting (never restarts at 0). The git diff cache is a plain
 dict `(sha, full, ws) → CommitDiff` (derived data), cleared on reload.
 
@@ -411,8 +420,11 @@ class ReviewStore:
     def compare(base: str|None, head: str, ws_ignore=False) -> dict
     def file(rev, path) -> dict
     def list_comments(state=None, round=None, resolved=None, author=None, commit=None, path=None, include_outdated=True, outdated_only=False, locate=False) -> list
-    def add_comment(body, anchor, author="user", parent_id=None) -> Comment
-    def edit_comment(id, body=None, resolved=None, anchor=None) -> Comment   # anchor → validate, re-capture snippet, set moved_from
+    def add_comment(body, anchor, author="user", parent_id=None, github=False) -> Comment   # github: 10.2
+    def edit_comment(id, body=None, resolved=None, anchor=None, github=None) -> Comment   # anchor → validate, re-capture snippet, set moved_from
+    def set_pr(reference) -> dict                 # PR mode (section 10)
+    def github_target(id) -> dict                 # 10.2
+    def record_github_post(id, posted) -> Comment # 10.3
     def delete_comment(id, cascade=False)   # root with replies and not cascade → StoreError(409, "thread has replies")
     def submit(verdict, summary) -> Round
     def wait(since_version, timeout) -> dict   # cond.wait_for(lambda: version > since or stopping, timeout) with a monotonic deadline; returns state() + {"changed": bool}
@@ -533,12 +545,15 @@ paths → 404 JSON. Log line (only with `--verbose`): `"%s %s %d %dms"` with the
 | GET | `/api/compare?base=X&head=Y&ws=ignore` | CommitDiff with `sha: "compare:<X10>..<Y10>"`, `kind: "compare"`, `subject: "Compare …"` |
 | GET | `/api/file?rev=R&path=P` | `{"rev","path","content","lines","truncated_lines"}`; 400 bad rev/path; 403 escape; 404 missing/not a blob; 413 too large; 415 binary |
 | GET | `/api/comments?state=&round=&resolved=&author=&commit=&path=&outdated=include|exclude|only&locate=1&project=<view>` | `{"version","generation","now","comments":[…]}`. With `project` (a listed sha, `combined` or `worktree`; 404 otherwise) every comment carries `view_anchor` — the anchor to render it at **in that view** (its own anchor when native; a line mapped with `map_line` between the two views' revisions for line comments made elsewhere; the same path for file comments; `null` for other views' commit-level comments and unmappable lines; review anchors as-is) — and `projected` (true when it came from another view). Replies carry their root's `view_anchor`. |
-| POST | `/api/comments` | `{body, anchor, author?, parent_id?}` → 201 Comment |
-| PATCH | `/api/comments/{id}` | `{body?, resolved?, anchor?}` → Comment |
+| POST | `/api/comments` | `{body, anchor, author?, parent_id?, github?}` → 201 Comment (`github: true` = a GitHub comment, 10.2) |
+| PATCH | `/api/comments/{id}` | `{body?, resolved?, anchor?, github?}` → Comment |
+| GET | `/api/comments/{id}/github` | where GitHub will anchor a GitHub comment (10.2) + its `body`, `github`, `pr`; 409 for a question |
+| POST | `/api/comments/{id}/github` | `{posted: {url, …}}` → Comment; records the post (10.3); 409 when already posted |
 | DELETE | `/api/comments/{id}?cascade=1` | 204; 409 when a root has replies and no cascade |
 | POST | `/api/submit` | `{verdict, summary}` → 201 Round |
 | POST | `/api/reload` | `{range?, n?, worktree?, first_parent?}` (omitted = keep) → `{"review": Review, "remapped": [...], "outdated": [Comment], "commits_added", "commits_removed"}`; git errors → 400, previous data kept |
 | POST | `/api/cover` | `{text}` → `{"cover", "version"}`; sets the cover letter (≤ 64 KiB Markdown, stored in `meta`; bumps `version` **and** `generation` so open pages re-render) |
+| POST | `/api/pr` | `{url}` → `{"pr", "version"}`; links the review to a pull request (section 10; bumps `version` and `generation`) |
 | POST | `/api/shutdown` | 202; sets `stopping`, `cond.notify_all()`, then `threading.Thread(target=httpd.shutdown, daemon=True).start()` |
 
 Errors are always JSON `{"error": "…"}`. Unknown `/api/*` → 404.
@@ -571,8 +586,10 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
 
 ### 6.2 Commands
 
-* `ccr start [--range SPEC | -n N] [--worktree | --no-worktree] [--first-parent] [--port N] [--db PATH] [--log FILE] [--open] [--idle-timeout S] [--cover FILE]`
-  `--cover FILE` sets the cover letter (also on reuse). `ccr cover (TEXT | --file F | -)` sets/replaces it on a running
+* `ccr start [--range SPEC | -n N] [--worktree | --no-worktree] [--first-parent] [--port N] [--db PATH] [--log FILE] [--open] [--idle-timeout S] [--cover FILE] [--pr URL]`
+  `--cover FILE` sets the cover letter (also on reuse). `--pr URL` (or `OWNER/REPO#N`) links the review to a pull
+  request (section 10; also on reuse; an unparsable value exits 1 before anything starts) and adds the line
+  `ccr: pr <url> (<owner/repo#N>): questions for Claude, GitHub comments for your pending review` before the URL. `ccr cover (TEXT | --file F | -)` sets/replaces it on a running
   review. The cover letter is shown above "All changes" in the UI with a *Comment on the whole series* button
   (anchor `kind=review`), and `ccr export --md` prints it under `## Cover letter`.
   1. Take `<key>.lock` (`O_CREAT|O_EXCL`; ignore if older than 30 s) so concurrent starts serialise.
@@ -601,7 +618,7 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
   3) `POST /api/shutdown`; 4) wait ≤ 5 s for the pid to vanish; 5) only then SIGTERM, and only if `/proc/<pid>/cmdline`
   contains `ccr` and `serve`; 6) delete the session file and the default sqlite file (`--keep-db` keeps it; `--purge` also
   removes exports and logs). `--all` does this for every live session.
-* `ccr status [--json]` — url, range (+note), commits, counts, rounds (last verdict), ui connected/last seen, log path, db path.
+* `ccr status [--json]` — url, range (+note), `ccr: pr <url>` in PR mode, commits, counts, rounds (last verdict), ui connected/last seen, log path, db path.
 * `ccr sessions [--json]` — every session file (repo, url, range, alive?, started_at), deleting stale ones; exit 3 if none.
 * `ccr logs [-n N] [-f]` — tail of the server log.
 * `ccr open` — `webbrowser.open(url)`.
@@ -615,7 +632,8 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
   Default `--all --context 3`. Zero matches → `ccr: no comments match` (exit 0).
 * `ccr wait [--since-round N] [--since-version V] [--timeout S] [--any] [--json]` — returns when a round with
   `number > N` exists (N defaults to the round count at call time). Stdout starts with
-  `ccr: round <n> — <verdict> — <k> new comments in <j> threads` then the Markdown for `--round n` (threads with any
+  `ccr: round <n> — <verdict> — <k> new comments in <j> threads` (in PR mode followed by `— <g> GitHub comments to
+  check and post` when the round has unposted ones) then the Markdown for `--round n` (threads with any
   comment in round n, earlier comments as context, new ones marked `★ new in round n`). Default `--timeout 590`
   (0 = forever). Timeout → stderr `ccr: no new round after S s (rounds: R, pending unsubmitted: P, version: V)`, exit 2.
   Connection errors → retry each 1 s; if the pid is dead or 30 s of consecutive failures → delete the session file,
@@ -628,7 +646,8 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
 * `ccr reply --batch (FILE | -) [--json]` — JSON `[{"id","body","resolve"?}, …]` **or** Markdown with `## <id> [resolve]`
   headings followed by the body; posts sequentially, prints `<id>: replied[, resolved]` / `<id>: ERROR …` per item,
   continues on error, exit 1 if any failed.
-* `ccr comment (--review | --commit REV [--path P [--line N [--side new|old] [--start-line M]]]) (BODY | --file F | -) [--as claude|user]`
+* `ccr comment (--review | --commit REV [--path P [--line N [--side new|old] [--start-line M]]]) (BODY | --file F | -) [--as claude|user] [--github]`
+  `--github` creates a GitHub comment (PR mode, 10.2; needs `--as user`).
   `--commit` accepts a full/short listed sha, `combined`, `worktree`, or any git rev the server resolves to a listed
   commit (404 otherwise). `--side` defaults to `new`; `--start-line` requires `--line`.
 * `ccr resolve ID [ID…]` / `ccr unresolve ID [ID…]` / `ccr edit ID (BODY | --file F | -)` / `ccr delete ID [ID…] [--cascade]`
@@ -636,7 +655,16 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
 * `ccr export [--json | --md] [-o FILE]` — `--md` = `# Review — <repo> (<spec>, base <sha> → head <sha>) — exported <ISO>`,
   the `## Rounds` block, then the 6.3 Markdown for `--all --outdated --context 3`; `--json` =
   `{"review": Review-without-files, "rounds", "comments", "threads": [{"root","replies","last_author","answered"}]}`.
-  `-o FILE` is created with mode 0600.
+  `-o FILE` is created with mode 0600. In PR mode the title carries ` — PR <owner/repo#N>` after the range.
+* `ccr gh-post ID [ID…] [--dry-run] [--json]` — PR mode (10.3): posts each submitted, unposted GitHub comment
+  verbatim into the user's pending review, one at a time (a repeated id once), and records it; every comment's
+  state and body are read from the server right before it is posted; prints `ccr: started your pending review
+  on <owner/repo#N>` when it had to start one, `<id>: posted <path>:<line> (<side>) → <url>` (or `(file)`), `  note: …`
+  and `  warning: …` lines, `<id>: already posted → <url>` for a comment posted earlier, and finally `ccr: your pending
+  review is on GitHub, to submit with a verdict there: <pr url>/files`. A question, a comment still pending in ccr,
+  an unknown id or a refusal by ccr or GitHub is `<id>: ERROR …`; exit 1 if any item failed or drew a warning.
+  `--dry-run` asks GitHub nothing and prints `<id>: would post to <owner/repo#N> <path>:<line> (<side>), commit
+  <short>`, the anchored lines (`  <n> | <text>`) and the verbatim body.
 
 Bodies read from `-` take stdin.
 
@@ -686,6 +714,10 @@ Why not use the existing backoff helper here?
 ## Outdated (anchored to commits no longer in the range)
 #### [id: …] user · 1b2c3d4e5f src/x.py new:10 → HEAD src/x.py:10 · R1 · unresolved
 ```
+
+In PR mode the document header carries ` — PR <owner/repo#N>` after the range, and every root says what it is for
+right after its author: `GitHub comment (not posted)`, `GitHub comment (posted: <url>)`, or `question` for the
+user's other roots (`#### [id: k3f9a2] user · question · new:11 → HEAD …`).
 
 Snippet block: `--context N` (default 3) rows before/after from the cached diff, each `<old#|blank> <new#|blank>
 <marker> <text>`, anchored rows prefixed with `>`; `--no-snippets` drops it. The HEAD arrow shows
@@ -738,7 +770,8 @@ tabs/browsers.
 └────────────┴─┴─┴────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Top bar** (`--top-h`): repo name + branch, range spec (+ note tooltip), commit count; `#btn-viewmode` (label = current
+**Top bar** (`--top-h`): repo name + branch, range spec (+ note tooltip), commit count, in PR mode `#pr-link` (*PR #N*,
+opening the pull request in a new tab; section 10.4); `#btn-viewmode` (label = current
 mode), `#btn-wrap`, `#btn-ws` (Hide whitespace, `?ws=ignore`, persisted), `#btn-theme` (auto→light→dark),
 `#btn-reload` (POST `/api/reload` — no confirm; afterwards a dismissible `#banner-reloaded` *"Chain reloaded: +a −r
 commits, K comments remapped, J now outdated"*), `#btn-submit` (bold **Submit**, green filled with white text, darker on
@@ -939,15 +972,15 @@ resembles GitHub dark-dimmed. `prefers-reduced-motion` disables animations. Focu
 | Element | Selector |
 |---|---|
 | Regions | `#app`, `#topbar`, `#sidebar`, `#main`, `#toasts`, `#tooltip` |
-| Topbar | `#btn-viewmode` (text = current mode "Unified"/"Split"), `#btn-wrap`, `#btn-ws`, `#btn-theme`, `#btn-reload`, `#btn-submit` (`.label`, `.badge-pending`; `:disabled` while nothing is pending), `#btn-copy-link`, `#btn-sidebar` |
+| Topbar | `#pr-link` (PR mode only), `#btn-viewmode` (text = current mode "Unified"/"Split"), `#btn-wrap`, `#btn-ws`, `#btn-theme`, `#btn-reload`, `#btn-submit` (`.label`, `.badge-pending`; `:disabled` while nothing is pending), `#btn-copy-link`, `#btn-sidebar` |
 | Commit list | `#commit-list .commit-item[data-sha]` (`.is-selected`, `.is-range`, `.is-new`, `.commit-badge`) |
 | File tree | `#file-tree .tree-folder[data-dir]`, `.tree-file[data-path]`, `#file-filter`, `#filter-status` (main pane: *"N of M files — clear"*) |
 | Header | `#commit-header .subject`, `.sha-copy`, `#btn-comment-commit`, `#commit-header .thread-block[data-key-host="commit"]`; combined view only: `#outdated-note` (hidden at 0), `#cover-letter` (`.cover-body` rendered Markdown, or `.is-empty` with the *"No cover letter"* hint), `#btn-comment-review`, `#commit-header .thread-block[data-key-host="review"]` |
-| File card | `.file-card[data-path][data-rendered="0|1"]` → `.file-header` (`.file-path`, `.status-badge`, `.btn-comment-file`, `.btn-collapse`), `.diff-body`, `.file-card.is-collapsed` |
+| File card | `.file-card[data-path][data-rendered="0|1"]` → `.file-header` (`.file-path`, `.status-badge`, `.btn-comment-file` — in PR mode two, `[data-intent="question"]` and `[data-intent="github"]` —, `.btn-collapse`), `.diff-body`, `.file-card.is-collapsed` |
 | Diff table | `table.diff[data-view]`; `tr.hunk` (`.btn-expand-up`, `.btn-expand-down`, `.btn-expand-all`); `tr.line.add|del|ctx[data-o][data-n][data-x]` (`.is-selected`, `.in-range`); `td.num.old|new[data-side][data-line]`, `td.num.empty`, `td.marker`, `td.code.old|new`, `td.code.empty`, `span.wd`, `span.cr` |
-| Gutter | `button.btn-add-comment[data-side][data-line]` (shared, moved into the hovered `td.num`) |
-| Editor | `tr.editor` / `div.editor-block` → `form.comment-editor[data-key][data-tab]` (`.editor-tabs > .editor-tab[data-tab]`, `textarea`, `.md-preview`, `.btn-submit-comment`, `.btn-cancel-comment`) |
-| Thread | `tr.threads[data-key]` / `div.thread-block` → `.thread[data-thread-id]` (`.is-resolved`, `.has-new`) → `.comment[data-id][data-author]` (`.comment-meta` `.author .time .tag-pending .tag-round .tag-edited .tag-new .tag-moved`, `a.tag-from[data-sha]` on a projected root, `.comment-body`, `.comment-actions` `.act-edit .act-delete .act-reply .act-resolve`), `button.btn-reply`, `button.btn-show-resolved` |
+| Gutter | `button.btn-add-comment[data-side][data-line]` (shared, moved into the hovered `td.num`); in PR mode two of them, `[data-intent="question"]` (`?`) and `[data-intent="github"]` (`GH`), moved together |
+| Editor | `tr.editor` / `div.editor-block` → `form.comment-editor[data-key][data-tab]` (`[data-intent="github"]` while it writes a GitHub comment; `.editor-head > .editor-tabs > .editor-tab[data-tab]`, in PR mode on a line or file `.editor-head > .editor-intent > .intent-btn[data-intent]`, `textarea`, `.md-preview`, `.btn-submit-comment`, `.btn-cancel-comment`) |
+| Thread | `tr.threads[data-key]` / `div.thread-block` → `.thread[data-thread-id]` (`.is-resolved`, `.has-new`) → `.comment[data-id][data-author]` (`.comment-meta` `.author .time .tag-pending .tag-round .tag-edited .tag-new .tag-moved`, `a.tag-from[data-sha]` on a projected root, PR mode: `.tag-question`, `.tag-github` / `a.tag-github.is-posted`, `.comment-body`, `.comment-actions` `.act-edit .act-delete .act-reply .act-resolve`), `button.btn-reply`, `button.btn-show-resolved` |
 | Banners/toasts | `#banner-disconnected`, `#banner-compare`, `#banner-reloaded`, `#toasts .toast.info|error|success`, `#notice-token` |
 | Readiness | `body[data-ready="1"]` after the first full render; `body[data-loading="1"]` while the server reports `loading` |
 
@@ -994,6 +1027,11 @@ review") teaches Claude Code to:
 Rules: always pass `--repo <absolute path>`; use `--json` when acting on ids programmatically; if working in a
 separate git worktree, start ccr with `--repo` on that worktree; never `ccr stop` on your own.
 
+**PR mode** (section 10): the same loop on someone else's pull request. The agent fetches the pull request head
+into a worktree of its own, starts ccr there with `--range <merge base>..HEAD --pr <url>` and the pull request
+body as the cover letter, and changes no code: it answers questions, checks GitHub comments and posts the sound
+ones with `ccr gh-post`, and never submits the GitHub review.
+
 Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `ccr@skills-dir`), or `claude plugin marketplace add <checkout> && claude plugin install ccr@ccr-local`, or `claude --plugin-dir <checkout>`. The plugin's `bin/` is on PATH while it is enabled; outside Claude Code use `bin/ccr` or `pip install -e .`.
 
 ---
@@ -1028,7 +1066,20 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
   `reply --batch` (Markdown), duplicate refusal → `comments --unanswered` → `export` → new commit + `reload` (counts,
   remap after amend) → `start` again = reuse → `sessions` → `stop` (export file written, session file gone, pid gone).
   Also: `start` with a bad range exits 1 immediately with the git message; `start` when the child crashes prints log tail.
-* `test_render.py`: golden Markdown for a fixed comment set incl. `clean()` escapes (`#` bodies, control chars in subjects).
+* `test_render.py`: golden Markdown for a fixed comment set incl. `clean()` escapes (`#` bodies, control chars in subjects);
+  the PR-mode header and the question / GitHub comment labels.
+* `test_github.py` (section 10): pull request references; the posting protocol against `fake_gh.py`, an in-memory
+  GitHub behind ccr's named operations that keeps one pending review per user and threads on diff lines only —
+  starting the review without body or event, adding to the user's own review and keeping their comments, file
+  threads, ranges, the duplicate, refusals (a review on another commit, another merge base, a line outside the
+  diff, which leaves no empty review behind), the moved-head note and the warnings of the re-read.
+* PR mode in the other suites: `test_store.py` (`set_pr` and its persistence, which roots may be GitHub comments,
+  targets on both sides, from commits and for files, every refusal, switching, the frozen posted comment, the
+  schema-2 migration), `test_server.py` (the PR routes), `test_cli.py` (`start --pr`, `comment --github`, the round
+  header, `gh-post` refusing pending comments and questions, `--dry-run` asking GitHub nothing, posting and
+  re-posting through a fake `gh` on PATH, `start --pr` on reuse) and `test_e2e.py` (the driver's second
+  scenario, `pr`: the PR link, the forked gutter and file buttons, the editor switch, a GitHub comment refused
+  outside the pull request diff and kept as a question, the posted link and toast).
 * `test_e2e.py` (skipped without `chromium-browser`/`chromium`/`google-chrome`): starts a server, runs
   `node tests/e2e/driver.mjs <url>` (CDP over Node's `WebSocket`) which: loads the page (token in `?t=`), waits for
   `body[data-ready]`, asserts every lang id from the section-3 table satisfies `hljs.getLanguage`, clicks the 2nd
@@ -1041,3 +1092,113 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
   zero console errors, and the API state (1 round with verdict `comment`, 3 user comments + the reply).
 
 Run: `python3 -m pytest -q`. All tests must pass with no network access.
+
+---
+
+## 10. PR mode (`--pr`, `ccr/github.py`)
+
+PR mode makes ccr a reading aid for someone else's pull request. `ccr start --pr URL` (a pull request URL, or
+`OWNER/REPO#N`) links the review to it; the agent serves the pull request's own chain — its head checked out in a
+worktree of its own, `--range <merge base>..HEAD`, so "All changes" is the diff GitHub shows — and changes no code.
+A user's comment is then one of two things:
+
+* a **question** for Claude: every comment by default, and the only kind on a commit, on the whole pull request
+  and in a reply. The agent answers it in the thread; nothing reaches GitHub.
+* a **GitHub comment**: a root on a line, a range or a file, written with a `GH` button (10.4). Once it is
+  submitted in a round, the agent checks it — its claims against the code, whether it fits its line and asks
+  something of this pull request — and, when it holds, posts it **verbatim** with `ccr gh-post` (10.3) into the
+  user's **pending** review, starting that review when there is none. When the check finds a problem nothing is
+  posted: the agent replies with the problem and a corrected wording, and the user edits the comment (or says to
+  post it as it is) and submits again.
+
+ccr never submits the review and never sets its body: the user submits it on GitHub, with the verdict and the body
+they choose.
+
+### 10.1 Data
+
+`Review.pr` = `{"url": "https://<host>/<owner>/<repo>/pull/<n>", "host", "owner", "repo", "number"}` or null, kept
+per review (`reviews.pr`, schema 3) and set by `set_pr` (`--pr`, `POST /api/pr`); `owner` and `repo` match
+`[A-Za-z0-9_.-]+`. `Comment.github` is null for every question and reply, `{"status": "local"}` for a GitHub comment
+not on GitHub yet, and once posted `{"status": "posted", "posted_at", "url", "comment_id", "node_id", "thread_id",
+"review_id", "path", "subject_type", "line", "side", "start_line", "start_side", "commit"}` (`comments.github`). A
+posted comment is frozen in ccr: changing its body or anchor, or turning it back into a question, is 409 *"comment X
+is posted to your pending GitHub review (<url>); change it there"*; resolving and deleting it (from ccr only) stay
+possible, and posting is not an edit (`updated_at` is kept). A submitted GitHub comment that is not posted yet goes
+back to `pending` (`round` null) when its body or anchor is edited or when a question is turned into one: what the
+agent checked is not what would be posted, so it is a draft again until the user submits it.
+
+### 10.2 Where GitHub anchors a comment
+
+GitHub places review threads on the pull request diff — "All changes" — and only on the lines it shows (changed
+lines and their context), so `github_target` puts a GitHub comment there:
+
+* `kind=file` → `{"subject_type": "FILE", "path"}` with the file's path in "All changes" (found by `path` or
+  `old_path`); a file that is not in it is refused.
+* `kind=line` on `combined` keeps its lines; on a commit, each end is carried with `map_line` from that commit's
+  side (the commit for `new`, its first parent for `old`) to `range.head` (`new`) or `range.base` (`old`), which must
+  answer `same` or `moved` and, for a range, the same path and ascending lines. Both ends must be lines of one hunk
+  of "All changes" on that side. `side` `new` → `RIGHT`, `old` → `LEFT`; a range adds `start_line`/`start_side`.
+* Refused when the rows found no longer read as the comment's snippet (409): "All changes" anchors keep their line
+  numbers across a reload, so after the pull request head moved the line under one may be another line now.
+* Refused, with a message saying why: other anchor kinds, `worktree`, outdated anchors, a review without a base, and
+  each failed rule above (*"src/app.py:10 (new side) is not in the pull request diff, and GitHub takes comments only
+  on the lines that diff shows"*, *"line 2 of notes.txt is changed again later in the pull request, so its diff has
+  no place for it; comment on it in All changes"*, *"a GitHub comment range must stay within one hunk of the pull
+  request diff"*).
+
+The rules run when a GitHub comment is created, switched from a question or moved (400 with the message, so the
+editor stays open), and again for `GET /api/comments/{id}/github`, which returns the place plus `commit`
+(`range.head`), `base`, `lines` (`[{"line", "text"}]`, the anchored rows), `body`, `github` and `pr`. Only the
+user's roots can be GitHub comments; replies are always local.
+
+### 10.3 Posting (`ccr gh-post`)
+
+`ccr gh-post` posts only GitHub comments that are submitted in ccr (a pending one is still a draft) and not posted
+yet, one at a time, through `ccr.github.post_comment`. GitHub is reached solely by running `gh api` —
+`gh api graphql --input -` with named operations, plus `--hostname` for a host other than github.com — as the
+account `gh auth` holds:
+
+1. `CcrViewer` once, then `CcrPendingReview`: the pull request (`id`, `headRefOid`, `baseRefOid`, its last 100
+   commits), the user's PENDING review (its commit and all its comments, paged by `CcrReviewComments` beyond the
+   first 100) and the number of reviews the user has submitted on it.
+2. Refuse, posting nothing, when `range.head` is neither the pull request head nor one of its commits (ccr linked
+   to the wrong pull request, or the pull request rewritten; beyond its last 100 commits ccr cannot tell, and
+   refuses), when the pull request diff does not start at `range.base` (its merge base: `git merge-base
+   <baseRefOid> <range.head>` locally, else `GET repos/<o>/<r>/compare/<base>...<head>` `.merge_base_commit.sha`), or
+   when the pending review is on another commit than `range.head`. A head that moved on past `range.head` is only
+   a note: the comment goes on the commit ccr reviewed.
+3. A comment in the pending review with the same body (line endings aside) at the same place counts as posted
+   already: nothing is added and the record points at it. A review comment does not say its side, so "the same
+   place" also needs its `diffHunk` to end with the target's last row on the target's side (`+` or ` ` for RIGHT,
+   `-` or ` ` for LEFT).
+4. Without a pending review, `CcrStartReview`: `addPullRequestReview` with `pullRequestId` and `commitOID` =
+   `range.head` only — no body, no event, so it stays PENDING. A review GitHub starts on another commit is undone
+   (as in step 5) and refused.
+5. `CcrAddThread`: `addPullRequestReviewThread` into that review with `path`, `body` and `subjectType`, for a line
+   `line`/`side`, for a range also `startLine`/`startSide`. When GitHub refuses it, or answers without a thread, and
+   step 4 started the review, `CcrDiscardReview` deletes that review again while it is still empty, so a refusal
+   leaves GitHub as it was.
+6. From here on the comment is on GitHub, and nothing raises: `CcrPendingReview` again, and the review must still
+   be the same pending one and hold the new comment with that body, every earlier comment must be unchanged, the
+   user's submitted-review count must not have moved and — when `range.head` is the pull request head — the thread
+   GitHub returned must sit where it was asked to. Each discrepancy, a failing re-read and a thread returned without
+   its comment (then the record keeps the review's URL) is a `warning`; the comment is posted and recorded anyway.
+7. `POST /api/comments/{id}/github` records the post (10.1). When that fails the line says the comment was posted
+   but not recorded; running `ccr gh-post` again finds it (step 3) and records it.
+
+Nothing else on GitHub is submitted, edited or deleted.
+
+### 10.4 UI
+
+With `review.pr` set the top bar shows `#pr-link`; the gutter `[+]` forks into `?` (a question, where `[+]` was)
+and `GH` (a GitHub comment, right of it), moved together; the file header's 💬 forks into `?` and `GH`; the commit
+and whole-review buttons read *Ask about this commit* and *Ask about the whole pull request*. A new-comment editor on
+a line or a file has a *Question | GitHub comment* switch (`.editor-intent`) beside its tabs, which keeps the text;
+writing a GitHub comment it carries `data-intent="github"`, the label **Add GitHub comment** and the hint *posted
+verbatim to your pending GitHub review once Claude has checked it*, and a question editor is labelled **Ask**. A
+draft remembers which of the two it was written as (`ccr:draft-intent:<key>`), so its dot shows on the matching
+button. Roots are tagged *Question* or *GitHub · not posted*; a posted one carries `a.tag-github.is-posted`
+(*GitHub ↗*, also on its collapsed resolved line) linking to the comment, and has no Edit action (Delete says it
+removes the comment from ccr only). When comments become posted, a toast says *"N GitHub comments posted to your
+pending review — submit it on GitHub"* with *Open on GitHub* (the pull request's `/files`). The Submit tooltip says
+that questions get answered and GitHub comments get checked and posted.

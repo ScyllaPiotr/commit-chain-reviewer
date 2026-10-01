@@ -420,7 +420,7 @@ def start_lock(paths: SessionPaths):
 
 
 def serve_argv(repo: str, port: int, log_path: str, spec=None, n=None, worktree: bool = False,
-               first_parent: bool = False, db=None, idle_timeout=None, cover=None) -> list:
+               first_parent: bool = False, db=None, idle_timeout=None, cover=None, pr=None) -> list:
     """Argument vector of the background ``ccr serve`` process (the token is never part of it).
 
     The child is started through :data:`BOOTSTRAP` rather than ``python -m ccr`` because ``-m`` puts the
@@ -442,6 +442,8 @@ def serve_argv(repo: str, port: int, log_path: str, spec=None, n=None, worktree:
         argv += ["--idle-timeout", str(idle_timeout)]
     if cover is not None:
         argv += ["--cover", cover]
+    if pr is not None:
+        argv += ["--pr", pr]
     return argv
 
 
@@ -506,7 +508,7 @@ def _await_loaded(proc: subprocess.Popen, record: dict, state: dict, log_path: s
 
 def start_background(repo: str, paths: SessionPaths, spec=None, n=None, worktree: bool = False,
                      first_parent: bool = False, port=None, db=None, log=None, idle_timeout=None,
-                     cover=None, err=None):
+                     cover=None, pr=None, err=None):
     """Spawn ``ccr serve`` for ``repo`` (SPEC 6.2 steps 4-5) and return ``(record, state)`` once it serves.
 
     The token travels only through the ``CCR_SERVE_TOKEN`` environment variable; stdout and stderr of
@@ -517,7 +519,7 @@ def start_background(repo: str, paths: SessionPaths, spec=None, n=None, worktree
     token = secrets.token_hex(16)
     log_path = os.path.abspath(log) if log else paths.log
     chosen_port = pick_port(paths.key, port)
-    argv = serve_argv(repo, chosen_port, log_path, spec, n, worktree, first_parent, db, idle_timeout, cover)
+    argv = serve_argv(repo, chosen_port, log_path, spec, n, worktree, first_parent, db, idle_timeout, cover, pr)
     log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.fchmod(log_fd, 0o600)

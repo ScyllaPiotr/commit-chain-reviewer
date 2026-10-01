@@ -20,7 +20,8 @@ import webbrowser
 from urllib.error import URLError
 from urllib.parse import quote
 
-from . import __version__, gitx, render, server, session
+from . import __version__, github, gitx, render, server, session
+from .github import GitHubError
 from .gitx import GitError
 from .session import ApiError, Client, NoSessionError, SessionError
 from .store import StoreError
@@ -125,6 +126,8 @@ def _add_server_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--log", metavar="FILE")
     parser.add_argument("--open", action="store_true", help="open the UI in a browser")
     parser.add_argument("--cover", metavar="FILE", help="Markdown cover letter describing the whole change")
+    parser.add_argument("--pr", metavar="URL", help="link the review to a GitHub pull request (PR mode: questions "
+                        "for Claude and GitHub comments for your pending review); URL or OWNER/REPO#N")
     parser.add_argument("--idle-timeout", type=float, default=server.DEFAULT_IDLE_TIMEOUT, metavar="S",
                         help="stop after S seconds without requests (0 = never; default 86400)")
 
@@ -214,6 +217,7 @@ def build_parser() -> Parser:
     _add_anchor_options(comment, review=True)
     _add_body_options(comment)
     comment.add_argument("--as", dest="author", choices=AUTHORS, default=DEFAULT_CLI_AUTHOR)
+    comment.add_argument("--github", action="store_true", help="a GitHub comment of PR mode (needs --as user)")
 
     add("resolve", "resolve threads").add_argument("ids", nargs="+", metavar="ID")
     add("unresolve", "unresolve threads").add_argument("ids", nargs="+", metavar="ID")
@@ -229,6 +233,12 @@ def build_parser() -> Parser:
 
     cover = add("cover", "set the cover letter (Markdown description of the whole change) of the running review")
     _add_body_options(cover)
+
+    gh_post = add("gh-post", "post GitHub comments verbatim into your pending review on the linked pull request "
+                  "(starting it when there is none; it is never submitted)")
+    gh_post.add_argument("ids", nargs="+", metavar="ID")
+    gh_post.add_argument("--dry-run", action="store_true", dest="dry_run",
+                         help="show where each comment would go and what it says; touch nothing")
 
     export = add("export", "dump rounds and every thread as Markdown (default) or JSON")
     export.add_argument("--md", action="store_true", help="Markdown (default)")
@@ -356,9 +366,9 @@ def print_serving(record: dict, review: dict) -> None:
     rng = review["range"]
     suffix = ", +worktree" if review["options"]["worktree"] else ""
     out("ccr: serving %s  (%s, %d commits%s)" % (record["repo"], range_label(rng), real_commits(review), suffix))
-    line = render.review_line(review)
-    if line:
-        out(line)
+    for line in (render.review_line(review), render.pr_line(review)):
+        if line:
+            out(line)
     out("ccr: url %s" % record["url"])
     if rng.get("note"):
         out("ccr: note: %s" % rng["note"])
@@ -369,8 +379,18 @@ def start_json(record: dict, review: dict, reused: bool) -> dict:
                 reused=reused, review=review.get("review"))
 
 
+def check_pr(reference) -> None:
+    """Fail fast (exit 1, nothing started) on a ``--pr`` value that names no pull request."""
+    if reference is not None:
+        try:
+            github.parse_pr(reference)
+        except ValueError as exc:
+            raise CliError(str(exc)) from None
+
+
 def cmd_start(args) -> int:
     repo = resolve_repo(args)
+    check_pr(args.pr)
     paths = session.paths_for(repo)
     with session.start_lock(paths):
         found = session.find_live(repo)
@@ -380,6 +400,8 @@ def cmd_start(args) -> int:
             if args.cover is not None:
                 with open(args.cover, "r", encoding="utf-8") as handle:
                     client.post("/api/cover", {"text": handle.read()})
+            if args.pr is not None:
+                client.post("/api/pr", {"url": args.pr})
             result = client.post("/api/reload", reload_body(args))
             if args.json:
                 print_json(start_json(record, result["review"], True))
@@ -393,7 +415,7 @@ def cmd_start(args) -> int:
         gitx.resolve_range(repo, args.range, args.n)
         record, _ = session.start_background(
             repo, paths, spec=args.range, n=args.n, worktree=bool(args.worktree), first_parent=bool(args.first_parent),
-            port=args.port, db=args.db, log=args.log, idle_timeout=args.idle_timeout, cover=args.cover)
+            port=args.port, db=args.db, log=args.log, idle_timeout=args.idle_timeout, cover=args.cover, pr=args.pr)
     review = Client(record["url"], record["token"]).get("/api/review")
     if args.json:
         print_json(start_json(record, review, False))
@@ -414,10 +436,11 @@ def cmd_cover(args) -> int:
 
 def cmd_serve(args) -> int:
     repo = resolve_repo(args)
+    check_pr(args.pr)
     return server.serve(repo, spec=args.range, n=args.n, worktree=bool(args.worktree),
                         first_parent=bool(args.first_parent), port=args.port, db=args.db, db_force=args.db_force,
                         token=args.token, log=args.log, verbose=args.verbose, idle_timeout=args.idle_timeout,
-                        open_browser=args.open, cover=args.cover)
+                        open_browser=args.open, cover=args.cover, pr=args.pr)
 
 
 def export_markdown(client: Client) -> str:
@@ -474,6 +497,8 @@ def cmd_status(args) -> int:
                                             " — loading" if review["loading"] else ""))
     if rng.get("note"):
         out("ccr: note: %s" % rng["note"])
+    if review.get("pr"):
+        out("ccr: pr %s" % render.clean(review["pr"]["url"], True))
     out("ccr: comments %d pending, %d submitted, %d unresolved, %d outdated (%d total)" % (
         counts["pending"], counts["submitted"], counts["unresolved"], counts["outdated"], counts["total"]))
     rounds = review["rounds"]
@@ -590,7 +615,10 @@ def report_round(client: Client, number: int, as_json: bool) -> int:
         return EXIT_OK
     verdict = round_info.get("verdict")
     label = "" if verdict in (None, "", "comment") else " — %s" % verdict  # "comment" = no verdict
-    out("ccr: round %d%s — %d new comments in %d threads" % (number, label, len(round_info["comment_ids"]), len(selected)))
+    to_post = sum(1 for t in selected if (t["root"].get("github") or {}).get("status") == "local")
+    todo = " — %d GitHub comment%s to check and post" % (to_post, "" if to_post == 1 else "s") if to_post else ""
+    out("ccr: round %d%s — %d new comments in %d threads%s" % (number, label, len(round_info["comment_ids"]),
+                                                               len(selected), todo))
     sys.stdout.write(render.render_comments(review, comments, fetch_file_diff(client), threads=selected,
                                             matching=matching, mark="★ new in round %d" % number))
     sys.stdout.flush()
@@ -796,11 +824,15 @@ def cmd_comment(args) -> int:
     anchor = anchor_from_args(args)
     body = read_body(args)
     client, _, _ = connect(args)
-    created = client.post("/api/comments", {"body": body, "anchor": anchor, "author": args.author})
+    payload = {"body": body, "anchor": anchor, "author": args.author}
+    if args.github:
+        payload["github"] = True
+    created = client.post("/api/comments", payload)
     if args.json:
         print_json(created)
     else:
-        out("ccr: created comment %s (%s)" % (created["id"], describe_anchor(created["anchor"])))
+        out("ccr: created comment %s (%s%s)" % (created["id"], describe_anchor(created["anchor"]),
+                                                ", GitHub comment" if created.get("github") else ""))
     return EXIT_OK
 
 
@@ -859,6 +891,78 @@ def cmd_move(args) -> int:
     return EXIT_OK
 
 
+def _github_where(target: dict) -> str:
+    path = render.clean(target["path"], True)
+    if target["subject_type"] == "FILE":
+        return "%s (file)" % path
+    span = "%d-%d" % (target["start_line"], target["line"]) if target.get("start_line") else str(target["line"])
+    return "%s:%s (%s)" % (path, span, target["side"])
+
+
+def print_github_plan(comment_id: str, target: dict, say) -> None:
+    """``gh-post --dry-run``: where on the pull request diff a comment would go, the lines there, its verbatim body."""
+    say("%s: would post to %s %s, commit %s" % (comment_id, github.pr_label(target["pr"]), _github_where(target),
+                                                 target["commit"][:gitx.SHORT_SHA_LEN]))
+    for row in target["lines"]:
+        say("  %6d | %s" % (row["line"], render.clean(row["text"])))
+    say("  body:")
+    for line in target["body"].split("\n"):
+        say("    " + render.clean(line))
+
+
+def post_one(client: Client, remote, review: dict, comment_id: str, dry_run: bool, say) -> dict:
+    """Check one GitHub comment, then post it (or show where it would go); returns its ``--json`` entry."""
+    target = client.get("/api/comments/%s/github" % quote(comment_id, safe=""))
+    if target["github"]["status"] == "posted":
+        say("%s: already posted → %s" % (comment_id, target["github"]["url"]))
+        return {"id": comment_id, "ok": True, "already": True, "github": target["github"]}
+    if target["state"] != "submitted":
+        raise CliError("comment %s is still pending in ccr; it can be posted once the user submits it" % comment_id)
+    if dry_run:
+        print_github_plan(comment_id, target, say)
+        return {"id": comment_id, "ok": True, "target": target}
+    result = github.post_comment(remote, target, target["body"], review["repo"]["path"])
+    if result["created_review"]:
+        say("ccr: started your pending review on %s" % github.pr_label(target["pr"]))
+    try:
+        updated = client.post("/api/comments/%s/github" % quote(comment_id, safe=""), {"posted": result["record"]})
+    except (ApiError, URLError) as exc:
+        raise CliError("posted to your pending review (%s) but ccr could not record it (%s); run ccr gh-post %s "
+                       "again to record it" % (result["record"]["url"], exc, comment_id)) from None
+    verb = "found already in your pending review" if result["already"] else "posted"
+    say("%s: %s %s → %s" % (comment_id, verb, _github_where(target), result["record"]["url"]))
+    for note in result["notes"]:
+        say("  note: %s" % note)
+    for problem in result["problems"]:
+        say("  warning: %s" % problem)
+    return {"id": comment_id, "ok": not result["problems"], "posted": True, "comment": updated,
+            "notes": result["notes"], "problems": result["problems"]}
+
+
+def cmd_gh_post(args) -> int:
+    client, _, _ = connect(args)
+    review = client.get("/api/review")
+    pr = review.get("pr")
+    if not pr:
+        raise CliError("the review is not linked to a GitHub pull request; start ccr with --pr URL")
+    remote = github.PullRequest(pr)
+    say = (lambda line: None) if args.json else out
+    results, posted = [], False
+    for comment_id in dict.fromkeys(args.ids):
+        try:
+            entry = post_one(client, remote, review, comment_id, args.dry_run, say)
+            posted = posted or entry.get("posted", False)
+        except (ApiError, CliError, GitHubError) as exc:
+            entry = {"id": comment_id, "ok": False, "error": str(exc)}
+            say("%s: ERROR %s" % (comment_id, exc))
+        results.append(entry)
+    if posted:
+        say("ccr: your pending review is on GitHub, to submit with a verdict there: %s/files" % pr["url"])
+    if args.json:
+        print_json(results)
+    return EXIT_OK if all(entry["ok"] for entry in results) else EXIT_ERROR
+
+
 def cmd_export(args) -> int:
     client, _, _ = connect(args)
     review, comments = load_review(client)
@@ -878,7 +982,7 @@ def cmd_export(args) -> int:
 COMMANDS = {
     "start": cmd_start, "serve": cmd_serve, "stop": cmd_stop, "status": cmd_status, "sessions": cmd_sessions,
     "logs": cmd_logs, "open": cmd_open, "reload": cmd_reload, "comments": cmd_comments, "wait": cmd_wait,
-    "cover": cmd_cover,
+    "cover": cmd_cover, "gh-post": cmd_gh_post,
     "reply": cmd_reply, "comment": cmd_comment, "resolve": cmd_resolve, "unresolve": cmd_unresolve,
     "edit": cmd_edit, "delete": cmd_delete, "move": cmd_move, "export": cmd_export,
 }
@@ -904,7 +1008,7 @@ def main(argv=None) -> int:
         # the interpreter's final flush cannot raise a second time.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return EXIT_ERROR
-    except (GitError, StoreError, SessionError, ApiError, CliError, OSError) as exc:
+    except (GitError, StoreError, SessionError, ApiError, CliError, GitHubError, OSError) as exc:
         err("ccr: %s" % exc)
         return EXIT_ERROR
     except KeyboardInterrupt:

@@ -28,7 +28,7 @@ from ccr.store import (
     default_db_path,
     utcnow,
 )
-from conftest import FEATURE_SUBJECTS, build_fixture_repo
+from conftest import FEATURE_SUBJECTS, build_fixture_repo, run_git
 
 THREE_HUNKS, RENAME, BINARY, EDIT_NONL, MERGE, EMPTY, BIG = FEATURE_SUBJECTS
 INSERTED = "inserted_a = 'a'\ninserted_b = 'b'\ninserted_c = 'c'"
@@ -61,9 +61,10 @@ def unstage_all(repo):
 def test_review_shape_and_pseudo_commits(fixture_repo, store):
     store.set_server_info({"pid": 4242, "port": 7777, "started_at": "2026-09-03T13:00:00Z", "version": "0.1.0"})
     review = store.review()
-    assert set(review) == {"repo", "range", "review", "options", "cover", "commits", "version", "generation", "loading",
-                           "now", "counts", "rounds", "server", "ui"}
+    assert set(review) == {"repo", "range", "review", "options", "cover", "pr", "commits", "version", "generation",
+                           "loading", "now", "counts", "rounds", "server", "ui"}
     assert review["review"] == {"id": 1, "started_at": review["review"]["started_at"], "resumed": False, "previous": None}
+    assert review["pr"] is None
     assert review["repo"] == {"path": fixture_repo.path, "name": os.path.basename(fixture_repo.path),
                               "branch": "feature", "bare": False}
     assert review["range"] == {"spec": "main..feature", "given": "main..feature", "base": fixture_repo.main,
@@ -1084,3 +1085,261 @@ def test_schema_1_database_is_migrated(fixture_repo, tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM rounds WHERE review = 1").fetchone()[0] == 2
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------- PR mode (section 10)
+
+PR_URL = "https://github.com/o/r/pull/7"
+
+
+@pytest.fixture
+def pr_store(fixture_repo):
+    s = open_store(fixture_repo)
+    s.set_pr(PR_URL)
+    yield s
+    s.close()
+
+
+def test_set_pr_links_the_review_and_persists(fixture_repo, tmp_path):
+    db = str(tmp_path / "review.sqlite")
+    store = open_store(fixture_repo, db_path=db, worktree=False)
+    version, generation = store.version, store.generation
+    assert store.set_pr("o/r#7") == {"url": PR_URL, "host": "github.com", "owner": "o", "repo": "r", "number": 7}
+    assert store.review()["pr"] == {"url": PR_URL, "host": "github.com", "owner": "o", "repo": "r", "number": 7}
+    assert (store.version, store.generation) == (version + 1, generation + 1), "open pages re-render for the mode"
+    with pytest.raises(StoreError, match="not a pull request URL") as info:
+        store.set_pr("https://github.com/o/r/issues/7")
+    assert info.value.status == 400 and store.review()["pr"]["number"] == 7
+    store.close()
+    reopened = open_store(fixture_repo, db_path=db, worktree=False)
+    assert reopened.review()["pr"]["url"] == PR_URL, "the link belongs to the review"
+    reopened.close()
+
+
+def test_github_comments_need_pr_mode_a_user_root_and_a_line_or_file(fixture_repo, store):
+    sha = fixture_repo.sha(THREE_HUNKS)
+    with pytest.raises(StoreError, match="not linked to a GitHub pull request") as info:
+        store.add_comment("x", line_anchor(sha, "src/app.py", 5), github=True)
+    assert info.value.status == 409
+    store.set_pr(PR_URL)
+    root = store.add_comment("Why 500?", line_anchor(sha, "src/app.py", 5), github=True)
+    assert root["github"] == {"status": "local"} and root["state"] == "pending" and root["author"] == "user"
+    question = store.add_comment("What does this do?", line_anchor(sha, "src/app.py", 5))
+    assert question["github"] is None
+    rejects = {
+        "reply stays in ccr": dict(anchor=None, parent_id=root["id"]),
+        "the user's to write": dict(anchor=line_anchor(sha, "src/app.py", 5), author="claude"),
+        "goes on a line or a file": dict(anchor={"kind": "commit", "commit": sha}),
+        "goes on a line or a file ": dict(anchor={"kind": "review"}),
+        "uncommitted changes": dict(anchor=line_anchor(WORKTREE, "untracked.txt", 1)),
+        "github must be a boolean": dict(anchor=line_anchor(sha, "src/app.py", 5), github="yes"),
+    }
+    for message, kwargs in rejects.items():
+        github = kwargs.pop("github", True)
+        with pytest.raises(StoreError, match=message.strip()):
+            store.add_comment("x", github=github, **kwargs)
+    reply = store.add_comment("A reply", None, parent_id=root["id"])
+    assert reply["github"] is None, "replies are always local"
+    assert [c["id"] for c in store.list_comments()] == [root["id"], question["id"], reply["id"]]
+
+
+def test_github_targets_are_lines_of_the_pull_request_diff(fixture_repo, pr_store):
+    three, binary, merge = fixture_repo.sha(THREE_HUNKS), fixture_repo.sha(BINARY), fixture_repo.sha(MERGE)
+    head, base = fixture_repo.feature, fixture_repo.main
+
+    def target(anchor):
+        comment = pr_store.add_comment("Remark", anchor, github=True)
+        result = pr_store.github_target(comment["id"])
+        assert result["id"] == comment["id"] and result["body"] == "Remark" and result["pr"]["number"] == 7
+        assert result["commit"] == head and result["base"] == base and result["github"] == {"status": "local"}
+        return {k: result[k] for k in ("path", "subject_type", "line", "side", "start_line", "start_side")}, result["lines"]
+
+    assert target(line_anchor(three, "src/app.py", 5)) == (
+        {"path": "src/app.py", "subject_type": "LINE", "line": 5, "side": "RIGHT", "start_line": None, "start_side": None},
+        [{"line": 5, "text": "value_05 = 500  # changed"}])
+    assert target(line_anchor(three, "src/app.py", 26, start_line=24))[0] == {
+        "path": "src/app.py", "subject_type": "LINE", "line": 26, "side": "RIGHT", "start_line": 24, "start_side": "RIGHT"}
+    assert target(line_anchor(COMBINED, "src/app.py", 5, side="old")) == (
+        {"path": "src/app.py", "subject_type": "LINE", "line": 5, "side": "LEFT", "start_line": None, "start_side": None},
+        [{"line": 5, "text": "value_05 = 5"}])
+    assert target(line_anchor(three, "src/app.py", 16, side="old", start_line=15))[0]["side"] == "LEFT", \
+        "an old line of a commit is carried to the old side of the pull request diff"
+    assert target(line_anchor(binary, "notes/nonl.txt", 1))[1] == [{"line": 1, "text": "first line"}]
+    assert target({"kind": "file", "commit": fixture_repo.sha(RENAME), "path": "src/util.py"}) == (
+        {"path": "src/utils.py", "subject_type": "FILE", "line": None, "side": None, "start_line": None,
+         "start_side": None}, [])
+
+    refused = {
+        "changed again later in the pull request": line_anchor(binary, "notes/nonl.txt", 2),
+        "is not in the pull request diff": line_anchor(three, "src/app.py", 10),
+        "within one hunk": line_anchor(three, "src/app.py", 15, start_line=5),
+        "hotfix.txt is not part of the pull request diff": {"kind": "file", "commit": merge, "path": "hotfix.txt"},
+        "hotfix.txt:1 \\(new side\\) is not in the pull request diff": line_anchor(merge, "hotfix.txt", 1),
+    }
+    for message, anchor in refused.items():
+        with pytest.raises(StoreError, match=message) as info:
+            pr_store.add_comment("Remark", anchor, github=True)
+        assert info.value.status == 400
+        pr_store.add_comment("Still fine as a question", anchor)
+
+
+def test_github_comments_switch_and_freeze_once_posted(fixture_repo, pr_store):
+    sha = fixture_repo.sha(THREE_HUNKS)
+    question = pr_store.add_comment("Is this right?", line_anchor(sha, "src/app.py", 5))
+    switched = pr_store.edit_comment(question["id"], github=True)
+    assert switched["github"] == {"status": "local"} and switched["updated_at"] > switched["created_at"]
+    assert pr_store.edit_comment(question["id"], github=False)["github"] is None
+    with pytest.raises(StoreError, match="not in the pull request diff"):
+        pr_store.edit_comment(question["id"], github=True, anchor=line_anchor(sha, "src/app.py", 10))
+    with pytest.raises(StoreError, match="not a GitHub comment") as info:
+        pr_store.github_target(question["id"])
+    assert info.value.status == 409
+
+    root = pr_store.add_comment("Why 500?", line_anchor(sha, "src/app.py", 5), github=True)
+    with pytest.raises(StoreError, match="not in the pull request diff"):
+        pr_store.edit_comment(root["id"], anchor=line_anchor(sha, "src/app.py", 10))
+    moved = pr_store.edit_comment(root["id"], anchor=line_anchor(sha, "src/app.py", 6), body="Why 500 here?")
+    assert moved["anchor"]["line"] == 6 and moved["github"] == {"status": "local"}
+
+    for bad, message in (({"url": "javascript:alert(1)"}, "https URL"), (None, "must be an object")):
+        with pytest.raises(StoreError, match=message):
+            pr_store.record_github_post(root["id"], bad)
+    posted = pr_store.record_github_post(root["id"], {
+        "url": PR_URL + "#discussion_r9", "comment_id": 9, "node_id": "PRRC_9", "thread_id": "PRRT_9",
+        "review_id": "PRR_1", "path": "src/app.py", "subject_type": "LINE", "line": 6, "side": "RIGHT",
+        "start_line": None, "start_side": None, "commit": fixture_repo.feature, "unexpected": "dropped"})
+    assert posted["github"] == {"status": "posted", "posted_at": posted["github"]["posted_at"],
+                                "url": PR_URL + "#discussion_r9", "comment_id": 9, "node_id": "PRRC_9",
+                                "thread_id": "PRRT_9", "review_id": "PRR_1", "path": "src/app.py",
+                                "subject_type": "LINE", "line": 6, "side": "RIGHT", "start_line": None,
+                                "start_side": None, "commit": fixture_repo.feature}
+    assert posted["updated_at"] == moved["updated_at"], "posting is not an edit"
+    for change in (dict(body="Reworded"), dict(anchor=line_anchor(sha, "src/app.py", 5)), dict(github=False)):
+        with pytest.raises(StoreError, match="posted to your pending GitHub review .*discussion_r9.*; change it there") as info:
+            pr_store.edit_comment(root["id"], **change)
+        assert info.value.status == 409
+    with pytest.raises(StoreError, match="posted to your pending GitHub review") as info:
+        pr_store.record_github_post(root["id"], {"url": PR_URL + "#discussion_r10"})
+    assert info.value.status == 409
+    assert pr_store.edit_comment(root["id"], body="Why 500 here?")["body"] == "Why 500 here?", "an identical body is no edit"
+    assert pr_store.edit_comment(root["id"], resolved=True)["resolved"] is True
+    assert pr_store.github_target(root["id"])["github"]["status"] == "posted"
+    pr_store.delete_comment(root["id"])
+    assert root["id"] not in {c["id"] for c in pr_store.list_comments()}, "deleting removes it from ccr only"
+
+
+def test_schema_2_database_gains_the_pr_mode_columns(fixture_repo, tmp_path):
+    db = str(tmp_path / "v2.sqlite")
+    first = open_store(fixture_repo, db_path=db, worktree=False)
+    kept = first.add_comment("from schema 2", {"kind": "commit", "commit": fixture_repo.sha(THREE_HUNKS)})
+    first.close()
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+      UPDATE meta SET value = '2' WHERE key = 'schema_version';
+      ALTER TABLE comments DROP COLUMN github;
+      ALTER TABLE reviews DROP COLUMN pr;
+    """)
+    conn.close()
+    store = open_store(fixture_repo, db_path=db, worktree=False)
+    assert store.review()["pr"] is None
+    assert [(c["id"], c["github"]) for c in store.list_comments()] == [(kept["id"], None)]
+    store.set_pr(PR_URL)
+    assert store.add_comment("new", line_anchor(fixture_repo.sha(THREE_HUNKS), "src/app.py", 5), github=True)["github"]
+    store.close()
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
+    finally:
+        conn.close()
+
+
+class SmallRepo:
+    """A throw-away repository for PR-mode cases the fixture cannot show: ``commit(message, **files)`` → sha."""
+
+    def __init__(self, path: str):
+        self.path = path
+        os.makedirs(path)
+        run_git(path, ["init", "-q"])
+
+    def commit(self, message: str, **files) -> str:
+        for name, lines in files.items():
+            with open(os.path.join(self.path, name), "w") as handle:
+                handle.write("\n".join(lines) + "\n")
+        run_git(self.path, ["add", "-A"])
+        run_git(self.path, ["commit", "-q", "-m", message])
+        return run_git(self.path, ["rev-parse", "HEAD"]).decode().strip()
+
+    def store(self, base: str) -> ReviewStore:
+        store = ReviewStore(self.path, "%s..HEAD" % base, None, db_path=":memory:")
+        store.load()
+        store.set_pr(PR_URL)
+        return store
+
+
+TEN = ["line %d" % k for k in range(1, 11)]
+
+
+def test_github_target_follows_a_rename_on_the_old_side(tmp_path):
+    """An old-side line of a commit that renames a file maps under the file's old name back to the base."""
+    repo = SmallRepo(str(tmp_path / "rename"))
+    base = repo.commit("base", **{"a.txt": TEN})
+    repo.commit("insert a line on top", **{"a.txt": ["inserted"] + TEN})
+    run_git(repo.path, ["mv", "a.txt", "b.txt"])
+    renamed = repo.commit("rename and edit", **{"b.txt": ["inserted"] + TEN[:8] + ["line nine, edited", "line 10"]})
+    store = repo.store(base)
+    comment = store.add_comment("Why drop this?", line_anchor(renamed, "b.txt", 10, side="old"), github=True)
+    target = store.github_target(comment["id"])
+    assert (target["path"], target["side"], target["line"]) == ("b.txt", "LEFT", 9), "line 10 of the parent is line 9 at the base"
+    assert target["lines"] == [{"line": 9, "text": "line 9"}]
+    store.close()
+
+
+def test_github_target_follows_a_new_line_moved_by_a_later_commit(tmp_path):
+    repo = SmallRepo(str(tmp_path / "moved"))
+    base = repo.commit("base", **{"a.txt": TEN})
+    first = repo.commit("edit line 5", **{"a.txt": TEN[:4] + ["line 5, edited"] + TEN[5:]})
+    repo.commit("insert two lines on top", **{"a.txt": ["top 1", "top 2"] + TEN[:4] + ["line 5, edited"] + TEN[5:]})
+    store = repo.store(base)
+    comment = store.add_comment("Why?", line_anchor(first, "a.txt", 5), github=True)
+    target = store.github_target(comment["id"])
+    assert (target["side"], target["line"], target["lines"]) == ("RIGHT", 7, [{"line": 7, "text": "line 5, edited"}])
+    store.close()
+
+
+def test_a_github_comment_whose_line_moved_under_it_is_refused(tmp_path):
+    """"All changes" keeps its line numbers across a reload, so the text the comment was written on is checked."""
+    repo = SmallRepo(str(tmp_path / "drift"))
+    base = repo.commit("base", **{"a.txt": TEN})
+    repo.commit("edit line 5", **{"a.txt": TEN[:4] + ["line 5, edited"] + TEN[5:]})
+    store = repo.store(base)
+    comment = store.add_comment("Why?", line_anchor(COMBINED, "a.txt", 5), github=True)
+    assert store.github_target(comment["id"])["lines"] == [{"line": 5, "text": "line 5, edited"}]
+    repo.commit("the author pushes again", **{"a.txt": ["top 1", "top 2"] + TEN[:4] + ["line 5, edited"] + TEN[5:]})
+    store.load()
+    with pytest.raises(StoreError, match="a.txt:5 \\(new side\\) no longer reads as it did when the comment was "
+                                         "written") as info:
+        store.github_target(comment["id"])
+    assert info.value.status == 409
+    moved = store.edit_comment(comment["id"], anchor=line_anchor(COMBINED, "a.txt", 7))
+    assert store.github_target(moved["id"])["line"] == 7, "moving it to the line it is about fixes it"
+    store.close()
+
+
+def test_editing_a_submitted_github_comment_makes_it_a_draft_again(fixture_repo, pr_store):
+    sha = fixture_repo.sha(THREE_HUNKS)
+    remark = pr_store.add_comment("Why 500?", line_anchor(sha, "src/app.py", 5), github=True)
+    question = pr_store.add_comment("And this?", line_anchor(sha, "src/app.py", 6))
+    pr_store.submit("comment", "")
+    assert pr_store.edit_comment(remark["id"], resolved=True)["state"] == "submitted", "resolving is no edit"
+    edited = pr_store.edit_comment(remark["id"], body="Why 500 and not 50?")
+    assert (edited["state"], edited["round"]) == ("pending", None), "the agent checked other text"
+    assert pr_store.github_target(remark["id"])["state"] == "pending"
+    assert pr_store.submit("comment", "")["comment_ids"] == [remark["id"]]
+    moved = pr_store.edit_comment(remark["id"], anchor=line_anchor(sha, "src/app.py", 6))
+    assert moved["state"] == "pending"
+    pr_store.submit("comment", "")
+    assert pr_store.edit_comment(question["id"], body="And this one?")["state"] == "submitted", "a question stays put"
+    switched = pr_store.edit_comment(question["id"], github=True)
+    assert (switched["state"], switched["github"]) == ("pending", {"status": "local"})
+    pr_store.submit("comment", "")
+    assert pr_store.edit_comment(question["id"], github=False)["state"] == "submitted"

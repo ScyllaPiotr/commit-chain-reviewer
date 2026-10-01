@@ -471,3 +471,33 @@ def test_review_line_names_the_unrelated_review_left_in_the_database():
                                                          "range": "main..other", "comments": 24, "rounds": 1}}))
     assert line == ("ccr: new review #4 — the database also holds review #3 "
                     "(main..other, 24 comments, 1 round) of a different change")
+
+
+# --------------------------------------------------------------------------- PR mode (section 10)
+
+PR = {"url": "https://github.com/o/r/pull/7", "host": "github.com", "owner": "o", "repo": "r", "number": 7}
+
+
+def test_pr_mode_names_the_pull_request_and_what_every_root_is_for():
+    review = dict(REVIEW, pr=PR)
+    github = _comment("gh0001", "user", "Please add a test.", "2026-09-03T13:45:30Z",
+                      _anchor("line", C1, "src/fetcher.py", "new", 11), snippet="y = 3")
+    github["github"] = {"status": "local"}
+    posted = _comment("gh0002", "user", "Typo.", "2026-09-03T13:48:30Z", _anchor("line", C2, "README.md", "new", 3),
+                      snippet="end")
+    posted["github"] = {"status": "posted", "url": "https://github.com/o/r/pull/7#discussion_r9"}
+    text = render.render_comments(review, COMMENTS + [github, posted], fetch)
+    assert text.startswith("# Review comments — demo (main..HEAD) — PR o/r#7 — 11 threads (")
+    assert "#### [id: gh0001] user · GitHub comment (not posted) · new:11 → " not in text, "no head location given"
+    assert "#### [id: gh0001] user · GitHub comment (not posted) · new:11 · R1 · unresolved" in text
+    assert ("#### [id: gh0002] user · GitHub comment (posted: https://github.com/o/r/pull/7#discussion_r9) · new:3 · R1"
+            in text)
+    assert "#### [id: k3f9a2] user · question · new:11 → HEAD src/fetcher.py:14 (moved) · pending" in text
+    assert "#### [id: q8x1zz] user · question · review · R1" in text
+    assert "#### [id: c0mm1t] claude · commit · R0" in text, "Claude's own roots are not questions"
+    assert "  ↳ [id: p0o9i8] claude · 2026-09-03T13:52:10Z · R1" in text, "replies carry no intent"
+    export = render.render_export(review, COMMENTS, fetch, exported_at="2026-09-03T15:00:00Z")
+    assert export.startswith("# Review — demo (main..HEAD, base aaaaaaaaaa → head 1a2b3c4d5e) — PR o/r#7 — exported ")
+    assert render.pr_line(review) == ("ccr: pr https://github.com/o/r/pull/7 (o/r#7): questions for Claude, GitHub "
+                                      "comments for your pending review")
+    assert render.pr_line(REVIEW) is None and render.render_comments(REVIEW, COMMENTS, fetch) == GOLDEN

@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 __all__ = [
     "clean",
     "review_line",
+    "pr_line",
     "build_threads",
     "sort_threads",
     "select_threads",
@@ -84,6 +85,19 @@ def review_line(review: dict):
         detail = "%s, %s" % (_plural(review["counts"]["total"], "comment"), _plural(len(review["rounds"]), "round"))
         return "ccr: resuming review #%d started %s (%s)" % (info["id"], info["started_at"], detail)
     return None
+
+
+def _pr_label(pr: dict) -> str:
+    return clean("%s/%s#%s" % (pr.get("owner"), pr.get("repo"), pr.get("number")), True)
+
+
+def pr_line(review: dict):
+    """The ``ccr:`` banner of PR mode naming the linked pull request, or None outside PR mode."""
+    pr = review.get("pr")
+    if not pr:
+        return None
+    return "ccr: pr %s (%s): questions for Claude, GitHub comments for your pending review" % (
+        clean(pr.get("url"), True), _pr_label(pr))
 
 
 def _body_lines(body, indent: str = "") -> list:
@@ -270,10 +284,19 @@ def _head_arrow(root: dict) -> str:
     return " → HEAD %s:%s%s" % (clean(location["path"], True), line_text, _HEAD_LABELS.get(status, " (%s)" % status))
 
 
-def _thread_header(thread: dict, matching: set, mark: str) -> str:
+def _intent(root: dict, pr_mode: bool) -> list:
+    """What a PR-mode root is for: a question for Claude, or a GitHub comment (and whether it is posted)."""
+    github = root.get("github")
+    if github:
+        if github.get("status") == "posted":
+            return ["GitHub comment (posted: %s)" % clean(github.get("url"), True)]
+        return ["GitHub comment (not posted)"]
+    return ["question"] if pr_mode and root.get("author") == "user" else []
+
+
+def _thread_header(thread: dict, matching: set, mark: str, pr_mode: bool = False) -> str:
     root = thread["root"]
-    parts = [
-        "[id: %s] %s" % (root["id"], clean(root["author"], True)),
+    parts = ["[id: %s] %s" % (root["id"], clean(root["author"], True))] + _intent(root, pr_mode) + [
         _anchor_text(root) + _head_arrow(root),
         _round_tag(root),
         "resolved" if root.get("resolved") else "unresolved",
@@ -382,9 +405,10 @@ def _snippet_block(root: dict, source: _SnippetSource, context: int) -> list:
 
 # --------------------------------------------------------------------------- documents
 
-def _thread_lines(thread: dict, source: _SnippetSource, matching: set, mark: str, context: int, snippets: bool) -> list:
+def _thread_lines(thread: dict, source: _SnippetSource, matching: set, mark: str, context: int, snippets: bool,
+                  pr_mode: bool = False) -> list:
     root = thread["root"]
-    lines = [_thread_header(thread, matching, mark)]
+    lines = [_thread_header(thread, matching, mark, pr_mode)]
     if snippets:
         lines += _snippet_block(root, source, context)
     lines += _body_lines(root.get("body"))
@@ -410,7 +434,7 @@ def _threads_lines(threads: list, review: dict, source: _SnippetSource, matching
             lines += ["", sub]
             current_sub = sub
         lines.append("")
-        lines += _thread_lines(thread, source, matching, mark, context, snippets)
+        lines += _thread_lines(thread, source, matching, mark, context, snippets, bool(review.get("pr")))
     return lines
 
 
@@ -449,9 +473,14 @@ def _header_line(review: dict, threads: list) -> str:
     unresolved = sum(1 for t in threads if not t["root"].get("resolved"))
     unanswered = sum(1 for t in threads
                      if not t["root"].get("resolved") and not t["root"].get("outdated") and t["last_author"] == "user")
-    return "# Review comments — %s (%s) — %s (%d pending, %d unresolved, %d unanswered)" % (
+    return "# Review comments — %s (%s)%s — %s (%d pending, %d unresolved, %d unanswered)" % (
         clean((review.get("repo") or {}).get("name"), True), _short_spec((review.get("range") or {}).get("spec")),
-        _plural(len(threads), "thread"), pending, unresolved, unanswered)
+        _pr_suffix(review), _plural(len(threads), "thread"), pending, unresolved, unanswered)
+
+
+def _pr_suffix(review: dict) -> str:
+    """`` — PR owner/repo#N`` for the document titles of a review in PR mode, else nothing."""
+    return " — PR %s" % _pr_label(review["pr"]) if review.get("pr") else ""
 
 
 def render_comments(review: dict, comments: list, fetch_file_diff=None, threads=None, matching=None,
@@ -482,9 +511,9 @@ def render_export(review: dict, comments: list, fetch_file_diff=None, exported_a
     """The ``ccr export --md`` document (section 6.2): every thread, outdated ones included."""
     rng = review.get("range") or {}
     exported_at = exported_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    title = "# Review — %s (%s, base %s → head %s) — exported %s" % (
+    title = "# Review — %s (%s, base %s → head %s)%s — exported %s" % (
         clean((review.get("repo") or {}).get("name"), True), _short_spec(rng.get("spec")),
-        _short(rng.get("base")) or "root", _short(rng.get("head")), clean(exported_at, True))
+        _short(rng.get("base")) or "root", _short(rng.get("head")), _pr_suffix(review), clean(exported_at, True))
     threads = sort_threads(build_threads(comments), review)
     source = _SnippetSource(fetch_file_diff)
     lines = [title, ""]
