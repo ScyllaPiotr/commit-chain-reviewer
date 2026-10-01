@@ -621,6 +621,10 @@ def test_pr_mode_questions_and_github_comments(cli, fixture_repo, tmp_path, ccr_
 
     after = cli.run("comments", check=0).stdout
     assert "[id: %s] user · GitHub comment (posted: %s) · new:5" % (remark, url) in after
+    assert after.startswith("# Review comments — repo (main..feature) — PR o/r#7 — 2 threads (0 pending, 2 unresolved, "
+                            "1 unanswered)"), "a posted GitHub comment waits for no answer"
+    waiting = cli.run("comments", "--unanswered", check=0).stdout
+    assert "[id: %s]" % question in waiting and "[id: %s]" % remark not in waiting
     frozen = cli.run("edit", remark, "Reworded")
     assert frozen.returncode == 1 and "change it there" in frozen.stderr
 

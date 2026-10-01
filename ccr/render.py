@@ -141,8 +141,9 @@ def build_threads(comments: list) -> list:
     for root in roots:
         replies = sorted(by_root.get(root["id"], []), key=lambda c: c.get("created_at") or "")
         last = replies[-1] if replies else root
+        # a GitHub comment or reply posted from ccr waits for nobody in ccr
         threads.append({"root": root, "replies": replies, "last_author": last.get("author"),
-                        "answered": last.get("author") != "user"})
+                        "answered": last.get("author") != "user" or (last.get("github") or {}).get("status") == "posted"})
     return threads
 
 
@@ -222,7 +223,7 @@ def select_threads(threads: list, state=None, round=None, author=None, commit=No
             continue
         if unresolved and root.get("resolved"):
             continue
-        if unanswered and (root.get("resolved") or is_outdated or thread["last_author"] != "user"):
+        if unanswered and (root.get("resolved") or is_outdated or thread["answered"]):
             continue
         hits = [c["id"] for c in [root] + thread["replies"] if matches(c)] if per_comment else []
         if per_comment and not hits:
@@ -517,7 +518,7 @@ def _header_line(review: dict, threads: list) -> str:
     pending = sum(1 for t in threads if any(c.get("state") == "pending" for c in [t["root"]] + t["replies"]))
     unresolved = sum(1 for t in threads if not t["root"].get("resolved"))
     unanswered = sum(1 for t in threads
-                     if not t["root"].get("resolved") and not t["root"].get("outdated") and t["last_author"] == "user")
+                     if not t["root"].get("resolved") and not t["root"].get("outdated") and not t["answered"])
     return "# Review comments — %s (%s)%s — %s (%d pending, %d unresolved, %d unanswered)" % (
         clean((review.get("repo") or {}).get("name"), True), _short_spec((review.get("range") or {}).get("spec")),
         _pr_suffix(review), _plural(len(threads), "thread"), pending, unresolved, unanswered)

@@ -190,7 +190,8 @@ def build_parser() -> Parser:
     which.add_argument("--round", type=int, metavar="N")
     which.add_argument("--all", action="store_true", help="every thread (default)")
     comments.add_argument("--unresolved", action="store_true")
-    comments.add_argument("--unanswered", action="store_true", help="unresolved threads whose last comment is by user")
+    comments.add_argument("--unanswered", action="store_true",
+                          help="unresolved threads whose last comment is by user (and not posted to GitHub)")
     comments.add_argument("--author", choices=COMMENT_AUTHORS)
     comments.add_argument("--commit", metavar="SHA")
     comments.add_argument("--path", metavar="P")

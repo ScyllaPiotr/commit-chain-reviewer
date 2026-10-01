@@ -117,7 +117,7 @@ merge-base <sha>`. Empty ranges without `--worktree` and ranges above 2000 commi
 | `ccr open` | Open the session URL in the default browser. |
 | `ccr cover (TEXT \| --file F \| -)` | Set or replace the cover letter of the running review; open pages update live. |
 | `ccr reload [--range SPEC \| -n N] [--worktree \| --no-worktree] [--first-parent \| --no-first-parent]` | Re-extract the chain; omitted options keep their values, no options re-resolves the pinned spec so new commits appear. Prints `ccr: N commits (was M), +a −r, K comments remapped, J now outdated`, a warning when reviewed commits left the range, and one line per thread that is now outdated. |
-| `ccr comments [--pending \| --submitted \| --round N \| --all] [--unresolved] [--unanswered] [--author user\|claude] [--commit SHA] [--path P] [--outdated \| --no-outdated] [--context N] [--no-snippets] [--json]` | Print threads as Markdown (format below). Filters select whole threads — a thread matches when its root or any reply does; matching comments are marked `★`. `--unanswered` = unresolved, non-outdated threads whose last comment is by the user. Defaults: `--all --context 3`. No match → `ccr: no comments match` (exit 0). |
+| `ccr comments [--pending \| --submitted \| --round N \| --all] [--unresolved] [--unanswered] [--author user\|claude] [--commit SHA] [--path P] [--outdated \| --no-outdated] [--context N] [--no-snippets] [--json]` | Print threads as Markdown (format below). Filters select whole threads — a thread matches when its root or any reply does; matching comments are marked `★`. `--unanswered` = unresolved, non-outdated threads whose last comment is by the user and not posted to GitHub. Defaults: `--all --context 3`. No match → `ccr: no comments match` (exit 0). |
 | `ccr wait [--since-round N] [--since-version V] [--timeout S] [--any] [--json]` | Block until a round numbered > `N` exists (default `N` = the round count at call time), then print `ccr: round n — verdict — k new comments in j threads` followed by the threads touched in that round (earlier comments as context, new ones marked `★ new in round n`). Default timeout 590 s (0 = forever); on timeout stderr gets `ccr: no new round after S s (rounds: R, pending unsubmitted: P, version: V)` and the exit code is 2. `--any` returns on any change (`version > V`, default `V` = version at call time) and prints `ccr: version V→W · pending P · unresolved U · rounds R` plus the threads touched since the call. Exit 3 when the server is gone. After 30 s with no browser seen it prints `ccr: UI not opened yet` once. |
 | `ccr reply ID (BODY \| --file F \| -) [--resolve] [--as claude\|user] [--force]` | Reply to a thread; `--resolve` resolves it after a successful reply. An identical reply by the same author is refused unless `--force`. |
 | `ccr reply --batch (FILE \| -) [--json]` | Post many replies at once, from JSON (`[{"id","body","resolve"?}, …]`) or Markdown (`## <id> [resolve]` headings, each followed by its body). Prints `<id>: replied[, resolved]` or `<id>: ERROR …` per item, continues on error, exit 1 if any failed. |
@@ -325,24 +325,24 @@ into a worktree of its own, uses the pull request body as the cover letter and r
 `ccr start --range <merge base>..HEAD --pr <url>`, so **All changes** is exactly the diff GitHub shows. The agent
 changes no code; each comment you leave is one of two kinds:
 
-* **Question** — the `?` gutter button (and every comment on a commit or on the whole pull request, and every
-  reply). The agent answers it in the thread; nothing goes to GitHub.
-* **GitHub comment** — the `GH` gutter button, on a line, a range or a file (the file header has `?` and `GH`
-  too). After you click **Submit**, the agent checks it — its claims against the code, whether it fits its line —
-  and if it holds, `ccr gh-post` puts it **verbatim** into your **pending** review on the pull request, starting
-  the review when you have none. If the check finds a problem nothing is posted: the agent replies with the problem
-  and a corrected wording, and you edit the comment (which makes it pending again) or tell it to post as it is, and
-  submit again.
+* **Question** — the **Ask AI** gutter button (and every comment on a commit or on the whole pull request, and
+  every reply outside a GitHub thread). The agent answers it in the thread; nothing goes to GitHub.
+* **GitHub comment** — the **GH comment** gutter button, on a line, a range or a file (the file header has **Ask
+  AI** and **GH comment** too). After you click **Submit**, the agent checks it — its claims against the code,
+  whether it fits its line — and if it holds, `ccr gh-post` puts it **verbatim** into your **pending** review on
+  the pull request, starting the review when you have none; that is the agent's last step with it. If the check
+  finds a problem nothing is posted: the agent replies with the problem and a corrected wording, and you edit the
+  comment (which makes it pending again) or tell it to post as it is, and submit again.
 
 **What others said** comes in too: `ccr gh-sync` (the agent runs it when it starts the review and before every
 round) mirrors the pull request's review threads and review bodies into ccr, read-only. A thread shows on its
 line in **All changes** while GitHub still has one there; an outdated one sits collapsed on its file, as on GitHub.
-Ask the agent about any of them, or reply on GitHub right from ccr: the reply editor of a review thread has a
-*Question | GitHub reply* switch, and a GitHub reply is checked and posted into your pending review like a GitHub
-comment. Within a thread the two conversations read apart: what is or goes on GitHub sits on grey, your questions
+Ask the agent about any of them, or reply on GitHub right from ccr: the reply editor of a review thread has an
+*Ask AI | GH reply* switch, and a GitHub reply is checked and posted into your pending review like a GitHub
+comment. Comments from GitHub cannot be edited or deleted in ccr, nor can a thread that holds one. Within a thread the two conversations read apart: what is or goes on GitHub sits on grey, your questions
 and the agent's answers on blue, and the editor takes the colour of what you are writing.
 
-The editor has a *Question | GitHub comment* switch that keeps what you typed. GitHub only takes comments on the
+The editor has an *Ask AI | GH comment* switch that keeps what you typed. GitHub only takes comments on the
 lines its pull request diff shows, so a GitHub comment on any other line is refused right away (keep it as a
 question, or write it in **All changes**). Threads show *Question*, *GitHub · not posted* or, once posted, a
 *GitHub ↗* link to the comment; a posted comment can no longer be edited in ccr, only on GitHub. **Submitting the

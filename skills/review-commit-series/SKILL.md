@@ -134,7 +134,7 @@ react live.
 1. Read everything first:
 
    ```sh
-   ccr comments --repo "$REPO" --unanswered      # unresolved, non-outdated threads whose last comment is the user's
+   ccr comments --repo "$REPO" --unanswered      # unresolved, non-outdated threads waiting for my answer
    ```
 
    Use the round output from `ccr wait` as well; `--json` when you handle ids programmatically.
@@ -223,8 +223,8 @@ comment** you check and, when it holds, post verbatim into the user's pending Gi
 3. `ccr start --repo "$REPO" --range "$BASE..HEAD" --pr <url> --cover "$SCRATCH/ccr-cover.md"` prints
    `ccr: pr <url> (<owner/repo#N>): questions for Claude, GitHub comments for your pending review` before the URL.
    Then `ccr gh-sync --repo "$REPO"` mirrors the pull request's review threads and review bodies into ccr (read
-   only). Hand over the URL as in step 1.4 and add: "`?` asks me, `GH` drafts a comment for your pending GitHub
-   review, and in a GitHub thread you can reply on GitHub; you submit that review on GitHub."
+   only). Hand over the URL as in step 1.4 and add: "**Ask AI** asks me, **GH comment** drafts a comment for your
+   pending GitHub review, and in a GitHub thread Reply offers **GH reply**; you submit that review on GitHub."
 
 ### Every round
 
@@ -242,9 +242,9 @@ a question unless it reads `GitHub reply (not posted)`.
   `ccr gh-post --repo "$REPO" --dry-run <id>` shows where GitHub will anchor it (the pull request diff's
   `path:line`, side, the lines there) and its verbatim body, and asks GitHub nothing.
   - Sound → `ccr gh-post --repo "$REPO" <id>`: it posts the body verbatim into the user's pending review (starting
-    one when there is none), one comment at a time, re-reads the review after each and records the post. Reply in
-    the thread with the link it printed: `[resolve]` for a GitHub comment, not for a GitHub reply (that thread is
-    the GitHub discussion, the user's to resolve).
+    one when there is none), one comment at a time, re-reads the review after each and records the post. That
+    ends your part: no reply and no resolve in ccr (the comment shows as posted, linked to GitHub, and the user is
+    told to submit the review there); a posted comment drops out of `--unanswered`.
   - Not sound → do not post, and never post a reworded version. Reply with what is wrong and one corrected wording,
     without `[resolve]`. The user edits the comment (an edit makes it pending again) or answers "post it as it is",
     and submits again; then check the text as it is now, and post.
@@ -279,7 +279,8 @@ When the user is done, ask whether to stop the server (step 6) and offer to remo
 - Do not paste the token/URL into commit messages, issues or files.
 - PR mode: no code changes; post only with `ccr gh-post`, only the user's submitted GitHub comments that passed your
   check, and verbatim; never write GitHub comments yourself (`ccr comment --github` is not for you) and never submit
-  the GitHub review.
+  the GitHub review. The one-pass reply covers the questions and the GitHub comments you did not post; a posted one
+  gets no reply.
 
 ## What you will read
 
@@ -360,8 +361,8 @@ How to read it:
 }
 ```
 
-`threads[].answered` is false when the last comment is the user's; together with an unresolved,
-non-outdated root that is exactly what `--unanswered` selects.
+`threads[].answered` is false when the last comment is the user's and not a GitHub comment already posted; together
+with an unresolved, non-outdated root that is exactly what `--unanswered` selects.
 
 ## Commands cheat sheet
 

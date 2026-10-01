@@ -412,10 +412,10 @@ table.diff tr.threads .thread + .thread, table.diff tr.threads .thread + .editor
 .btn-add-comment.is-visible, tr.line:hover .btn-add-comment, tr.line:focus-within .btn-add-comment, tr.line.is-selected .btn-add-comment { display: inline-flex; }
 .btn-add-comment:hover { transform: scale(1.1); }
 .btn-add-comment.is-parked { display: none !important; }
-/* PR mode forks [+] into a question [?] at the code edge and a GitHub comment [GH] right of it */
-.btn-add-comment[data-intent="github"] { right: -35px; background: var(--github); color: var(--github-fg); font-size: 10px; }
-.file-header .btn-comment-file[data-intent] { font-weight: 700; font-size: 12px; }
-.file-header .btn-comment-file[data-intent="github"] { font-size: 10px; }
+/* PR mode forks [+] into a question [Ask AI] at the code edge and a GitHub comment [GH comment] right of it */
+.btn-add-comment[data-intent] { right: auto; left: calc(100% - 11px); width: 54px; font-size: 11px; white-space: nowrap; overflow: hidden; }
+.btn-add-comment[data-intent="github"] { left: calc(100% + 45px); width: 84px; background: var(--github); color: var(--github-fg); }
+.file-header .hdr-btn.btn-comment-file[data-intent] { width: auto; padding: 0 6px; font-weight: 600; font-size: 11px; white-space: nowrap; }
 
 /* ------------------------------------------------------------------ editor */
 .comment-editor { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; display: flex; flex-direction: column; gap: 6px; }

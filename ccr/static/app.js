@@ -623,11 +623,11 @@
       // "All changes" gets only the whole-series button: a commit-level comment on the combined view would just
       // duplicate a review-level one.
       if (diff.kind !== 'combined') {
-        const label = diff.kind === 'worktree' ? 'Comment on the uncommitted changes' : prMode() ? 'Ask about this commit' : 'Comment on this commit';
+        const label = diff.kind === 'worktree' ? 'Comment on the uncommitted changes' : prMode() ? 'Ask AI about this commit' : 'Comment on this commit';
         meta += `<button type="button" id="btn-comment-commit" class="sm-btn" aria-label="${label}">💬 ${label}</button>`;
       }
       if (diff.kind === 'combined') {
-        const [label, title] = prMode() ? ['Ask about the whole pull request', 'A question for Claude about the whole pull request, not tied to any commit']
+        const [label, title] = prMode() ? ['Ask AI about the whole pull request', 'A question for Claude about the whole pull request, not tied to any commit']
           : ['Comment on the whole series', 'A review-level comment about the whole series, not tied to any commit'];
         meta += `<button type="button" id="btn-comment-review" class="sm-btn" aria-label="${label}" title="${title}">💬 ${label}</button>`;
       }
@@ -726,8 +726,8 @@
     const key = `file:${state.viewSha}|${f.path}`;
     const dot = (intent) => (hasDraftFor(key, intent) ? ' has-draft' : '');
     if (!prMode()) return `<button type="button" class="hdr-btn btn-comment-file${dot(null)}" aria-label="Comment on this file" title="Comment on this file">💬</button>`;
-    return `<button type="button" class="hdr-btn btn-comment-file${dot('question')}" data-intent="question" aria-label="Ask Claude about this file" title="Ask Claude about this file">?</button>`
-      + `<button type="button" class="hdr-btn btn-comment-file${dot('github')}" data-intent="github" aria-label="GitHub comment on this file" title="GitHub comment on this file, for your pending review">GH</button>`;
+    return `<button type="button" class="hdr-btn btn-comment-file${dot('question')}" data-intent="question" aria-label="Ask AI about this file" title="Ask AI about this file">Ask AI</button>`
+      + `<button type="button" class="hdr-btn btn-comment-file${dot('github')}" data-intent="github" aria-label="GH comment on this file" title="GH comment on this file, for your pending review">GH comment</button>`;
   }
 
   function fileNoteHtml(f) {
@@ -1236,11 +1236,11 @@
 
   /* ==================================================================== 4. gutter [+] and selection */
 
-  /** The gutter button(s): one [+], or in PR mode a question for Claude [?] and a GitHub comment [GH]. */
+  /** The gutter button(s): one [+], or in PR mode a question for Claude [Ask AI] and a GitHub comment [GH comment]. */
   const GUTTER_BUTTONS = {
     plain: { intent: null, text: '+', label: 'Add comment' },
-    question: { intent: 'question', text: '?', label: 'Ask Claude about this line' },
-    github: { intent: 'github', text: 'GH', label: 'GitHub comment on this line, for your pending review' },
+    question: { intent: 'question', text: 'Ask AI', label: 'Ask AI about this line' },
+    github: { intent: 'github', text: 'GH comment', label: 'GH comment on this line, for your pending review' },
   };
 
   function attachGutterButton(card) {
@@ -1798,11 +1798,13 @@
     const editKey = `edit:${c.id}`;
     const editing = state.openEditors.has(editKey);
     const name = c.author === 'claude' ? 'Claude' : isMirrored(c) ? `@${c.github.login}${c.github.own ? ' (you)' : ''}` : 'user';
+    // what came from GitHub stays: a mirrored comment, and a root whose thread holds one (a delete takes the replies)
+    const fromGitHub = isMirrored(c) || (root && threadMembers(c.id).some(isMirrored));
     return `<div class="comment" data-id="${esc(c.id)}" data-author="${esc(c.author)}"${channelAttr(c.github)}>
       <div class="comment-meta">${avatarHtml(c.author, isMirrored(c) ? c.github.login : name)}<span class="author">${esc(name)}</span>${timeHtml(c.created_at)}${commentTags(c, root)}
         <div class="comment-actions" role="group" aria-label="Comment actions">
           ${isPosted(c) || isMirrored(c) ? '' : '<button type="button" class="act-edit" aria-label="Edit comment">Edit</button>'}
-          ${isMirrored(c) ? '' : '<button type="button" class="act-delete" aria-label="Delete comment">Delete</button>'}
+          ${fromGitHub ? '' : '<button type="button" class="act-delete" aria-label="Delete comment">Delete</button>'}
           <button type="button" class="act-reply" aria-label="Reply to thread">Reply</button>
           ${root ? `<button type="button" class="act-resolve" aria-label="${c.resolved ? 'Unresolve' : 'Resolve'} thread">${c.resolved ? 'Unresolve' : 'Resolve'}</button>` : ''}
         </div>
@@ -1861,15 +1863,15 @@
     const intent = editorIntent(entry);
     const github = intent === 'github' || Boolean(editing && editing.github);
     const reply = entry.mode === 'reply';
-    const what = reply ? 'GitHub reply' : 'GitHub comment';
-    const label = entry.mode === 'edit' ? 'Save' : intent === 'github' ? `Add ${what}` : intent === 'question' ? 'Ask'
+    const what = reply ? 'GH reply' : 'GH comment';
+    const label = entry.mode === 'edit' ? 'Save' : intent === 'github' ? `Add ${what}` : intent === 'question' ? 'Ask AI'
       : reply ? 'Reply' : 'Add comment';
     const placeholder = github ? `${what}, posted verbatim to your pending review once Claude has checked it (Markdown)…`
       : intent === 'question' ? 'Ask Claude (Markdown)…' : reply ? 'Reply (Markdown)…' : 'Leave a comment (Markdown)…';
     const kind = entry.anchor && entry.anchor.kind;
     const intentButton = (name, text) => `<button type="button" class="intent-btn${intent === name ? ' is-active' : ''}" data-intent="${name}" aria-pressed="${intent === name}">${text}</button>`;
     const intentSwitch = intent && (reply || kind === 'line' || kind === 'file')
-      ? `<div class="editor-intent" role="group" aria-label="What this comment is">${intentButton('question', 'Question')}${intentButton('github', what)}</div>` : '';
+      ? `<div class="editor-intent" role="group" aria-label="What this comment is">${intentButton('question', 'Ask AI')}${intentButton('github', what)}</div>` : '';
     let info = '';
     if (entry.anchor && entry.anchor.kind === 'line') {
       const a = entry.anchor;

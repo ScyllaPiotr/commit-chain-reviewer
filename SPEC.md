@@ -983,7 +983,7 @@ resembles GitHub dark-dimmed. `prefers-reduced-motion` disables animations. Focu
 | Header | `#commit-header .subject`, `.sha-copy`, `#btn-comment-commit`, `#commit-header .thread-block[data-key-host="commit"]`; combined view only: `#outdated-note` (hidden at 0), `#cover-letter` (`.cover-body` rendered Markdown, or `.is-empty` with the *"No cover letter"* hint), `#btn-comment-review`, `#commit-header .thread-block[data-key-host="review"]` |
 | File card | `.file-card[data-path][data-rendered="0|1"]` → `.file-header` (`.file-path`, `.status-badge`, `.btn-comment-file` — in PR mode two, `[data-intent="question"]` and `[data-intent="github"]` —, `.btn-collapse`), `.diff-body`, `.file-card.is-collapsed` |
 | Diff table | `table.diff[data-view]`; `tr.hunk` (`.btn-expand-up`, `.btn-expand-down`, `.btn-expand-all`); `tr.line.add|del|ctx[data-o][data-n][data-x]` (`.is-selected`, `.in-range`); `td.num.old|new[data-side][data-line]`, `td.num.empty`, `td.marker`, `td.code.old|new`, `td.code.empty`, `span.wd`, `span.cr` |
-| Gutter | `button.btn-add-comment[data-side][data-line]` (shared, moved into the hovered `td.num`); in PR mode two of them, `[data-intent="question"]` (`?`) and `[data-intent="github"]` (`GH`), moved together |
+| Gutter | `button.btn-add-comment[data-side][data-line]` (shared, moved into the hovered `td.num`); in PR mode two of them, `[data-intent="question"]` (*Ask AI*) and `[data-intent="github"]` (*GH comment*), moved together |
 | Editor | `tr.editor` / `div.editor-block` → `form.comment-editor[data-key][data-tab]` (`[data-intent="github"]` while it writes a GitHub comment; `.editor-head > .editor-tabs > .editor-tab[data-tab]`, in PR mode on a line or file `.editor-head > .editor-intent > .intent-btn[data-intent]`, `textarea`, `.md-preview`, `.btn-submit-comment`, `.btn-cancel-comment`) |
 | Thread | `tr.threads[data-key]` / `div.thread-block` → `.thread[data-thread-id]` (`.is-resolved`, `.has-new`) → `.comment[data-id][data-author]` (`.comment-meta` `.author .time .tag-pending .tag-round .tag-edited .tag-new .tag-moved`, `a.tag-from[data-sha]` on a projected root, PR mode: `.tag-question`, `.tag-github` / `a.tag-github.is-posted`, `.comment-body`, `.comment-actions` `.act-edit .act-delete .act-reply .act-resolve`), `button.btn-reply`, `button.btn-show-resolved` |
 | Banners/toasts | `#banner-disconnected`, `#banner-compare`, `#banner-reloaded`, `#toasts .toast.info|error|success`, `#notice-token` |
@@ -1111,8 +1111,8 @@ worktree of its own, `--range <merge base>..HEAD`, so "All changes" is the diff 
 A user's comment is then one of two things:
 
 * a **question** for Claude: every comment by default, and the only kind on a commit, on the whole pull request
-  and in a reply. The agent answers it in the thread; nothing reaches GitHub.
-* a **GitHub comment**: a root on a line, a range or a file, written with a `GH` button (10.4). Once it is
+  and in a reply outside a review thread (10.5). The agent answers it in the thread; nothing reaches GitHub.
+* a **GitHub comment**: a root on a line, a range or a file, written with a *GH comment* button (10.4). Once it is
   submitted in a round, the agent checks it — its claims against the code, whether it fits its line and asks
   something of this pull request — and, when it holds, posts it **verbatim** with `ccr gh-post` (10.3) into the
   user's **pending** review, starting that review when there is none. When the check finds a problem nothing is
@@ -1198,16 +1198,17 @@ Nothing else on GitHub is submitted, edited or deleted.
 
 ### 10.4 UI
 
-With `review.pr` set the top bar shows `#pr-link`; the gutter `[+]` forks into `?` (a question, where `[+]` was)
-and `GH` (a GitHub comment, right of it), moved together; the file header's 💬 forks into `?` and `GH`; the commit
-and whole-review buttons read *Ask about this commit* and *Ask about the whole pull request*. A new-comment editor on
-a line or a file has a *Question | GitHub comment* switch (`.editor-intent`) beside its tabs, which keeps the text;
-writing a GitHub comment it carries `data-intent="github"`, the label **Add GitHub comment** and the hint *posted
-verbatim to your pending GitHub review once Claude has checked it*, and a question editor is labelled **Ask**. A
+With `review.pr` set the top bar shows `#pr-link`; the gutter `[+]` forks into *Ask AI* (a question, starting
+where `[+]` was) and *GH comment* (a GitHub comment, right of it), moved together; the file header's 💬 forks into
+*Ask AI* and *GH comment*; the commit and whole-review buttons read *Ask AI about this commit* and *Ask AI about the
+whole pull request*. A new-comment editor on a line or a file has an *Ask AI | GH comment* switch (`.editor-intent`)
+beside its tabs, which keeps the text; writing a GitHub comment it carries `data-intent="github"`, the label **Add
+GH comment** and the hint *posted verbatim to your pending review once Claude has checked it*, and a question
+editor is labelled **Ask AI**. A
 draft remembers which of the two it was written as (`ccr:draft-intent:<key>`), so its dot shows on the matching
 button. Roots are tagged *Question* or *GitHub · not posted*; a posted one carries `a.tag-github.is-posted`
 (*GitHub ↗*, also on its collapsed resolved line) linking to the comment, and has no Edit action (Delete says it
-removes the comment from ccr only). Every comment carries `data-channel`: `github` for what is or goes on GitHub (a
+removes the comment from ccr only, and is gone once its thread holds a mirrored reply, 10.5). Every comment carries `data-channel`: `github` for what is or goes on GitHub (a
 GitHub comment or reply, posted or not, and every mirrored comment, 10.5) and `claude` for the exchange with Claude
 (questions and Claude's comments), on a grey and a blue background with a GitHub-dark and a blue left stripe; an
 editor takes the colour of what it writes, so the two read apart even inside one review thread. When comments
@@ -1249,9 +1250,11 @@ as `updated_at`) and author, and carries `github` = `{"status": "remote", "node_
   thread is not a review thread on GitHub, so a reply to it stays in ccr"*).
 * **UI.** A mirrored comment shows `@login` (*(you)* for the viewer's), a *GitHub ↗* link and the tags *outdated*,
   *resolved there*, *pending there* or *deleted there* (a review body: *review · changes requested* and the like),
-  and has no Edit or Delete. Outdated threads, review bodies and deleted threads start collapsed (*GitHub thread by
-  @nyh · outdated · N comments — Show*). The reply editor of a review thread has a *Question | GitHub reply*
-  switch, and the user's replies there are tagged *Question* or *GitHub · not posted* / *GitHub ↗*. Comments a
+  and has no Edit or Delete; nor has a root whose thread holds a mirrored reply, since deleting it would take the
+  replies along (the store refuses either with 409). Outdated threads, review bodies and deleted threads start
+  collapsed (*GitHub thread by @nyh · outdated · N comments — Show*). The reply editor of a review thread has an
+  *Ask AI | GH reply* switch, and the user's replies there are tagged *Question* or *GitHub · not posted* /
+  *GitHub ↗*. Comments a
   later sync brings get *New* and a toast *"N new comments from GitHub"*; comments older than the first sync
   (`pr.first_synced_at`) do not.
 * **For the agent** (6.3): a mirrored author is `@login (GitHub[, you])`, a mirrored root reads `GitHub thread

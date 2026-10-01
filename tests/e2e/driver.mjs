@@ -538,6 +538,8 @@ export async function runPrScenario(page, url) {
   const editorLabel = `document.querySelector('tr.editor .btn-submit-comment').textContent`;
   const threadOf = (text) => `[...document.querySelectorAll('#main .thread')].find((t) => t.textContent.includes(${JSON.stringify(text)}))`;
   let githubId = null;
+  // the smallest screen PR mode is meant for
+  await page.cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
 
   await runner.step('load page in PR mode', async () => {
     await page.navigate(url);
@@ -549,11 +551,11 @@ export async function runPrScenario(page, url) {
 
   await runner.step('question about the whole pull request', async () => {
     const label = await page.evaluate(`document.querySelector('#btn-comment-review').textContent.trim()`);
-    if (!label.endsWith('Ask about the whole pull request')) throw new Error('review button label: ' + label);
+    if (!label.endsWith('Ask AI about the whole pull request')) throw new Error('review button label: ' + label);
     await page.click('#btn-comment-review');
     await page.waitFor(`document.querySelector('#commit-header form.comment-editor[data-key="review:"] textarea')`, { label: 'review editor' });
     const editor = await page.evaluate(`(() => { const f = document.querySelector('#commit-header form.comment-editor'); return { label: f.querySelector('.btn-submit-comment').textContent, intent: Boolean(f.querySelector('.editor-intent')), info: f.querySelector('.anchor-info').textContent }; })()`);
-    if (editor.label !== 'Ask' || editor.intent || editor.info !== 'whole pull request') throw new Error('review editor: ' + JSON.stringify(editor));
+    if (editor.label !== 'Ask AI' || editor.intent || editor.info !== 'whole pull request') throw new Error('review editor: ' + JSON.stringify(editor));
     await page.type('Why does the series need two commits?');
     await page.click('#commit-header form.comment-editor .btn-submit-comment');
     await page.waitFor(`document.querySelector('#commit-header .thread-block[data-key-host="review"] .thread .tag-question')`, { label: 'review question tagged' });
@@ -566,13 +568,13 @@ export async function runPrScenario(page, url) {
     return await page.evaluate(`document.querySelector('#commit-header .subject').textContent.trim()`);
   });
 
-  await runner.step('gutter forks into ? and GH', async () => {
+  await runner.step('gutter forks into Ask AI and GH comment', async () => {
     await page.hover(row(5) + ' td.code');
     const q = row(5) + ' td.num.new .btn-add-comment[data-intent="question"]';
     const g = row(5) + ' td.num.new .btn-add-comment[data-intent="github"]';
     await page.waitFor(`${isShown(q)} && ${isShown(g)}`, { label: 'both gutter buttons in the hovered row' });
-    const boxes = await page.evaluate(`[${JSON.stringify(q)}, ${JSON.stringify(g)}].map((s) => { const el = document.querySelector(s); const r = el.getBoundingClientRect(); return { text: el.textContent, left: r.left, right: r.right, label: el.getAttribute('aria-label') }; })`);
-    if (boxes[0].text !== '?' || boxes[1].text !== 'GH' || boxes[0].right > boxes[1].left) throw new Error('gutter buttons: ' + JSON.stringify(boxes));
+    const boxes = await page.evaluate(`[${JSON.stringify(q)}, ${JSON.stringify(g)}].map((s) => { const el = document.querySelector(s); const r = el.getBoundingClientRect(); return { text: el.textContent, left: r.left, right: r.right, label: el.getAttribute('aria-label'), clipped: el.scrollWidth > el.clientWidth }; })`);
+    if (boxes[0].text !== 'Ask AI' || boxes[1].text !== 'GH comment' || boxes[0].right > boxes[1].left || boxes.some((b) => b.clipped)) throw new Error('gutter buttons: ' + JSON.stringify(boxes));
     if (await page.evaluate(`Boolean(document.querySelector('#main .btn-add-comment:not([data-intent])'))`)) throw new Error('a plain [+] is left in PR mode');
     await page.shot('pr-01-gutter');
     return boxes.map((b) => b.label).join(' | ');
@@ -582,7 +584,7 @@ export async function runPrScenario(page, url) {
     await page.click(row(5) + ' .btn-add-comment[data-intent="github"]');
     await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-intent="github"] textarea')`, { label: 'GitHub editor' });
     const label = await page.evaluate(editorLabel);
-    if (label !== 'Add GitHub comment') throw new Error('submit label ' + label);
+    if (label !== 'Add GH comment') throw new Error('submit label ' + label);
     if (!(await page.evaluate(`Boolean(document.querySelector('tr.editor .intent-btn.is-active[data-intent="github"]'))`))) throw new Error('GitHub not selected in the switch');
     await page.type('Why 500?');
     await page.click('tr.editor .btn-submit-comment');
@@ -598,13 +600,13 @@ export async function runPrScenario(page, url) {
     await page.hover(row(6) + ' td.code');
     await page.click(row(6) + ' .btn-add-comment[data-intent="question"]');
     await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-channel="claude"]:not([data-intent]) textarea')`, { label: 'question editor' });
-    if ((await page.evaluate(editorLabel)) !== 'Ask') throw new Error('question label ' + (await page.evaluate(editorLabel)));
+    if ((await page.evaluate(editorLabel)) !== 'Ask AI') throw new Error('question label ' + (await page.evaluate(editorLabel)));
     await page.type('What is value 6 for?');
     await page.click('tr.editor .intent-btn[data-intent="github"]');
     await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-intent="github"][data-channel="github"]') && document.querySelector('tr.editor textarea').value === 'What is value 6 for?'`, { label: 'switched to GitHub, text kept' });
-    if ((await page.evaluate(editorLabel)) !== 'Add GitHub comment') throw new Error('label after switching');
+    if ((await page.evaluate(editorLabel)) !== 'Add GH comment') throw new Error('label after switching');
     await page.click('tr.editor .intent-btn[data-intent="question"]');
-    await page.waitFor(`document.querySelector('tr.editor form.comment-editor:not([data-intent])') && ${editorLabel} === 'Ask'`, { label: 'switched back' });
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor:not([data-intent])') && ${editorLabel} === 'Ask AI'`, { label: 'switched back' });
     await page.click('tr.editor .btn-submit-comment');
     await page.waitFor(`!document.querySelector('tr.editor') && ${threadOf('What is value 6 for?')} && ${threadOf('What is value 6 for?')}.querySelector('.comment[data-channel="claude"] .tag-question')`, { label: 'question thread' });
     return 'switch kept the text';
@@ -651,7 +653,7 @@ export async function runPrScenario(page, url) {
 
   await runner.step('file header forks too', async () => {
     const buttons = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(card + ' .file-header .btn-comment-file')})].map((b) => b.dataset.intent + ':' + b.textContent)`);
-    if (buttons.join(',') !== 'question:?,github:GH') throw new Error('file buttons ' + buttons);
+    if (buttons.join(',') !== 'question:Ask AI,github:GH comment') throw new Error('file buttons ' + buttons);
     await page.click(card + ' .file-header .btn-comment-file[data-intent="github"]');
     await page.waitFor(`document.querySelector(${JSON.stringify(card + ' .thread-block[data-key-host="file"] form.comment-editor[data-intent="github"] textarea')})`, { label: 'file GitHub editor' });
     await page.type('Please split this file.');
@@ -683,10 +685,12 @@ export async function runPrScenario(page, url) {
       original_start_line: null, side: 'RIGHT', subject_type: 'LINE', outdated: false, resolved: false, comments }, extra);
     const synced = await page.api('/api/github/sync', { method: 'POST', body: JSON.stringify({ viewer: 'reviewer', head,
       threads: [thread('T1', [at('C1', 'nyh', 'Why does value 5 change?'), at('C2', 'radek', 'Because the spec says so.', 'C1')]),
-        thread('T2', [at('C3', 'nyh', 'An old remark')], { outdated: true, line: null, original_line: 2 })],
+        thread('T2', [at('C3', 'nyh', 'An old remark')], { outdated: true, line: null, original_line: 2 }),
+        thread('T3', [Object.assign(at('P42', 'reviewer', 'Why 500?'), { database_id: 42, state: 'PENDING' }),
+          at('C4', 'nyh', 'Because 50 is too small.', 'P42')])],
       reviews: [{ id: 'R1', database_id: 1, body: 'Please fix.', url: `${PR_URL}#pullrequestreview-1`, state: 'CHANGES_REQUESTED',
         submitted_at: '2026-09-01T10:00:00Z', login: 'nyh' }] }) });
-    if (!synced || synced.added !== 4) throw new Error('sync: ' + JSON.stringify(synced));
+    if (!synced || synced.added !== 5) throw new Error('sync: ' + JSON.stringify(synced));
     const nyh = `${threadOf('Why does value 5 change?')}`;
     await page.waitFor(`${nyh} && ${nyh}.querySelector('.comment[data-author="github"] .author').textContent === '@nyh'`, { label: 'mirrored thread at its line', timeout: 15000 });
     const order = await page.evaluate(`[...${nyh}.querySelectorAll('.comment .author')].map((a) => a.textContent).join(' ')`);
@@ -697,14 +701,17 @@ export async function runPrScenario(page, url) {
     if (!view.row.endsWith('|src/app.py|new|5') || view.link !== PR_URL + '#discussion_C1' || view.edit || view.replies !== 2) throw new Error('mirrored thread: ' + JSON.stringify(view));
     if (await page.evaluate(`${nyh}.querySelectorAll('.comment:not([data-channel="github"])').length`)) throw new Error('a mirrored comment outside the GitHub channel');
     await page.waitFor(`[...document.querySelectorAll(${JSON.stringify(card + ' .thread-block[data-key-host="file"] .resolved-line')})].some((l) => /GitHub thread by @nyh · outdated/.test(l.textContent))`, { label: 'outdated thread collapsed on the file' });
+    const mine = JSON.stringify(`#main .thread[data-thread-id="${githubId}"]`);
+    await page.waitFor(`document.querySelector(${mine}) && document.querySelector(${mine}).textContent.includes('Because 50 is too small.')`, { label: "nyh's reply under the posted comment" });
+    if (await page.evaluate(`document.querySelector(${mine}).querySelectorAll('.act-delete').length`)) throw new Error('a thread holding a GitHub reply offers Delete');
     await page.click(`#main .thread[data-thread-id="${await page.evaluate(`${nyh}.dataset.threadId`)}"] .btn-reply`);
     await page.waitFor(`document.querySelector('.editor-block form.comment-editor[data-mode="reply"] .intent-btn[data-intent="github"]')`, { label: 'reply editor with the GitHub switch' });
     const switchText = await page.evaluate(`[...document.querySelectorAll('.editor-block form.comment-editor[data-mode="reply"] .intent-btn')].map((b) => b.textContent).join('|')`);
-    if (switchText !== 'Question|GitHub reply') throw new Error('reply switch: ' + switchText);
+    if (switchText !== 'Ask AI|GH reply') throw new Error('reply switch: ' + switchText);
     if (!(await page.evaluate(`Boolean(document.querySelector('.editor-block form.comment-editor[data-mode="reply"][data-channel="claude"]'))`))) throw new Error('a reply starts as a question');
     await page.type('Agreed, see the design.');
     await page.click('.editor-block form.comment-editor[data-mode="reply"] .intent-btn[data-intent="github"]');
-    await page.waitFor(`document.querySelector('.editor-block form.comment-editor[data-mode="reply"][data-intent="github"][data-channel="github"] .btn-submit-comment').textContent === 'Add GitHub reply' && document.querySelector('.editor-block form.comment-editor[data-mode="reply"] textarea').value === 'Agreed, see the design.'`, { label: 'switched to a GitHub reply' });
+    await page.waitFor(`document.querySelector('.editor-block form.comment-editor[data-mode="reply"][data-intent="github"][data-channel="github"] .btn-submit-comment').textContent === 'Add GH reply' && document.querySelector('.editor-block form.comment-editor[data-mode="reply"] textarea').value === 'Agreed, see the design.'`, { label: 'switched to a GitHub reply' });
     await page.click('.editor-block form.comment-editor[data-mode="reply"] .btn-submit-comment');
     await page.waitFor(`${nyh} && [...${nyh}.querySelectorAll('.comment[data-author="user"][data-channel="github"]')].some((c) => c.textContent.includes('Agreed, see the design.') && c.querySelector('.tag-github:not(.is-posted)'))`, { label: 'GitHub reply in the thread, not posted yet' });
     await page.click(`#main .thread[data-thread-id="${await page.evaluate(`${nyh}.dataset.threadId`)}"] .btn-reply`);

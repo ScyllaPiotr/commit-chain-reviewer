@@ -1478,6 +1478,9 @@ def test_github_replies_and_what_ccr_cannot_change_about_github(fixture_repo, pr
     assert (mine["github"]["thread_id"], mine["github"]["github_state"]) == ("T9", "PENDING")
     joined = next(c for c in pr_store.list_comments() if c["body"] == "Good question.")
     assert joined["parent_id"] == remark["id"] and joined["anchor"] == mine["anchor"]
+    with pytest.raises(StoreError, match="holds replies from the pull request's discussion on GitHub") as info:
+        pr_store.delete_comment(remark["id"], cascade=True)
+    assert info.value.status == 409 and joined["id"] in {c["id"] for c in pr_store.list_comments()}
     follow_up = pr_store.add_comment("Thanks.", None, parent_id=remark["id"], github=True)
     assert pr_store.github_target(follow_up["id"])["thread_id"] == "T9"
 

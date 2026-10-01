@@ -1206,13 +1206,19 @@ class ReviewStore:
             return self._fetch(comment_id)
 
     def delete_comment(self, comment_id, cascade: bool = False) -> None:
-        """Delete a comment; a root with replies needs ``cascade`` (else 409) and takes its replies along."""
+        """Delete a comment; a root with replies needs ``cascade`` (else 409) and takes its replies along, so a root
+        whose thread holds comments mirrored from GitHub stays, as they do (409)."""
         with self._lock:
             current = self._fetch(comment_id)
             if current["author"] == GITHUB_AUTHOR:
                 raise StoreError(_remote_message(current), 409)
             if current["parent_id"] is None:
-                replies = self._conn.execute("SELECT COUNT(*) FROM comments WHERE parent_id = ?", (comment_id,)).fetchone()[0]
+                replies, mirrored = self._conn.execute(
+                    "SELECT COUNT(*), COUNT(CASE WHEN author = ? THEN 1 END) FROM comments WHERE parent_id = ?",
+                    (GITHUB_AUTHOR, comment_id)).fetchone()
+                if mirrored:
+                    raise StoreError("thread %s holds replies from the pull request's discussion on GitHub; they change "
+                                     "there" % comment_id, 409)
                 if replies and not cascade:
                     raise StoreError("thread has replies", 409)
             with self._mutate():

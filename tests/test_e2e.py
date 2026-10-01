@@ -156,14 +156,15 @@ def test_browser_pr_mode_flow(live_pr, tmp_path):
     assert not failed, "failed steps: %s\n%s\n%s" % ([s["name"] for s in failed], pretty, report["stderr"])
     assert report["consoleErrors"] == [] and report["ok"] is True and report["exit_code"] == 0, pretty
     assert [s["name"] for s in report["steps"]] == [
-        "load page in PR mode", "question about the whole pull request", "click 2nd commit", "gutter forks into ? and GH",
+        "load page in PR mode", "question about the whole pull request", "click 2nd commit",
+        "gutter forks into Ask AI and GH comment",
         "GitHub comment on a line", "question with the editor switch", "a draft keeps its kind",
         "a line outside the pull request diff stays a question",
         "file header forks too", "posted comment links to GitHub", "GitHub threads come into ccr"], pretty
     assert len(report["screenshots"]) == 4, pretty
 
     # -- what the browser left: seven pending user comments, three of them for GitHub (one recorded as posted, one a
-    #    reply in the mirrored thread, which holds a question too), next to the four comments mirrored from GitHub
+    #    reply in the mirrored thread, which holds a question too), next to the five comments mirrored from GitHub
     everything = live_pr.store.list_comments()
     comments = {c["body"]: c for c in everything if c["author"] == "user"}
     assert set(comments) == {"Why does the series need two commits?", "Why 500?", "What is value 6 for?",
@@ -171,7 +172,8 @@ def test_browser_pr_mode_flow(live_pr, tmp_path):
                              "Which spec does radek mean?"}, pretty
     assert all(c["state"] == "pending" for c in comments.values())
     mirrored = [c for c in everything if c["author"] == "github"]
-    assert len(mirrored) == 4 and comments["Agreed, see the design."]["github"] == {"status": "local"}
+    assert len(mirrored) == 5 and comments["Agreed, see the design."]["github"] == {"status": "local"}
+    assert next(c for c in mirrored if c["github"]["node_id"] == "C4")["parent_id"] == comments["Why 500?"]["id"]
     assert comments["Agreed, see the design."]["parent_id"] == next(c["id"] for c in mirrored if c["github"]["node_id"] == "C1")
     assert comments["Which spec does radek mean?"]["github"] is None, "a question in a GitHub thread stays in ccr"
     assert comments["Which spec does radek mean?"]["parent_id"] == comments["Agreed, see the design."]["parent_id"]
