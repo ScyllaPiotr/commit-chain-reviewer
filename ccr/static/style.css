@@ -54,6 +54,8 @@
   --github: #24292f;
   --github-fg: #ffffff;
   --github-bg: #eaeef2;
+  --channel-github-bg: #f6f8fa;
+  --channel-claude-bg: #ddf4ff;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
@@ -96,6 +98,8 @@
   --github: #cdd9e5;
   --github-fg: #22272e;
   --github-bg: rgba(205, 217, 229, .15);
+  --channel-github-bg: #2d333b;
+  --channel-claude-bg: rgba(65, 132, 228, .15);
 }
 
 /* ------------------------------------------------------------------ base */
@@ -447,6 +451,14 @@ table.diff tr.threads .thread + .thread, table.diff tr.threads .thread + .editor
 .thread .range-note { font-size: 11px; color: var(--fg-muted); font-family: var(--mono); margin-bottom: 4px; }
 .comment { position: relative; padding: 4px 0; }
 .comment + .comment { border-top: 1px solid var(--border-muted); margin-top: 4px; padding-top: 8px; }
+/* PR mode (spec 10.4): the discussion on GitHub and the exchange with Claude, told apart by background */
+[data-channel="github"] { --channel-bg: var(--channel-github-bg); --channel-line: var(--github); }
+[data-channel="claude"] { --channel-bg: var(--channel-claude-bg); --channel-line: var(--accent); }
+.comment[data-channel] { padding: 6px 10px; border-left: 3px solid var(--channel-line); border-radius: var(--radius); background: var(--channel-bg); }
+.comment[data-channel] + .comment[data-channel] { border-top: 0; margin-top: 6px; padding-top: 6px; }
+.comment[data-channel] .comment-actions { top: 4px; right: 6px; }
+.comment[data-channel="github"] .md pre { background: var(--bg); }
+.comment-editor[data-channel] { background: var(--channel-bg); }
 .comment-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--fg-muted); }
 .comment-meta .author { color: var(--fg); font-weight: 600; }
 .comment-meta .time { cursor: default; }

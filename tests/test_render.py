@@ -501,3 +501,25 @@ def test_pr_mode_names_the_pull_request_and_what_every_root_is_for():
     assert render.pr_line(review) == ("ccr: pr https://github.com/o/r/pull/7 (o/r#7): questions for Claude, GitHub "
                                       "comments for your pending review")
     assert render.pr_line(REVIEW) is None and render.render_comments(REVIEW, COMMENTS, fetch) == GOLDEN
+
+
+def test_mirrored_github_threads_and_github_replies():
+    review = dict(REVIEW, pr=PR)
+    root = _comment("gt0001", "github", "Why 500?", "2026-09-01T09:00:00Z", _anchor("file", "combined", "src/fetcher.py"),
+                    round=None)
+    root["github"] = {"status": "remote", "login": "nyh", "own": False, "state": "SUBMITTED", "thread_id": "T1",
+                      "outdated": True, "original_line": 12, "side": "RIGHT", "placement": "file",
+                      "resolved_on_github": True}
+    theirs = _comment("gt0002", "github", "Because.", "2026-09-01T10:00:00Z", root["anchor"], round=None,
+                      parent_id="gt0001")
+    theirs["github"] = {"status": "remote", "login": "ScyllaPiotr", "own": True, "state": "PENDING"}
+    mine = _comment("gt0003", "user", "Agreed.", "2026-09-01T11:00:00Z", root["anchor"], parent_id="gt0001")
+    mine["github"] = {"status": "local"}
+    body = _comment("gt0004", "github", "Please fix.", "2026-09-01T12:00:00Z", _anchor("review"), round=None)
+    body["github"] = {"status": "remote", "kind": "review", "review_state": "CHANGES_REQUESTED", "login": "nyh"}
+    text = render.render_comments(review, [root, theirs, mine, body], fetch)
+    assert ("#### [id: gt0001] @nyh (GitHub) · GitHub thread (outdated, was new:12, shown on the file, resolved there)"
+            " · file · on GitHub · unresolved · 2 replies · last: user") in text
+    assert "  ↳ [id: gt0002] @ScyllaPiotr (GitHub, you) · on GitHub (pending) · 2026-09-01T10:00:00Z · on GitHub" in text
+    assert "  ↳ [id: gt0003] user · GitHub reply (not posted) · 2026-09-01T11:00:00Z · R1" in text
+    assert "#### [id: gt0004] @nyh (GitHub) · GitHub review (changes requested) · review · on GitHub" in text

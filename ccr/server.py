@@ -448,6 +448,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             route = lambda: self._send_json(200, self.server.store.github_target(parts[1]))
         elif depth == 3 and head == "comments" and parts[2] == "github" and method == "POST":
             route = lambda: self._send_json(200, self.server.store.record_github_post(parts[1], body.get("posted")))
+        elif depth == 2 and head == "github" and parts[1] == "sync" and method == "POST":
+            route = lambda: self._send_json(200, self.server.store.sync_github(body))
         if route is None:
             raise HttpError(404, "not found")
         route()

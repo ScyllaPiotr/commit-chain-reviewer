@@ -624,6 +624,42 @@ def test_pr_mode_questions_and_github_comments(cli, fixture_repo, tmp_path, ccr_
     frozen = cli.run("edit", remark, "Reworded")
     assert frozen.returncode == 1 and "change it there" in frozen.stderr
 
+    # -- the discussion on GitHub: nyh's thread comes into ccr, and a GitHub reply goes back into it
+    state = github_state()
+    nyh = {"id": "PRR_nyh", "databaseId": 1, "state": "CHANGES_REQUESTED", "author": "nyh", "commit": repo.feature,
+           "body": "Two questions.", "submitted_at": "2026-09-01T10:00:00Z", "url": "https://github.com/o/r/pull/7#r1",
+           "comments": [{"id": "PRRC_nyh", "databaseId": 2, "thread_id": "PRRT_nyh", "body": "Why 500 here?",
+                         "path": "src/app.py", "line": 5, "startLine": None, "side": "RIGHT", "startSide": None,
+                         "subjectType": "LINE", "diffHunk": "", "url": "https://github.com/o/r/pull/7#discussion_r2",
+                         "reply_to": None, "created_at": "2026-09-01T09:00:00Z"}]}
+    state["reviews"].append(nyh)
+    state_file.write_text(json.dumps(state))
+    synced = cli.run("gh-sync", env=env, check=0).stdout
+    assert synced == "ccr: o/r#7: 2 review threads, 1 review bodies; 2 comments added, 1 updated, 0 removed\n", \
+        "nyh's thread and review body are new; the comment posted from ccr only learns its thread"
+    listing = cli.run("comments", check=0).stdout
+    assert "@nyh (GitHub) · GitHub thread · new:5 → HEAD src/app.py:5 · on GitHub · unresolved" in listing
+    assert "Why 500 here?" in listing
+    assert "@nyh (GitHub) · GitHub review (changes requested) · review" in listing
+    thread = next(c for c in api(record, "GET", "/api/comments")["comments"] if c["body"] == "Why 500 here?")
+    answer = api(record, "POST", "/api/comments", {"body": "Because of the spec.", "parent_id": thread["id"], "github": True})
+    api(record, "POST", "/api/submit", {"verdict": "comment", "summary": ""})
+    api(record, "POST", "/api/comments", {"body": "And a draft.", "parent_id": thread["id"], "github": True})
+    header = cli.run("wait", "--since-round", "2", "--timeout", "5", check=0).stdout.splitlines()[0]
+    assert header == "ccr: round 3 — 1 new comments in 1 threads — 1 GitHub comment to check and post", \
+        "the GitHub reply counts, the draft after it does not"
+    plan = cli.run("gh-post", "--dry-run", answer["id"], env=env, check=0).stdout
+    assert plan.startswith("%s: would post to o/r#7 reply to @nyh on src/app.py, commit %s\n  thread: "
+                           "https://github.com/o/r/pull/7#discussion_r2\n  body:\n    Because of the spec.\n"
+                           % (answer["id"], repo.feature[:10]))
+    replied = cli.run("gh-post", answer["id"], env=env, check=0).stdout.splitlines()
+    pending = next(r for r in github_state()["reviews"] if r["state"] == "PENDING")
+    assert pending["comments"][-1]["reply_to"] == "PRRC_nyh" and pending["comments"][-1]["body"] == "Because of the spec."
+    assert replied[0] == "%s: posted reply to @nyh on src/app.py → %s" % (answer["id"], pending["comments"][-1]["url"])
+    assert "GitHub reply (posted: %s)" % pending["comments"][-1]["url"] in cli.run("comments", check=0).stdout
+    resynced = cli.run("gh-sync", env=env, check=0).stdout
+    assert "; 0 comments added, 1 updated," in resynced, "the posted reply is not mirrored back, it learns its state"
+
     relinked = cli.run("start", "--range", "main..feature", "--pr", "o/r#8", check=0).stdout
     assert relinked.startswith("ccr: reusing running session (pid %d)" % record["pid"])
     assert api(record, "GET", "/api/review")["pr"]["number"] == 8

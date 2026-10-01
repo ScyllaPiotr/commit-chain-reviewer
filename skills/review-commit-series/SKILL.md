@@ -222,23 +222,29 @@ comment** you check and, when it holds, post verbatim into the user's pending Gi
    `PR: <url> by @<author> (the cover letter above is the PR body, verbatim)`.
 3. `ccr start --repo "$REPO" --range "$BASE..HEAD" --pr <url> --cover "$SCRATCH/ccr-cover.md"` prints
    `ccr: pr <url> (<owner/repo#N>): questions for Claude, GitHub comments for your pending review` before the URL.
-   Hand over the URL as in step 1.4 and add: "`?` asks me, `GH` drafts a comment for your pending GitHub review;
-   you submit that review on GitHub."
+   Then `ccr gh-sync --repo "$REPO"` mirrors the pull request's review threads and review bodies into ccr (read
+   only). Hand over the URL as in step 1.4 and add: "`?` asks me, `GH` drafts a comment for your pending GitHub
+   review, and in a GitHub thread you can reply on GitHub; you submit that review on GitHub."
 
 ### Every round
 
-The `ccr wait` header ends with `— <g> GitHub comments to check and post` when the round has some, and every root
-says what it is right after its author: `question`, `GitHub comment (not posted)` or `GitHub comment (posted: <url>)`.
+Run `ccr gh-sync --repo "$REPO"` first, so the round meets GitHub's discussion as it is now. The `ccr wait` header
+ends with `— <g> GitHub comments to check and post` when the round has some (roots and replies), and every root
+says what it is right after its author: `question`, `GitHub comment (not posted)`, `GitHub comment (posted: <url>)`,
+or, by `@login (GitHub)`, a mirrored `GitHub thread (…)` / `GitHub review (…)`. A user reply in a GitHub thread is
+a question unless it reads `GitHub reply (not posted)`.
 
-- **Questions and replies**: answer from the code, citing `path:line`, and change no file. Reply without
-  `[resolve]`; the user resolves.
-- **GitHub comments**: check one before posting it — every factual claim holds at HEAD (verify each `file:line`),
-  it asks something of this pull request and fits the line it is on, and it has no typo or broken Markdown.
+- **Questions and replies**: answer from the code, citing `path:line`, and change no file. A question in a mirrored
+  thread is about that GitHub discussion: read the whole thread first. Reply without `[resolve]`; the user resolves.
+- **GitHub comments and GitHub replies**: check one before posting it — every factual claim holds at HEAD (verify
+  each `file:line`), it asks something of this pull request and fits the line it is on (a reply: the thread it
+  answers), and it has no typo or broken Markdown.
   `ccr gh-post --repo "$REPO" --dry-run <id>` shows where GitHub will anchor it (the pull request diff's
   `path:line`, side, the lines there) and its verbatim body, and asks GitHub nothing.
   - Sound → `ccr gh-post --repo "$REPO" <id>`: it posts the body verbatim into the user's pending review (starting
     one when there is none), one comment at a time, re-reads the review after each and records the post. Reply in
-    the thread with the link it printed, `[resolve]`.
+    the thread with the link it printed: `[resolve]` for a GitHub comment, not for a GitHub reply (that thread is
+    the GitHub discussion, the user's to resolve).
   - Not sound → do not post, and never post a reworded version. Reply with what is wrong and one corrected wording,
     without `[resolve]`. The user edits the comment (an edit makes it pending again) or answers "post it as it is",
     and submits again; then check the text as it is now, and post.
@@ -379,6 +385,7 @@ non-outdated root that is exactly what `--unanswered` selects.
 | Re-anchor a thread | `ccr move --repo "$REPO" <id> --commit <sha> [--path P [--line N]]` |
 | Pick up new commits | `ccr reload --repo "$REPO"` |
 | PR mode: link the review to a pull request | `ccr start --repo "$REPO" --range "$BASE..HEAD" --pr <url>` |
+| PR mode: mirror GitHub's review threads and review bodies | `ccr gh-sync --repo "$REPO"` |
 | PR mode: where a GitHub comment would go | `ccr gh-post --repo "$REPO" --dry-run <id>` |
 | PR mode: post GitHub comments to the pending review | `ccr gh-post --repo "$REPO" <id>…` |
 | Server log | `ccr logs --repo "$REPO" -n 100` |

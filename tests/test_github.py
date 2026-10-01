@@ -299,3 +299,72 @@ def test_long_pending_reviews_are_read_page_by_page(fake, remote, monkeypatch):
     assert fake.operations().count("CcrReviewComments") == 3, "one more page of 4 comments before posting, two of 5 after"
     again = post_comment(remote, line_target(7), "Why 7?")
     assert again["already"] is True, "the duplicate is found on the last page"
+
+
+# --------------------------------------------------------------------------- the pull request's discussion (10.5)
+
+def _discussion(fake):
+    nyh = fake.add_user_review(HEAD, [("src/app.py", 5, "Why 500?"), ("src/app.py", 3, "Old remark")],
+                               state="CHANGES_REQUESTED", author="nyh", body="Please fix the two things.")
+    nyh["comments"][1].update(outdated=True, original_line=2)
+    radek = fake.add_user_review(HEAD, [], state="COMMENTED", author="radek")
+    fake.add_reply(radek, nyh["comments"][0], "Because of the spec.")
+    fake.add_user_review(HEAD, [("README.md", 1, "A draft of someone else")], state="PENDING", author="eve")
+    mine = fake.add_user_review(HEAD, [("src/app.py", 7, "My own draft")])
+    return nyh, radek, mine
+
+
+def test_the_discussion_is_read_whole_and_in_ccr_shape(fake, remote, monkeypatch):
+    monkeypatch.setattr(github, "PAGE_SIZE", 1)
+    nyh, radek, mine = _discussion(fake)
+    payload = github.fetch_discussion(remote)
+    assert payload["viewer"] == "reviewer" and payload["head"] == HEAD
+    assert [[(c["login"], c["body"], c["state"]) for c in t["comments"]] for t in payload["threads"]] == [
+        [("nyh", "Why 500?", "SUBMITTED"), ("radek", "Because of the spec.", "SUBMITTED")],
+        [("nyh", "Old remark", "SUBMITTED")],
+        [("reviewer", "My own draft", "PENDING")]], "eve's pending draft is hers alone"
+    first, outdated = payload["threads"][0], payload["threads"][1]
+    assert (first["path"], first["line"], first["side"], first["outdated"], first["subject_type"]) == ("src/app.py", 5, "RIGHT", False, "LINE")
+    assert first["comments"][1]["reply_to"] == first["comments"][0]["id"] and first["id"] == nyh["comments"][0]["thread_id"]
+    assert (outdated["outdated"], outdated["line"], outdated["original_line"]) == (True, None, 2)
+    assert payload["reviews"] == [{"id": nyh["id"], "database_id": nyh["databaseId"], "body": "Please fix the two things.",
+                                   "url": nyh["url"], "state": "CHANGES_REQUESTED", "submitted_at": nyh["submitted_at"],
+                                   "login": "nyh"}], "reviews without a body carry nothing to show"
+    assert {"CcrThreadComments", "CcrThreads", "CcrReviews"} <= set(fake.operations())
+
+
+def reply_target(thread_id, reply_to):
+    return {"commit": HEAD, "base": BASE, "path": "src/app.py", "subject_type": "REPLY", "line": None, "side": None,
+            "start_line": None, "start_side": None, "lines": [], "thread_id": thread_id, "reply_to": reply_to}
+
+
+def test_a_reply_goes_into_the_thread_inside_the_pending_review(fake, remote):
+    nyh, _, _ = _discussion(fake)
+    fake.state["reviews"].remove(fake.pending())          # no pending review yet: the reply starts one
+    root = nyh["comments"][0]
+    first = post_comment(remote, reply_target(root["thread_id"], root["id"]), "Agreed, see the design.")
+    review = fake.pending()
+    reply = review["comments"][0]
+    assert first["created_review"] is True and first["problems"] == []
+    assert (reply["reply_to"], reply["body"]) == (root["id"], "Agreed, see the design.")
+    assert first["record"]["thread_id"] == root["thread_id"] and first["record"]["url"] == reply["url"]
+    again = post_comment(remote, reply_target(root["thread_id"], root["id"]), "Agreed, see the design.")
+    assert again["already"] is True and len(review["comments"]) == 1
+    other = nyh["comments"][1]
+    assert post_comment(remote, reply_target(other["thread_id"], other["id"]), "Agreed, see the design.")["already"] is False, \
+        "the same words in another thread are another reply"
+    assert "CcrAddThread" not in fake.operations()
+
+
+def test_a_reply_to_an_unknown_thread_posts_nothing_and_undoes_the_review(fake, remote):
+    with pytest.raises(GitHubError, match="Could not resolve to a node"):
+        post_comment(remote, reply_target("PRRT_gone", "PRRC_gone"), "Hello?")
+    assert fake.state["reviews"] == []
+
+
+def test_a_reply_lands_in_a_pending_review_on_another_commit(fake, remote):
+    nyh, _, mine = _discussion(fake)
+    mine["commit"] = OTHER                                   # a reply is placed by its thread, not by a commit
+    root = nyh["comments"][0]
+    result = post_comment(remote, reply_target(root["thread_id"], root["id"]), "Agreed.")
+    assert result["problems"] == [] and mine["comments"][-1]["reply_to"] == root["id"]

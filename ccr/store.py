@@ -30,6 +30,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -73,6 +74,8 @@ SNIPPET_CUT_MARK = "…"
 UNKNOWN_LOCATION = {"path": None, "line": None, "status": "unknown"}
 NO_PR = "this review is not linked to a GitHub pull request (start ccr with --pr URL)"
 GITHUB_LOCAL = {"status": "local"}
+GITHUB_AUTHOR = "github"  # the author of comments mirrored from the pull request's discussion (10.5)
+_GITHUB_TIME_RE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 _GITHUB_RECORD_KEYS = ("url", "comment_id", "node_id", "thread_id", "review_id", "path", "subject_type", "line", "side",
                        "start_line", "start_side", "commit")
 
@@ -349,6 +352,24 @@ def _posted_message(comment: dict) -> str:
         comment["id"], comment["github"].get("url") or "no url")
 
 
+def _remote_message(comment: dict) -> str:
+    return "comment %s comes from the pull request's discussion on GitHub (%s); it changes there" % (
+        comment["id"], (comment["github"] or {}).get("url") or "no url")
+
+
+def _github_time(value) -> str:
+    """A GitHub timestamp as ccr keeps times (they already are ``YYYY-mm-ddTHH:MM:SSZ``), else now."""
+    return value if isinstance(value, str) and _GITHUB_TIME_RE.match(value) else utcnow()
+
+
+def _clip(text) -> str:
+    """A GitHub body as a ccr body: never empty, at most 64 KiB."""
+    text = (text if isinstance(text, str) else "").strip() or "(empty)"
+    while len(text.encode("utf-8")) > BODY_MAX_BYTES:
+        text = text[:len(text) * 9 // 10]
+    return text
+
+
 def _valid_repo_path(path) -> bool:
     if not isinstance(path, str) or not path or "\0" in path or path.startswith("/"):
         return False
@@ -523,6 +544,8 @@ class ReviewStore:
             pr = github.parse_pr(reference)
         except ValueError as exc:
             raise StoreError(str(exc)) from None
+        if self.pr and self.pr["url"] == pr["url"]:  # relinking the same pull request keeps its sync times
+            pr.update((key, self.pr[key]) for key in ("synced_at", "first_synced_at") if key in self.pr)
         with self._mutate():
             self._conn.execute("UPDATE reviews SET pr = ? WHERE id = ?", (json.dumps(pr), self.review_id))
             self.pr = pr
@@ -849,6 +872,7 @@ class ReviewStore:
                 "last_round": rounds[-1] if rounds else None,
                 "commits": len(self._data["commits"]) if self._data else 0,
                 "ui": self._ui(),
+                "pr_synced_at": (self.pr or {}).get("synced_at"),
             }
 
     # ------------------------------------------------------------------ diffs
@@ -1064,13 +1088,24 @@ class ReviewStore:
              anchor["commit"], anchor["path"], anchor["side"], anchor["line"], anchor["start_line"], snippet,
              json.dumps(github_state) if github_state else None))
 
-    def _check_github_root(self, author: str, parent_id, anchor: dict, snippet: str) -> None:
-        """A GitHub comment is a root written by the user that GitHub can anchor (section 10.2)."""
-        if parent_id is not None:
-            raise StoreError("a reply stays in ccr; only a root comment can be a GitHub comment")
+    def _check_github(self, author: str, parent_id, anchor: dict, snippet: str) -> None:
+        """A GitHub comment is the user's: a root GitHub can anchor (10.2), or a reply in a review thread (10.5)."""
         if author != "user":
             raise StoreError("GitHub comments are the user's to write")
-        self._github_target({"anchor": anchor, "outdated": False, "snippet": snippet})
+        if parent_id is not None:
+            self._github_thread(self._fetch(parent_id))
+        else:
+            self._github_target({"anchor": anchor, "outdated": False, "snippet": snippet})
+
+    def _github_thread(self, root: dict) -> dict:
+        """The review thread a root is on GitHub - ``{"thread_id", "reply_to", "url", "login"}`` - or StoreError."""
+        if self.pr is None:
+            raise StoreError(NO_PR, 409)
+        github = root.get("github") or {}
+        if github.get("status") not in ("remote", "posted") or not github.get("thread_id") or github.get("deleted"):
+            raise StoreError("this thread is not a review thread on GitHub, so a reply to it stays in ccr")
+        return {"thread_id": github["thread_id"], "reply_to": github.get("node_id"), "url": github.get("url"),
+                "login": github.get("login") or "you"}
 
     def add_comment(self, body, anchor=None, author: str = "user", parent_id=None, github=False) -> dict:
         """Create a root comment (validated anchor) or a reply (anchor copied from the root).
@@ -1092,7 +1127,7 @@ class ReviewStore:
             else:
                 anchor_fields, snippet = self._validate_anchor(anchor)
             if github:
-                self._check_github_root(author, parent_id, anchor_fields, snippet)
+                self._check_github(author, parent_id, anchor_fields, snippet)
             if author == "claude":
                 state, round_number = "submitted", self._round_count()
             else:
@@ -1112,6 +1147,8 @@ class ReviewStore:
             raise StoreError("github must be a boolean")
         with self._lock:
             current = self._fetch(comment_id)
+            if current["author"] == GITHUB_AUTHOR and (body is not None or anchor is not None or github is not None):
+                raise StoreError(_remote_message(current), 409)
             posted = (current["github"] or {}).get("status") == "posted"
             assignments, params, edited = [], [], False
             if body is not None:
@@ -1150,8 +1187,8 @@ class ReviewStore:
                 params.append(json.dumps(GITHUB_LOCAL) if to_github else None)
                 edited = True
             if to_github and not posted and (github or new_anchor is not None):
-                self._check_github_root(current["author"], current["parent_id"], new_anchor or current["anchor"],
-                                        current["snippet"] if new_anchor is None else snippet)
+                self._check_github(current["author"], current["parent_id"], new_anchor or current["anchor"],
+                                   current["snippet"] if new_anchor is None else snippet)
             if to_github and not posted and edited and current["state"] == "submitted":
                 # what the agent checked is not what would be posted any more: it is a draft again (10.1)
                 assignments += ["state = 'pending'", "round = NULL"]
@@ -1172,6 +1209,8 @@ class ReviewStore:
         """Delete a comment; a root with replies needs ``cascade`` (else 409) and takes its replies along."""
         with self._lock:
             current = self._fetch(comment_id)
+            if current["author"] == GITHUB_AUTHOR:
+                raise StoreError(_remote_message(current), 409)
             if current["parent_id"] is None:
                 replies = self._conn.execute("SELECT COUNT(*) FROM comments WHERE parent_id = ?", (comment_id,)).fetchone()[0]
                 if replies and not cascade:
@@ -1250,9 +1289,9 @@ class ReviewStore:
                     start_line=start if start < end else None, start_side=github_side if start < end else None,
                     lines=lines)
 
-    def _github_root(self, comment_id) -> dict:
+    def _github_comment(self, comment_id) -> dict:
         comment = self._fetch(comment_id)
-        if comment["parent_id"] is not None or comment["github"] is None:
+        if comment["github"] is None or comment["author"] == GITHUB_AUTHOR:
             raise StoreError("comment %s is not a GitHub comment" % comment_id, 409)
         return comment
 
@@ -1260,12 +1299,19 @@ class ReviewStore:
         """A GitHub comment's body, state and pull request, plus - unless it is posted already - the place GitHub
         will anchor it at (section 10.2)."""
         with self._lock:
-            comment = self._github_root(comment_id)
+            comment = self._github_comment(comment_id)
             info = {"id": comment["id"], "body": comment["body"], "state": comment["state"],
                     "github": comment["github"], "pr": dict(self.pr) if self.pr else None}
             if comment["github"].get("status") == "posted":
                 return info
-            return dict(self._github_target(comment), **info)
+            if comment["parent_id"] is None:
+                return dict(self._github_target(comment), **info)
+            data = self._require_data()
+            thread = self._github_thread(self._fetch(comment["parent_id"]))
+            return dict(info, commit=data["range"]["head"], base=data["range"]["base"], path=comment["anchor"]["path"],
+                        subject_type="REPLY", line=None, side=None, start_line=None, start_side=None, lines=[],
+                        thread_id=thread["thread_id"], reply_to=thread["reply_to"], thread_url=thread["url"],
+                        thread_author=thread["login"])
 
     def record_github_post(self, comment_id, posted) -> dict:
         """Remember that a GitHub comment now lives in the user's pending review (``posted``: where and as what)."""
@@ -1276,13 +1322,166 @@ class ReviewStore:
             raise StoreError("posted.url must be an https URL")
         record = {key: posted.get(key) for key in _GITHUB_RECORD_KEYS}
         with self._lock:
-            comment = self._github_root(comment_id)
+            comment = self._github_comment(comment_id)
             if comment["github"].get("status") == "posted":
                 raise StoreError(_posted_message(comment), 409)
             record.update(status="posted", posted_at=utcnow())
             with self._mutate():
                 self._conn.execute("UPDATE comments SET github = ? WHERE id = ?", (json.dumps(record), comment_id))
             return self._fetch(comment_id)
+
+    # ------------------------------------------------------------------ the pull request's discussion (PR mode, 10.5)
+
+    def _import_anchor(self, data: dict, thread: dict, pr_head) -> tuple:
+        """Where a review thread from GitHub shows in ccr: ``(anchor, snippet, placement)``.
+
+        Its lines in "All changes" while GitHub still has them there, else its file, else the whole review: the
+        lines of an outdated thread belong to a version of the pull request that is gone.
+        """
+        review = {"kind": "review", "commit": None, "path": None, "side": None, "line": None, "start_line": None}
+        file_diff = _find_file(self._view_diff(COMBINED, False), thread["path"]) if isinstance(thread.get("path"), str) else None
+        fallback = (dict(review, kind="file", commit=COMBINED, path=file_diff["path"]), "", "file") if file_diff \
+            else (review, "", "review")
+        line, start = thread.get("line"), thread.get("start_line")
+        if thread.get("subject_type") != "LINE" or thread.get("outdated") or not isinstance(line, int) or not file_diff:
+            return fallback
+        start = start if isinstance(start, int) and 0 < start < line else None  # GitHub repeats line as startLine
+        side = "new" if thread.get("side") == "RIGHT" else "old"
+        head = data["range"]["head"]
+        if pr_head and pr_head != head:  # GitHub counts the lines of its head, ccr shows another
+            if side == "old":  # of a base that may have moved as well
+                return fallback
+            ends = [self._map(pr_head, head, file_diff["path"], n) for n in (line, start or line)]
+            if not all(m and m["status"] in ("same", "moved") and m["path"] == file_diff["path"] for m in ends):
+                return fallback
+            line, start = ends[0]["line"], ends[1]["line"] if start else None
+            start = start if start is not None and start < line else None
+        snippet = _capture_snippet(file_diff, side, start or line, line)
+        if snippet is None:
+            return fallback
+        return (dict(review, kind="line", commit=COMBINED, path=file_diff["path"], side=side, line=line, start_line=start),
+                snippet, "line")
+
+    def _mirror(self, existing, parent, node: dict, viewer: str, anchor: dict, snippet: str, flags: dict,
+                stats: dict) -> dict:
+        """Insert or update the ccr comment that mirrors one GitHub comment or review body; returns it."""
+        info = dict(flags, status="remote", node_id=node["id"], comment_id=node.get("database_id"), url=node.get("url"),
+                    login=node.get("login") or "ghost", own=node.get("login") == viewer, state=node.get("state"))
+        body = _clip(node.get("body"))
+        created = _github_time(node.get("created_at"))
+        updated = max(created, _github_time(node["edited_at"])) if node.get("edited_at") else created
+        if existing is None:
+            comment_id = self._new_id()
+            self._conn.execute(
+                "INSERT INTO comments (id, parent_id, review, author, body, created_at, updated_at, state, round, resolved,"
+                " kind, commit_sha, path, side, line, start_line, snippet, moved_from, github)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, 'submitted', NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+                (comment_id, parent["id"] if parent else None, self.review_id, GITHUB_AUTHOR, body, created, updated,
+                 int(parent is None and bool(flags.get("resolved_on_github"))), anchor["kind"], anchor["commit"],
+                 anchor["path"], anchor["side"], anchor["line"], anchor["start_line"], snippet, json.dumps(info)))
+            stats["added"] += 1
+            return self._fetch(comment_id)
+        moved = parent is None and existing["anchor"] != anchor
+        if not moved and (existing["body"], existing["updated_at"], existing["github"]) == (body, updated, info):
+            return existing
+        self._conn.execute("UPDATE comments SET body = ?, updated_at = ?, github = ? WHERE id = ?",
+                           (body, updated, json.dumps(info), existing["id"]))
+        if moved:
+            self._conn.execute("UPDATE comments SET %s, snippet = ? WHERE id = ?" % _ANCHOR_ASSIGNMENTS,
+                               _anchor_params(anchor) + [snippet, existing["id"]])
+            self._update_reply_anchors(existing["id"], anchor, snippet)
+        stats["updated"] += 1
+        return self._fetch(existing["id"])
+
+    def _merge_posted(self, comment: dict, extra: dict, stats: dict) -> None:
+        """A comment posted from ccr learns its thread and GitHub's state of it from a sync."""
+        merged = dict(comment["github"], **extra)
+        if merged != comment["github"]:
+            self._conn.execute("UPDATE comments SET github = ? WHERE id = ?", (json.dumps(merged), comment["id"]))
+            stats["updated"] += 1
+
+    def sync_github(self, payload) -> dict:
+        """Mirror the pull request's discussion - its review threads and the bodies of its reviews - as comments by
+        ``github`` (section 10.5); returns what changed.
+
+        GitHub comments are matched by node id from one sync to the next: new ones are added, edited ones updated,
+        threads placed again as GitHub moves them, and what GitHub no longer has is removed, except a root with
+        replies in ccr, which stays marked deleted.  A thread whose first comment is gone from GitHub is a new thread
+        in ccr.  A comment posted from ccr is not mirrored a second time: GitHub's replies to it join its ccr thread.
+        A mirrored thread starts out resolved in ccr if it is resolved on GitHub; from then on that flag is the user's.
+        """
+        if not isinstance(payload, dict) or not isinstance(payload.get("viewer"), str) \
+                or not isinstance(payload.get("threads"), list) or not isinstance(payload.get("reviews"), list):
+            raise StoreError("sync takes {viewer, head, threads: [...], reviews: [...]}")
+        with self._lock:
+            if self.pr is None:
+                raise StoreError(NO_PR, 409)
+            data = self._require_data()
+            comments = self._all_comments()
+            mirrored = {c["github"]["node_id"]: c for c in comments
+                        if c["author"] == GITHUB_AUTHOR and (c["github"] or {}).get("node_id")}
+            posted = {c["github"]["comment_id"]: c for c in comments
+                      if (c["github"] or {}).get("status") == "posted" and c["github"].get("comment_id") is not None}
+            local_replies = {c["parent_id"] for c in comments if c["parent_id"] and c["author"] != GITHUB_AUTHOR}
+            viewer, seen, now = payload["viewer"], set(), utcnow()  # seen: ids of the ccr comments GitHub still has
+
+            def in_place(comment, parent):
+                """``comment`` if it sits under ``parent`` (None: a root); a former reply can lead a thread now."""
+                return comment if comment is not None and comment["parent_id"] == (parent["id"] if parent else None) \
+                    else None
+
+            stats = {"threads": 0, "reviews": 0, "added": 0, "updated": 0, "removed": 0}
+            review_anchor = {"kind": "review", "commit": None, "path": None, "side": None, "line": None, "start_line": None}
+            with self._mutate():
+                for thread in payload["threads"]:
+                    nodes = [c for c in (thread.get("comments") or []) if isinstance(c, dict) and c.get("id")] \
+                        if isinstance(thread, dict) and thread.get("id") else []
+                    if not nodes:
+                        continue
+                    stats["threads"] += 1
+                    anchor, snippet, placement = self._import_anchor(data, thread, payload.get("head"))
+                    flags = {"thread_id": thread["id"], "resolved_on_github": bool(thread.get("resolved")),
+                             "outdated": bool(thread.get("outdated")), "placement": placement, "path": thread.get("path"),
+                             "side": thread.get("side"), "line": thread.get("line"),
+                             "original_line": thread.get("original_line")}
+                    first = nodes[0]
+                    root = in_place(posted.get(first.get("database_id")), None)
+                    if root is not None:
+                        self._merge_posted(root, {"thread_id": thread["id"], "github_state": first.get("state")}, stats)
+                    else:
+                        root = self._mirror(in_place(mirrored.get(first["id"]), None), None, first, viewer, anchor,
+                                            snippet, flags, stats)
+                        seen.add(root["id"])
+                    for node in nodes[1:]:
+                        mine = in_place(posted.get(node.get("database_id")), root)
+                        if mine is not None:
+                            self._merge_posted(mine, {"github_state": node.get("state")}, stats)
+                            continue
+                        seen.add(self._mirror(in_place(mirrored.get(node["id"]), root), root, node, viewer,
+                                              root["anchor"], root["snippet"], {}, stats)["id"])
+                for review in payload["reviews"]:
+                    if not isinstance(review, dict) or not review.get("id") or not (review.get("body") or "").strip():
+                        continue
+                    stats["reviews"] += 1
+                    node = {"id": review["id"], "database_id": review.get("database_id"), "body": review["body"],
+                            "url": review.get("url"), "created_at": review.get("submitted_at"), "state": "SUBMITTED",
+                            "login": review.get("login")}
+                    seen.add(self._mirror(in_place(mirrored.get(review["id"]), None), None, node, viewer, review_anchor,
+                                          "", {"kind": "review", "review_state": review.get("state")}, stats)["id"])
+                for comment in mirrored.values():
+                    if comment["id"] in seen:
+                        continue
+                    if comment["parent_id"] is None and comment["id"] in local_replies:
+                        if not comment["github"].get("deleted"):
+                            self._conn.execute("UPDATE comments SET github = ? WHERE id = ?",
+                                               (json.dumps(dict(comment["github"], deleted=True)), comment["id"]))
+                            stats["updated"] += 1
+                    else:  # a root's mirrored replies may be gone with it already (ON DELETE CASCADE)
+                        self._conn.execute("DELETE FROM comments WHERE id = ?", (comment["id"],))
+                        stats["removed"] += 1
+                self.pr = dict(self.pr, synced_at=now, first_synced_at=self.pr.get("first_synced_at") or now)
+                self._conn.execute("UPDATE reviews SET pr = ? WHERE id = ?", (json.dumps(self.pr), self.review_id))
+            return dict(stats, synced_at=now)
 
     def _locate_one(self, comment: dict, data: dict, head_sha: str) -> dict:
         """Section 4.5: where the anchored line lives at ``HEAD``."""

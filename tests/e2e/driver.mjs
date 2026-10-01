@@ -597,16 +597,16 @@ export async function runPrScenario(page, url) {
   await runner.step('question with the editor switch', async () => {
     await page.hover(row(6) + ' td.code');
     await page.click(row(6) + ' .btn-add-comment[data-intent="question"]');
-    await page.waitFor(`document.querySelector('tr.editor form.comment-editor:not([data-intent]) textarea')`, { label: 'question editor' });
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-channel="claude"]:not([data-intent]) textarea')`, { label: 'question editor' });
     if ((await page.evaluate(editorLabel)) !== 'Ask') throw new Error('question label ' + (await page.evaluate(editorLabel)));
     await page.type('What is value 6 for?');
     await page.click('tr.editor .intent-btn[data-intent="github"]');
-    await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-intent="github"]') && document.querySelector('tr.editor textarea').value === 'What is value 6 for?'`, { label: 'switched to GitHub, text kept' });
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-intent="github"][data-channel="github"]') && document.querySelector('tr.editor textarea').value === 'What is value 6 for?'`, { label: 'switched to GitHub, text kept' });
     if ((await page.evaluate(editorLabel)) !== 'Add GitHub comment') throw new Error('label after switching');
     await page.click('tr.editor .intent-btn[data-intent="question"]');
     await page.waitFor(`document.querySelector('tr.editor form.comment-editor:not([data-intent])') && ${editorLabel} === 'Ask'`, { label: 'switched back' });
     await page.click('tr.editor .btn-submit-comment');
-    await page.waitFor(`!document.querySelector('tr.editor') && ${threadOf('What is value 6 for?')} && ${threadOf('What is value 6 for?')}.querySelector('.tag-question')`, { label: 'question thread' });
+    await page.waitFor(`!document.querySelector('tr.editor') && ${threadOf('What is value 6 for?')} && ${threadOf('What is value 6 for?')}.querySelector('.comment[data-channel="claude"] .tag-question')`, { label: 'question thread' });
     return 'switch kept the text';
   });
 
@@ -672,6 +672,51 @@ export async function runPrScenario(page, url) {
     if (!submitTitle.startsWith('Send 5 pending comments to Claude')) throw new Error('submit title: ' + submitTitle);
     await page.shot('pr-03-posted');
     return tag.href;
+  });
+
+  await runner.step('GitHub threads come into ccr', async () => {
+    const head = (await page.api('/api/review')).range.head;
+    // the reply carries the same time as its root, as mirrored comments can: the root must still lead its thread
+    const at = (id, login, body, replyTo) => ({ id, database_id: id.length, body, url: `${PR_URL}#discussion_${id}`,
+      created_at: '2026-09-01T10:00:00Z', edited_at: null, state: 'SUBMITTED', login, reply_to: replyTo || null });
+    const thread = (id, comments, extra) => Object.assign({ id, path: 'src/app.py', line: 5, start_line: null, original_line: 5,
+      original_start_line: null, side: 'RIGHT', subject_type: 'LINE', outdated: false, resolved: false, comments }, extra);
+    const synced = await page.api('/api/github/sync', { method: 'POST', body: JSON.stringify({ viewer: 'reviewer', head,
+      threads: [thread('T1', [at('C1', 'nyh', 'Why does value 5 change?'), at('C2', 'radek', 'Because the spec says so.', 'C1')]),
+        thread('T2', [at('C3', 'nyh', 'An old remark')], { outdated: true, line: null, original_line: 2 })],
+      reviews: [{ id: 'R1', database_id: 1, body: 'Please fix.', url: `${PR_URL}#pullrequestreview-1`, state: 'CHANGES_REQUESTED',
+        submitted_at: '2026-09-01T10:00:00Z', login: 'nyh' }] }) });
+    if (!synced || synced.added !== 4) throw new Error('sync: ' + JSON.stringify(synced));
+    const nyh = `${threadOf('Why does value 5 change?')}`;
+    await page.waitFor(`${nyh} && ${nyh}.querySelector('.comment[data-author="github"] .author').textContent === '@nyh'`, { label: 'mirrored thread at its line', timeout: 15000 });
+    const order = await page.evaluate(`[...${nyh}.querySelectorAll('.comment .author')].map((a) => a.textContent).join(' ')`);
+    if (!order.startsWith('@nyh @radek')) throw new Error('thread order: ' + order);
+    const view = await page.evaluate(`(() => { const t = ${nyh}; return { row: t.closest('tr.threads').dataset.key,
+      link: t.querySelector('a.tag-github').href, edit: Boolean(t.querySelector('.comment[data-author="github"] .act-edit, .comment[data-author="github"] .act-delete')),
+      replies: t.querySelectorAll('.comment[data-author="github"]').length }; })()`);
+    if (!view.row.endsWith('|src/app.py|new|5') || view.link !== PR_URL + '#discussion_C1' || view.edit || view.replies !== 2) throw new Error('mirrored thread: ' + JSON.stringify(view));
+    if (await page.evaluate(`${nyh}.querySelectorAll('.comment:not([data-channel="github"])').length`)) throw new Error('a mirrored comment outside the GitHub channel');
+    await page.waitFor(`[...document.querySelectorAll(${JSON.stringify(card + ' .thread-block[data-key-host="file"] .resolved-line')})].some((l) => /GitHub thread by @nyh · outdated/.test(l.textContent))`, { label: 'outdated thread collapsed on the file' });
+    await page.click(`#main .thread[data-thread-id="${await page.evaluate(`${nyh}.dataset.threadId`)}"] .btn-reply`);
+    await page.waitFor(`document.querySelector('.editor-block form.comment-editor[data-mode="reply"] .intent-btn[data-intent="github"]')`, { label: 'reply editor with the GitHub switch' });
+    const switchText = await page.evaluate(`[...document.querySelectorAll('.editor-block form.comment-editor[data-mode="reply"] .intent-btn')].map((b) => b.textContent).join('|')`);
+    if (switchText !== 'Question|GitHub reply') throw new Error('reply switch: ' + switchText);
+    if (!(await page.evaluate(`Boolean(document.querySelector('.editor-block form.comment-editor[data-mode="reply"][data-channel="claude"]'))`))) throw new Error('a reply starts as a question');
+    await page.type('Agreed, see the design.');
+    await page.click('.editor-block form.comment-editor[data-mode="reply"] .intent-btn[data-intent="github"]');
+    await page.waitFor(`document.querySelector('.editor-block form.comment-editor[data-mode="reply"][data-intent="github"][data-channel="github"] .btn-submit-comment').textContent === 'Add GitHub reply' && document.querySelector('.editor-block form.comment-editor[data-mode="reply"] textarea').value === 'Agreed, see the design.'`, { label: 'switched to a GitHub reply' });
+    await page.click('.editor-block form.comment-editor[data-mode="reply"] .btn-submit-comment');
+    await page.waitFor(`${nyh} && [...${nyh}.querySelectorAll('.comment[data-author="user"][data-channel="github"]')].some((c) => c.textContent.includes('Agreed, see the design.') && c.querySelector('.tag-github:not(.is-posted)'))`, { label: 'GitHub reply in the thread, not posted yet' });
+    await page.click(`#main .thread[data-thread-id="${await page.evaluate(`${nyh}.dataset.threadId`)}"] .btn-reply`);
+    await page.waitFor(`document.querySelector('.editor-block form.comment-editor[data-mode="reply"][data-channel="claude"] textarea')`, { label: 'the next reply is a question again' });
+    await page.type('Which spec does radek mean?');
+    await page.click('.editor-block form.comment-editor[data-mode="reply"] .btn-submit-comment');
+    await page.waitFor(`${nyh} && [...${nyh}.querySelectorAll('.comment[data-author="user"][data-channel="claude"]')].some((c) => c.textContent.includes('Which spec does radek mean?') && c.querySelector('.tag-question'))`, { label: 'question in the GitHub thread' });
+    const colours = await page.evaluate(`(() => { const bg = (sel) => getComputedStyle(${nyh}.querySelector(sel)).backgroundColor;
+      return [bg('.comment[data-author="github"]'), bg('.comment[data-author="user"][data-channel="github"]'), bg('.comment[data-channel="claude"]')]; })()`);
+    if (colours[0] !== colours[1] || colours[0] === colours[2] || colours.some((c) => /^(transparent|rgba\(0, 0, 0, 0\))$/.test(c))) throw new Error('channel colours: ' + colours.join(' / '));
+    await page.shot('pr-04-github-thread');
+    return view.row;
   });
 }
 

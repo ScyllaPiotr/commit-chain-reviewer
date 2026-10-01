@@ -1,10 +1,11 @@
 """A fake ``gh`` CLI for the PR-mode tests: an in-memory GitHub answering exactly what ccr asks of ``gh api``.
 
 It understands ccr's named GraphQL operations (``CcrViewer``, ``CcrPendingReview``, ``CcrReviewComments``,
-``CcrStartReview``, ``CcrDiscardReview``, ``CcrAddThread``) sent as ``gh api graphql --input -`` and the REST
-compare call that yields a merge base, and it enforces what GitHub enforces and ccr relies on: one pending review
-per user, reviews only on commits of the pull request, threads only on lines of the pull request diff, comments
-paged ``first``/``after``, and nothing but pending reviews touched.  Anything else fails loudly, so a test notices
+``CcrThreads``, ``CcrThreadComments``, ``CcrReviews``, ``CcrStartReview``, ``CcrDiscardReview``, ``CcrAddThread``,
+``CcrAddReply``) sent as ``gh api graphql --input -`` and the REST compare call that yields a merge base, and it
+enforces what GitHub enforces and ccr relies on: one pending review per user, reviews only on commits of the pull
+request, threads only on lines of the pull request diff, other users' pending comments invisible, everything paged
+``first``/``after``, and nothing but pending reviews touched.  Anything else fails loudly, so a test notices
 when ccr starts asking GitHub something new.
 
 In-process tests use :class:`FakeGitHub` (``PullRequest(pr, run=fake.run)``); the CLI tests put a ``gh`` shim on
@@ -25,6 +26,7 @@ STATE_ENV = "FAKE_GH_STATE"
 _OPERATION_RE = re.compile(r"^\s*(query|mutation)\s+(\w+)")
 _COMPARE_RE = re.compile(r"^repos/([^/]+)/([^/]+)/compare/([0-9a-f]+)\.\.\.([0-9a-f]+)$")
 _COMMENT_KEYS = ("id", "databaseId", "body", "path", "line", "startLine", "subjectType", "diffHunk", "url")
+_SUBMITTED = ("COMMENTED", "APPROVED", "CHANGES_REQUESTED", "DISMISSED")
 
 
 def new_state(owner="o", repo="r", number=7, head="", base="", merge_base=None, login="reviewer", diff=None,
@@ -100,15 +102,24 @@ class FakeGitHub:
         return next((r for r in self.state["reviews"] if r["author"] == self.state["login"] and r["state"] == "PENDING"),
                     None)
 
-    def add_user_review(self, commit: str, comments=(), state="PENDING", author=None) -> dict:
+    def add_user_review(self, commit: str, comments=(), state="PENDING", author=None, body="") -> dict:
         """A review the user (or ``author``) made in the GitHub UI: ``comments`` = ``[(path, line, body[, side])]``."""
-        review = self._new_review(author or self.state["login"], commit, state)
-        for path, line, body, *side in comments:
-            review["comments"].append(self._new_comment(review, {"path": path, "line": line, "body": body,
+        review = self._new_review(author or self.state["login"], commit, state, body)
+        for path, line, text, *side in comments:
+            review["comments"].append(self._new_comment(review, {"path": path, "line": line, "body": text,
                                                                  "side": side[0] if side else "RIGHT",
                                                                  "subjectType": "LINE"}))
         self.save()
         return review
+
+    def add_reply(self, review: dict, root: dict, body: str) -> dict:
+        """A reply in ``root``'s thread, made by ``review``'s author in the GitHub UI."""
+        reply = self._new_comment(review, {"path": root["path"], "line": root["line"], "side": root["side"],
+                                           "subjectType": root["subjectType"], "body": body})
+        reply["reply_to"] = root["id"]
+        review["comments"].append(reply)
+        self.save()
+        return reply
 
     # ------------------------------------------------------------------ GraphQL
 
@@ -145,6 +156,70 @@ class FakeGitHub:
             "id": pr["id"], "url": pr["url"], "headRefOid": pr["head"], "baseRefOid": pr["base"],
             "commits": {"totalCount": len(pr["commits"]), "nodes": [{"commit": {"oid": oid}} for oid in pr["commits"][-100:]]},
             "pending": {"nodes": pending}, "submitted": {"totalCount": submitted}}}}
+
+    def _visible(self, review: dict) -> bool:
+        return review["state"] != "PENDING" or review["author"] == self.state["login"]
+
+    def _threads(self) -> list:
+        """``[(root, [root, replies...])]`` of every thread the viewer can see, oldest first."""
+        comments = [(r, c) for r in self.state["reviews"] if self._visible(r) for c in r["comments"]]
+        roots = [(r, c) for r, c in comments if not c.get("reply_to")]
+        return [(root, [(review, root)] + [(r, c) for r, c in comments if c.get("reply_to") == root["id"]])
+                for review, root in sorted(roots, key=lambda rc: rc[1]["databaseId"])]
+
+    @staticmethod
+    def _cut(items: list, size: int, after) -> tuple:
+        offset = int(after) if after else 0
+        return items[offset:offset + size], {"hasNextPage": offset + size < len(items), "endCursor": str(offset + size)}
+
+    def _thread_comment(self, review: dict, comment: dict) -> dict:
+        return {"id": comment["id"], "databaseId": comment["databaseId"], "body": comment["body"], "url": comment["url"],
+                "createdAt": comment["created_at"], "lastEditedAt": comment.get("edited_at"),
+                "state": "PENDING" if review["state"] == "PENDING" else "SUBMITTED",
+                "author": {"login": review["author"]}, "replyTo": {"id": comment["reply_to"]} if comment.get("reply_to") else None}
+
+    def _thread_node(self, root: dict, members: list, page: int) -> dict:
+        chunk, info = self._cut(members, page, None)
+        outdated = bool(root.get("outdated"))
+        return {"id": root["thread_id"], "isResolved": bool(root.get("resolved")), "isOutdated": outdated,
+                "path": root["path"], "line": None if outdated else root["line"], "startLine": None if outdated else root["startLine"],
+                "originalLine": root.get("original_line", root["line"]), "originalStartLine": None,
+                "diffSide": root["side"], "subjectType": root["subjectType"],
+                "comments": {"pageInfo": info, "nodes": [self._thread_comment(r, c) for r, c in chunk]}}
+
+    def _op_CcrThreads(self, variables: dict) -> dict:
+        pr = self._check_pr(variables["owner"], variables["name"], variables["number"])
+        chunk, info = self._cut(self._threads(), variables["page"], variables.get("after"))
+        return {"repository": {"pullRequest": {"headRefOid": pr["head"], "reviewThreads": {
+            "pageInfo": info, "nodes": [self._thread_node(root, members, variables["page"]) for root, members in chunk]}}}}
+
+    def _op_CcrThreadComments(self, variables: dict) -> dict:
+        found = next(((root, members) for root, members in self._threads() if root["thread_id"] == variables["thread"]), None)
+        if found is None:
+            return {"node": None}
+        chunk, info = self._cut(found[1], variables["page"], variables["after"])
+        return {"node": {"comments": {"pageInfo": info, "nodes": [self._thread_comment(r, c) for r, c in chunk]}}}
+
+    def _op_CcrReviews(self, variables: dict) -> dict:
+        self._check_pr(variables["owner"], variables["name"], variables["number"])
+        reviews = [r for r in self.state["reviews"] if r["state"] in _SUBMITTED]
+        chunk, info = self._cut(reviews, variables["page"], variables.get("after"))
+        return {"repository": {"pullRequest": {"reviews": {"pageInfo": info, "nodes": [
+            {"id": r["id"], "databaseId": r["databaseId"], "body": r.get("body", ""), "url": r["url"], "state": r["state"],
+             "submittedAt": r.get("submitted_at"), "author": {"login": r["author"]}} for r in chunk]}}}}
+
+    def _op_CcrAddReply(self, variables: dict) -> dict:
+        data = variables["input"]
+        review = next((r for r in self.state["reviews"] if r["id"] == data.get("pullRequestReviewId")), None)
+        if review is None or review["author"] != self.state["login"] or review["state"] != "PENDING":
+            raise FakeError("fake gh: replies go into the user's own pending review only")
+        found = next((root for root, _ in self._threads() if root["thread_id"] == data.get("pullRequestReviewThreadId")), None)
+        if found is None:
+            raise FakeError("Could not resolve to a node with the global id of '%s'" % data.get("pullRequestReviewThreadId"))
+        reply = self.add_reply(review, found, data["body"])
+        return {"addPullRequestReviewThreadReply": {"comment": {"id": reply["id"], "databaseId": reply["databaseId"],
+                                                                "body": reply["body"], "url": reply["url"],
+                                                                "replyTo": {"id": found["id"]}}}}
 
     def _op_CcrReviewComments(self, variables: dict) -> dict:
         review = next((r for r in self.state["reviews"] if r["id"] == variables["review"]), None)
@@ -193,8 +268,8 @@ class FakeGitHub:
         if self.after_add_thread is not None:
             self.after_add_thread(self.state)
         if self.state.get("thread_without_comment"):
-            return {"addPullRequestReviewThread": {"thread": dict(self._thread_node(comment), comments={"nodes": []})}}
-        return {"addPullRequestReviewThread": {"thread": self._thread_node(comment)}}
+            return {"addPullRequestReviewThread": {"thread": dict(self._added_thread(comment), comments={"nodes": []})}}
+        return {"addPullRequestReviewThread": {"thread": self._added_thread(comment)}}
 
     def _diff_lines(self, path: str, side: str):
         diff = self.state["diff"]
@@ -219,9 +294,10 @@ class FakeGitHub:
         self.state["next_id"] += 1
         return self.state["next_id"]
 
-    def _new_review(self, author: str, commit: str, state: str) -> dict:
+    def _new_review(self, author: str, commit: str, state: str, body: str = "") -> dict:
         number = self._next()
         review = {"id": "PRR_%d" % number, "databaseId": number, "state": state, "author": author, "commit": commit,
+                  "body": body, "submitted_at": None if state == "PENDING" else "2026-09-01T10:%02d:00Z" % (number % 60),
                   "url": "%s#pullrequestreview-%d" % (self.state["pr"]["url"], number), "comments": []}
         self.state["reviews"].append(review)
         return review
@@ -237,9 +313,10 @@ class FakeGitHub:
                 "startSide": data.get("startSide") if data.get("startLine") else None,
                 "subjectType": data.get("subjectType", "LINE"),
                 "diffHunk": "@@ -1,1 +1,1 @@\n%s%s" % ("+" if side == "RIGHT" else "-", text) if on_line else "",
-                "url": "%s#discussion_r%d" % (self.state["pr"]["url"], number)}
+                "url": "%s#discussion_r%d" % (self.state["pr"]["url"], number), "reply_to": None,
+                "created_at": "2026-09-01T11:%02d:%02dZ" % (number // 60 % 60, number % 60)}
 
-    def _thread_node(self, comment: dict) -> dict:
+    def _added_thread(self, comment: dict) -> dict:
         return {"id": comment["thread_id"], "path": comment["path"], "line": comment["line"],
                 "startLine": comment["startLine"], "diffSide": comment["side"], "startDiffSide": comment["startSide"],
                 "subjectType": comment["subjectType"],
@@ -250,7 +327,8 @@ class FakeGitHub:
         chunk = review["comments"][offset:offset + size]
         more = offset + size < len(review["comments"])
         return {"totalCount": len(review["comments"]), "pageInfo": {"hasNextPage": more, "endCursor": str(offset + size)},
-                "nodes": [{key: c[key] for key in _COMMENT_KEYS} for c in chunk]}
+                "nodes": [dict({key: c[key] for key in _COMMENT_KEYS}, replyTo={"id": c["reply_to"]} if c.get("reply_to") else None)
+                          for c in chunk]}
 
     def _review_node(self, review: dict, page: int) -> dict:
         return {"id": review["id"], "databaseId": review["databaseId"], "state": review["state"],

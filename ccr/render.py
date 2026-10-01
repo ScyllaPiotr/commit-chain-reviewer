@@ -110,7 +110,17 @@ def _is_edited(comment: dict) -> bool:
 
 
 def _round_tag(comment: dict) -> str:
+    if comment.get("author") == "github":
+        return "on GitHub"
     return "pending" if comment.get("state") == "pending" else "R%s" % comment.get("round")
+
+
+def _author(comment: dict) -> str:
+    """``user``/``claude``, or ``@login (GitHub)`` for a comment mirrored from the pull request's discussion."""
+    if comment.get("author") != "github":
+        return clean(comment.get("author"), True)
+    github = comment.get("github") or {}
+    return "@%s (GitHub%s)" % (clean(github.get("login") or "ghost", True), ", you" if github.get("own") else "")
 
 
 # --------------------------------------------------------------------------- threads
@@ -284,9 +294,32 @@ def _head_arrow(root: dict) -> str:
     return " → HEAD %s:%s%s" % (clean(location["path"], True), line_text, _HEAD_LABELS.get(status, " (%s)" % status))
 
 
+def _mirrored(comment: dict, thread_level: bool) -> list:
+    """The labels of a comment mirrored from GitHub: thread or review, and its state there."""
+    github = comment.get("github") or {}
+    if github.get("kind") == "review":
+        return ["GitHub review (%s)" % clean(github.get("review_state") or "?", True).lower().replace("_", " ")]
+    flags = []
+    if thread_level and github.get("outdated"):
+        side = "new" if github.get("side") == "RIGHT" else "old"
+        flags.append("outdated, was %s:%s" % (side, github.get("original_line")) if github.get("original_line") else "outdated")
+    if thread_level and github.get("placement") in ("file", "review"):
+        flags.append("shown on the %s" % ("file" if github["placement"] == "file" else "whole pull request"))
+    if thread_level and github.get("resolved_on_github"):
+        flags.append("resolved there")
+    if github.get("state") == "PENDING":
+        flags.append("pending")
+    if github.get("deleted"):
+        flags.append("deleted there")
+    label = "GitHub thread" if thread_level else "on GitHub"
+    return [label + (" (%s)" % ", ".join(flags) if flags else "")] if thread_level or flags else []
+
+
 def _intent(root: dict, pr_mode: bool) -> list:
-    """What a PR-mode root is for: a question for Claude, or a GitHub comment (and whether it is posted)."""
+    """What a PR-mode root is for: a question for Claude, a GitHub comment (posted or not) or a mirrored thread."""
     github = root.get("github")
+    if root.get("author") == "github":
+        return _mirrored(root, True)
     if github:
         if github.get("status") == "posted":
             return ["GitHub comment (posted: %s)" % clean(github.get("url"), True)]
@@ -294,14 +327,26 @@ def _intent(root: dict, pr_mode: bool) -> list:
     return ["question"] if pr_mode and root.get("author") == "user" else []
 
 
+def _reply_intent(reply: dict) -> list:
+    """A reply mirrored from GitHub says whether it is pending there; the user's GitHub reply whether it is posted."""
+    github = reply.get("github")
+    if reply.get("author") == "github":
+        return _mirrored(reply, False)
+    if github:
+        if github.get("status") == "posted":
+            return ["GitHub reply (posted: %s)" % clean(github.get("url"), True)]
+        return ["GitHub reply (not posted)"]
+    return []
+
+
 def _thread_header(thread: dict, matching: set, mark: str, pr_mode: bool = False) -> str:
     root = thread["root"]
-    parts = ["[id: %s] %s" % (root["id"], clean(root["author"], True))] + _intent(root, pr_mode) + [
+    parts = ["[id: %s] %s" % (root["id"], _author(root))] + _intent(root, pr_mode) + [
         _anchor_text(root) + _head_arrow(root),
         _round_tag(root),
         "resolved" if root.get("resolved") else "unresolved",
         _plural(len(thread["replies"]), "reply", "replies"),
-        "last: %s" % clean(thread["last_author"], True),
+        "last: %s" % (_author(thread["replies"][-1] if thread["replies"] else root)),
     ]
     if _is_edited(root):
         parts.append("edited %s" % clean(root["updated_at"], True))
@@ -311,8 +356,8 @@ def _thread_header(thread: dict, matching: set, mark: str, pr_mode: bool = False
 
 
 def _reply_lines(reply: dict, matching: set, mark: str) -> list:
-    parts = ["[id: %s] %s" % (reply["id"], clean(reply["author"], True)), clean(reply.get("created_at"), True),
-             _round_tag(reply)]
+    parts = ["[id: %s] %s" % (reply["id"], _author(reply))] + _reply_intent(reply) + [
+        clean(reply.get("created_at"), True), _round_tag(reply)]
     if _is_edited(reply):
         parts.append("edited %s" % clean(reply["updated_at"], True))
     if reply["id"] in matching:

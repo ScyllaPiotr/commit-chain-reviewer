@@ -21,13 +21,14 @@ import subprocess
 from . import gitx
 from .gitx import GitError
 
-__all__ = ["GitHubError", "parse_pr", "pr_label", "run_gh", "PullRequest", "post_comment"]
+__all__ = ["GitHubError", "parse_pr", "pr_label", "run_gh", "PullRequest", "post_comment", "fetch_discussion"]
 
 GH_TIMEOUT = 60
 DEFAULT_HOST = "github.com"
 PAGE_SIZE = 100
 SUBMITTED_STATES = "[COMMENTED, APPROVED, CHANGES_REQUESTED, DISMISSED]"
-_COMMENT_FIELDS = "id databaseId body path line startLine subjectType diffHunk url"
+_COMMENT_FIELDS = "id databaseId body path line startLine subjectType diffHunk url replyTo { id }"
+_THREAD_COMMENT_FIELDS = "id databaseId body url createdAt lastEditedAt state author { login } replyTo { id }"
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _URL_RE = re.compile(r"^https?://([A-Za-z0-9.-]+(?::\d+)?)/([^/\s]+)/([^/\s]+)/pull/(\d+)(?:[/?#]\S*)?$")
 _SHORT_RE = re.compile(r"^([^/\s#]+)/([^/\s#]+)#(\d+)$")
@@ -55,11 +56,45 @@ _MORE_COMMENTS = """query CcrReviewComments($review: ID!, $page: Int!, $after: S
     }
   }
 }""" % _COMMENT_FIELDS
+_THREADS = """query CcrThreads($owner: String!, $name: String!, $number: Int!, $page: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid
+      reviewThreads(first: $page, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id isResolved isOutdated path line startLine originalLine originalStartLine diffSide subjectType
+          comments(first: $page) { pageInfo { hasNextPage endCursor } nodes { %s } }
+        }
+      }
+    }
+  }
+}""" % _THREAD_COMMENT_FIELDS
+_THREAD_COMMENTS = """query CcrThreadComments($thread: ID!, $page: Int!, $after: String!) {
+  node(id: $thread) {
+    ... on PullRequestReviewThread {
+      comments(first: $page, after: $after) { pageInfo { hasNextPage endCursor } nodes { %s } }
+    }
+  }
+}""" % _THREAD_COMMENT_FIELDS
+_REVIEWS = """query CcrReviews($owner: String!, $name: String!, $number: Int!, $page: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviews(first: $page, after: $after, states: %s) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id databaseId body url state submittedAt author { login } }
+      }
+    }
+  }
+}""" % SUBMITTED_STATES
 _START_REVIEW = """mutation CcrStartReview($input: AddPullRequestReviewInput!) {
   addPullRequestReview(input: $input) { pullRequestReview { id databaseId state url commit { oid } } }
 }"""
 _DISCARD_REVIEW = """mutation CcrDiscardReview($input: DeletePullRequestReviewInput!) {
   deletePullRequestReview(input: $input) { pullRequestReview { id } }
+}"""
+_ADD_REPLY = """mutation CcrAddReply($input: AddPullRequestReviewThreadReplyInput!) {
+  addPullRequestReviewThreadReply(input: $input) { comment { id databaseId body url replyTo { id } } }
 }"""
 _ADD_THREAD = """mutation CcrAddThread($input: AddPullRequestReviewThreadInput!) {
   addPullRequestReviewThread(input: $input) {
@@ -202,6 +237,51 @@ class PullRequest:
             raise GitHubError("it is no longer an empty pending review")
         self.graphql(_DISCARD_REVIEW, {"input": {"pullRequestReviewId": review_id}})
 
+    def add_reply(self, review_id: str, thread_id: str, body: str) -> dict:
+        """Add a reply to a review thread, inside the pending review; returns GitHub's comment."""
+        payload = {"pullRequestReviewId": review_id, "pullRequestReviewThreadId": thread_id, "body": body}
+        comment = (self.graphql(_ADD_REPLY, {"input": payload}).get("addPullRequestReviewThreadReply") or {}).get("comment")
+        if not comment:
+            raise GitHubError("GitHub answered without the reply")
+        return comment
+
+    def _pages(self, document: str, variables: dict, connection_of) -> list:
+        """Every node of a paged connection: ``connection_of(data)`` picks the connection out of each answer."""
+        nodes, after = [], None
+        while True:
+            connection = connection_of(self.graphql(document, dict(variables, page=PAGE_SIZE, after=after)))
+            nodes += connection["nodes"]
+            if not connection["pageInfo"]["hasNextPage"]:
+                return nodes
+            after = connection["pageInfo"]["endCursor"]
+
+    def discussion(self) -> dict:
+        """The pull request's review threads (every comment) and the bodies of its submitted reviews."""
+        where = {"owner": self.pr["owner"], "name": self.pr["repo"], "number": self.pr["number"]}
+        head = {}
+
+        def threads_of(data):
+            pr = (data.get("repository") or {}).get("pullRequest")
+            if pr is None:
+                raise GitHubError("pull request %s not found (or not visible to %s)" % (pr_label(self.pr), self.login()))
+            head["oid"] = pr["headRefOid"]
+            return pr["reviewThreads"]
+
+        threads = self._pages(_THREADS, where, threads_of)
+        for thread in threads:
+            connection = thread["comments"]
+            comments = list(connection["nodes"])
+            while connection["pageInfo"]["hasNextPage"]:
+                data = self.graphql(_THREAD_COMMENTS, {"thread": thread["id"], "page": PAGE_SIZE,
+                                                       "after": connection["pageInfo"]["endCursor"]})
+                connection = (data.get("node") or {}).get("comments")
+                if connection is None:
+                    raise GitHubError("review thread %s went away while ccr was reading it" % thread["id"])
+                comments += connection["nodes"]
+            thread["comments"] = comments
+        reviews = self._pages(_REVIEWS, where, lambda data: data["repository"]["pullRequest"]["reviews"])
+        return {"head": head["oid"], "threads": threads, "reviews": reviews}
+
     def add_thread(self, review_id: str, target: dict, body: str) -> dict:
         """Add one review thread to the pending review; returns GitHub's thread (with its first comment)."""
         payload = {"pullRequestReviewId": review_id, "path": target["path"], "body": body,
@@ -280,28 +360,32 @@ def _abandon(client: PullRequest, review: dict, reason: str) -> GitHubError:
 def post_comment(client: PullRequest, target: dict, body: str, repo=None) -> dict:
     """Post ``body`` verbatim at ``target`` into the user's pending review on the pull request.
 
-    ``target`` is the store's ``github_target`` (commit, base, path, subject type, line, side, lines, ...).
-    Returns ``{"record", "created_review", "already", "notes", "problems"}``: ``record`` is what ccr remembers
-    about the posted comment; ``already`` means an identical comment was found in the pending review and nothing
-    was added; ``problems`` lists what could not be confirmed once the comment was on GitHub (it is posted
-    anyway).  Raises GitHubError only when nothing was posted.
+    ``target`` is the store's ``github_target``: a new thread (commit, base, path, subject type, line, side, lines,
+    ...) or, with ``subject_type`` ``REPLY``, a reply in the review thread ``thread_id`` whose first comment is
+    ``reply_to``.  Returns ``{"record", "created_review", "already", "notes", "problems"}``: ``record`` is what
+    ccr remembers about the posted comment; ``already`` means an identical comment was found in the pending review
+    and nothing was added; ``problems`` lists what could not be confirmed once the comment was on GitHub (it is
+    posted anyway).  Raises GitHubError only when nothing was posted.
     """
+    reply = target["subject_type"] == "REPLY"
     before = client.snapshot()
     pr, review = before["pr"], before["review"]
     notes, problems = [], []
     _check_commit(client, pr, target["commit"], notes)
-    merge_base = _merge_base(client, repo, pr["base"], target["commit"])
-    if merge_base != target["base"]:
-        raise GitHubError("the pull request diff starts at %s but ccr reviews %s..%s; restart ccr with --range %s..HEAD"
-                          % (merge_base[:gitx.SHORT_SHA_LEN], target["base"][:gitx.SHORT_SHA_LEN],
-                             target["commit"][:gitx.SHORT_SHA_LEN], merge_base))
-    if review is not None and review["commit"] != target["commit"]:
-        raise GitHubError("your pending review on %s is on commit %s but ccr reviews %s; submit or discard it on "
-                          "GitHub first, or review %s in ccr" % (pr_label(client.pr), (review["commit"] or "?")[:10],
-                                                                 target["commit"][:10], (review["commit"] or "?")[:10]))
+    if not reply:  # a reply is placed by its thread, not by lines of the diff or the commit of the review
+        merge_base = _merge_base(client, repo, pr["base"], target["commit"])
+        if merge_base != target["base"]:
+            raise GitHubError("the pull request diff starts at %s but ccr reviews %s..%s; restart ccr with --range "
+                              "%s..HEAD" % (merge_base[:gitx.SHORT_SHA_LEN], target["base"][:gitx.SHORT_SHA_LEN],
+                                            target["commit"][:gitx.SHORT_SHA_LEN], merge_base))
+        if review is not None and review["commit"] != target["commit"]:
+            raise GitHubError("your pending review on %s is on commit %s but ccr reviews %s; submit or discard it on "
+                              "GitHub first, or review %s in ccr" % (pr_label(client.pr), (review["commit"] or "?")[:10],
+                                                                     target["commit"][:10], (review["commit"] or "?")[:10]))
     if review is not None:
-        duplicate = next((c for c in review["comments"]
-                          if _normal(c["body"]) == _normal(body) and _same_place(c, target)), None)
+        same = (lambda c: (c.get("replyTo") or {}).get("id") == target["reply_to"]) if reply \
+            else (lambda c: _same_place(c, target))
+        duplicate = next((c for c in review["comments"] if _normal(c["body"]) == _normal(body) and same(c)), None)
         if duplicate is not None:
             return {"record": _record(review, None, duplicate, target), "created_review": False, "already": True,
                     "notes": notes, "problems": problems}
@@ -312,7 +396,11 @@ def post_comment(client: PullRequest, target: dict, body: str, repo=None) -> dic
             raise _abandon(client, review, "GitHub started the pending review on %s instead of %s"
                            % ((review["commit"] or "?")[:10], target["commit"][:10]))
     try:
-        thread = client.add_thread(review["id"], target, body)
+        if reply:
+            comment = client.add_reply(review["id"], target["thread_id"], body)
+            thread = {"id": target["thread_id"], "comments": {"nodes": [comment]}}
+        else:
+            thread = client.add_thread(review["id"], target, body)
     except GitHubError as exc:
         if created:
             raise _abandon(client, review, str(exc)) from None
@@ -322,7 +410,11 @@ def post_comment(client: PullRequest, target: dict, body: str, repo=None) -> dic
     comment = nodes[0] if nodes else {"id": None, "databaseId": None, "url": review["url"], "body": body}
     if not nodes:
         problems.append("GitHub did not return the new comment; ccr keeps the review's address for it")
-    if pr["head"] == target["commit"]:  # on an older commit GitHub may report the place on the newer diff
+    if reply:
+        if (comment.get("replyTo") or {}).get("id") != target["reply_to"]:
+            problems.append("GitHub filed the reply under %r, not under the thread's first comment"
+                            % (comment.get("replyTo") or {}).get("id"))
+    elif pr["head"] == target["commit"]:  # on an older commit GitHub may report the place on the newer diff
         expected = {"path": target["path"], "subjectType": target["subject_type"]}
         if target["subject_type"] == "LINE":
             expected.update(line=target["line"], diffSide=target["side"], startLine=target.get("start_line") or None)
@@ -335,6 +427,28 @@ def post_comment(client: PullRequest, target: dict, body: str, repo=None) -> dic
         problems.append("could not re-read the pending review to confirm the comment: %s" % exc)
     return {"record": _record(review, thread, comment, target), "created_review": created, "already": False,
             "notes": notes, "problems": problems}
+
+
+def fetch_discussion(client: PullRequest) -> dict:
+    """What ``POST /api/github/sync`` takes: the viewer, the pull request head, its review threads and the
+    non-empty bodies of its submitted reviews, in ccr's shape (section 10.5)."""
+    raw = client.discussion()
+
+    def comment(node):
+        return {"id": node["id"], "database_id": node["databaseId"], "body": node["body"], "url": node["url"],
+                "created_at": node["createdAt"], "edited_at": node.get("lastEditedAt"), "state": node["state"],
+                "login": (node.get("author") or {}).get("login") or "ghost",
+                "reply_to": (node.get("replyTo") or {}).get("id")}
+
+    threads = [{"id": t["id"], "path": t["path"], "line": t["line"], "start_line": t["startLine"],
+                "original_line": t["originalLine"], "original_start_line": t["originalStartLine"],
+                "side": t["diffSide"], "subject_type": t["subjectType"], "outdated": t["isOutdated"],
+                "resolved": t["isResolved"], "comments": [comment(c) for c in t["comments"]]}
+               for t in raw["threads"] if t["comments"]]
+    reviews = [{"id": r["id"], "database_id": r["databaseId"], "body": r["body"], "url": r["url"], "state": r["state"],
+                "submitted_at": r["submittedAt"], "login": (r.get("author") or {}).get("login") or "ghost"}
+               for r in raw["reviews"] if (r.get("body") or "").strip()]
+    return {"viewer": client.login(), "head": raw["head"], "threads": threads, "reviews": reviews}
 
 
 def _recheck(client: PullRequest, before: dict, review: dict, comment: dict, body: str) -> list:
@@ -364,7 +478,7 @@ def _recheck(client: PullRequest, before: dict, review: dict, comment: dict, bod
 def _record(review: dict, thread, comment: dict, target: dict) -> dict:
     """What the store keeps about a posted GitHub comment (``posted_at`` is added by the store)."""
     return {"url": comment["url"], "comment_id": comment["databaseId"], "node_id": comment["id"],
-            "thread_id": thread["id"] if thread else None, "review_id": review["id"],
+            "thread_id": thread["id"] if thread else target.get("thread_id"), "review_id": review["id"],
             "path": target["path"], "subject_type": target["subject_type"], "line": target.get("line"),
             "side": target.get("side"), "start_line": target.get("start_line"),
             "start_side": target.get("start_side"), "commit": target["commit"]}

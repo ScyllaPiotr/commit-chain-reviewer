@@ -37,6 +37,7 @@ WAIT_GONE_SECONDS = 30.0
 UI_NOTICE_SECONDS = 30.0
 DEFAULT_LOG_LINES = 50
 AUTHORS = ("user", "claude")
+COMMENT_AUTHORS = AUTHORS + ("github",)  # "github": mirrored from the pull request's discussion (PR mode)
 DEFAULT_CLI_AUTHOR = "claude"
 _FULL_SHA_RE = re.compile(r"\b[0-9a-f]{40}(?:[0-9a-f]{24})?\b")
 _BATCH_HEADING_RE = re.compile(r"^##\s+(\S+?)(?:\s+\[resolve\])?\s*$")
@@ -190,7 +191,7 @@ def build_parser() -> Parser:
     which.add_argument("--all", action="store_true", help="every thread (default)")
     comments.add_argument("--unresolved", action="store_true")
     comments.add_argument("--unanswered", action="store_true", help="unresolved threads whose last comment is by user")
-    comments.add_argument("--author", choices=AUTHORS)
+    comments.add_argument("--author", choices=COMMENT_AUTHORS)
     comments.add_argument("--commit", metavar="SHA")
     comments.add_argument("--path", metavar="P")
     outdated = comments.add_mutually_exclusive_group()
@@ -234,8 +235,10 @@ def build_parser() -> Parser:
     cover = add("cover", "set the cover letter (Markdown description of the whole change) of the running review")
     _add_body_options(cover)
 
-    gh_post = add("gh-post", "post GitHub comments verbatim into your pending review on the linked pull request "
-                  "(starting it when there is none; it is never submitted)")
+    add("gh-sync", "mirror the linked pull request's review threads and review bodies from GitHub into the review")
+
+    gh_post = add("gh-post", "post GitHub comments and replies verbatim into your pending review on the linked pull "
+                  "request (starting it when there is none; it is never submitted)")
     gh_post.add_argument("ids", nargs="+", metavar="ID")
     gh_post.add_argument("--dry-run", action="store_true", dest="dry_run",
                          help="show where each comment would go and what it says; touch nothing")
@@ -615,7 +618,8 @@ def report_round(client: Client, number: int, as_json: bool) -> int:
         return EXIT_OK
     verdict = round_info.get("verdict")
     label = "" if verdict in (None, "", "comment") else " — %s" % verdict  # "comment" = no verdict
-    to_post = sum(1 for t in selected if (t["root"].get("github") or {}).get("status") == "local")
+    to_post = sum(1 for t in selected for c in [t["root"]] + t["replies"]
+                  if (c.get("github") or {}).get("status") == "local" and c.get("state") != "pending")
     todo = " — %d GitHub comment%s to check and post" % (to_post, "" if to_post == 1 else "s") if to_post else ""
     out("ccr: round %d%s — %d new comments in %d threads%s" % (number, label, len(round_info["comment_ids"]),
                                                                len(selected), todo))
@@ -892,7 +896,9 @@ def cmd_move(args) -> int:
 
 
 def _github_where(target: dict) -> str:
-    path = render.clean(target["path"], True)
+    path = render.clean(target["path"] or "the pull request", True)
+    if target["subject_type"] == "REPLY":
+        return "reply to @%s on %s" % (render.clean(target.get("thread_author"), True), path)
     if target["subject_type"] == "FILE":
         return "%s (file)" % path
     span = "%d-%d" % (target["start_line"], target["line"]) if target.get("start_line") else str(target["line"])
@@ -903,6 +909,8 @@ def print_github_plan(comment_id: str, target: dict, say) -> None:
     """``gh-post --dry-run``: where on the pull request diff a comment would go, the lines there, its verbatim body."""
     say("%s: would post to %s %s, commit %s" % (comment_id, github.pr_label(target["pr"]), _github_where(target),
                                                  target["commit"][:gitx.SHORT_SHA_LEN]))
+    if target["subject_type"] == "REPLY":
+        say("  thread: %s" % render.clean(target.get("thread_url"), True))
     for row in target["lines"]:
         say("  %6d | %s" % (row["line"], render.clean(row["text"])))
     say("  body:")
@@ -937,6 +945,21 @@ def post_one(client: Client, remote, review: dict, comment_id: str, dry_run: boo
         say("  warning: %s" % problem)
     return {"id": comment_id, "ok": not result["problems"], "posted": True, "comment": updated,
             "notes": result["notes"], "problems": result["problems"]}
+
+
+def cmd_gh_sync(args) -> int:
+    client, _, _ = connect(args)
+    pr = client.get("/api/review").get("pr")
+    if not pr:
+        raise CliError("the review is not linked to a GitHub pull request; start ccr with --pr URL")
+    result = client.post("/api/github/sync", github.fetch_discussion(github.PullRequest(pr)))
+    if args.json:
+        print_json(result)
+    else:
+        out("ccr: %s: %d review threads, %d review bodies; %d comments added, %d updated, %d removed" % (
+            github.pr_label(pr), result["threads"], result["reviews"], result["added"], result["updated"],
+            result["removed"]))
+    return EXIT_OK
 
 
 def cmd_gh_post(args) -> int:
@@ -982,7 +1005,7 @@ def cmd_export(args) -> int:
 COMMANDS = {
     "start": cmd_start, "serve": cmd_serve, "stop": cmd_stop, "status": cmd_status, "sessions": cmd_sessions,
     "logs": cmd_logs, "open": cmd_open, "reload": cmd_reload, "comments": cmd_comments, "wait": cmd_wait,
-    "cover": cmd_cover, "gh-post": cmd_gh_post,
+    "cover": cmd_cover, "gh-post": cmd_gh_post, "gh-sync": cmd_gh_sync,
     "reply": cmd_reply, "comment": cmd_comment, "resolve": cmd_resolve, "unresolve": cmd_unresolve,
     "edit": cmd_edit, "delete": cmd_delete, "move": cmd_move, "export": cmd_export,
 }

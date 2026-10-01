@@ -95,6 +95,16 @@
    *  or a GitHub comment for the user's pending review there. */
   const prMode = () => Boolean(state.review && state.review.pr);
   const isPosted = (c) => Boolean(c && c.github && c.github.status === 'posted');
+  /** A comment mirrored from the pull request's discussion on GitHub (spec 10.5): read-only, by c.github.login. */
+  const isMirrored = (c) => Boolean(c && c.author === 'github');
+  /** The GitHub review thread a root is (mirrored, or posted from ccr), so a reply to it can go to GitHub too. */
+  const githubThreadOf = (root) => (root && root.github && ['remote', 'posted'].includes(root.github.status)
+    && root.github.thread_id && !root.github.deleted ? root.github.thread_id : null);
+  /** A mirrored root that starts collapsed, as GitHub shows it: an outdated thread, a review body, a deleted one. */
+  const isQuiet = (root) => isMirrored(root) && Boolean(root.github.outdated || root.github.kind === 'review' || root.github.deleted);
+  /** In PR mode a comment is part of the discussion on GitHub (mirrored, or the user's GitHub comment or reply) or of
+   *  the exchange with Claude (questions and answers); the two get different backgrounds, even in one thread. */
+  const channelAttr = (github) => (prMode() ? ` data-channel="${github ? 'github' : 'claude'}"` : '');
 
   function statsHtml(add, del) {
     return `<span class="stats"><span class="stat-add">+${esc(add)}</span><span class="stat-del">−${esc(del)}</span></span>`;
@@ -1452,7 +1462,9 @@
   function threadMembers(rootId) {
     const out = [];
     for (const c of state.comments.values()) if (c.id === rootId || c.parent_id === rootId) out.push(c);
-    out.sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : 1));
+    // the root leads even when a reply carries the same or an earlier time (comments mirrored from GitHub can)
+    out.sort((a, b) => (a.id === rootId ? -1 : b.id === rootId ? 1 : a.created_at < b.created_at ? -1
+      : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : 1));
     return out;
   }
 
@@ -1480,7 +1492,8 @@
   }
 
   /** "New" marks comments the user has not seen yet; the user's own comments never count. */
-  const isUnseen = (c) => c.author !== 'user' && c.created_at > state.seenUntil;
+  const isUnseen = (c) => c.author !== 'user' && c.created_at > state.seenUntil
+    && (!isMirrored(c) || c.created_at > ((state.review && state.review.pr && state.review.pr.first_synced_at) || ''));
 
   function deriveCounts() {
     const byCommit = new Map(); const byFile = new Map();
@@ -1539,6 +1552,12 @@
         const resolved = [...threads].filter((id) => { const r = state.comments.get(id); return r && r.resolved; }).length;
         const [first] = threads;
         toast(`Claude replied to ${threads.size} thread${threads.size === 1 ? '' : 's'}${resolved ? ` (${resolved} resolved)` : ''}`, 'info',
+          { action: { label: 'Show', fn: () => navigateTo({ threadId: first }) }, timeout: 10000 });
+      }
+      const arrived = list.filter((c) => isMirrored(c) && !prevIds.has(c.id) && isUnseen(c));
+      if (arrived.length) {
+        const first = arrived[0].parent_id || arrived[0].id;
+        toast(`${arrived.length} new comment${arrived.length === 1 ? '' : 's'} from GitHub`, 'info',
           { action: { label: 'Show', fn: () => navigateTo({ threadId: first }) }, timeout: 10000 });
       }
       const posted = list.filter((c) => isPosted(c) && wasLocal.has(c.id)).length;
@@ -1743,10 +1762,25 @@
     return '<span class="tag tag-github" title="A GitHub comment: once you submit, Claude checks it and posts it verbatim to your pending review on GitHub">GitHub · not posted</span>';
   }
 
+  /** The tags of a comment mirrored from GitHub: a link to it, and what GitHub says about it and its thread. */
+  function mirroredTagsHtml(c, root) {
+    const g = c.github;
+    const tags = [`<a class="tag tag-github is-posted" href="${esc(g.url)}" target="_blank" rel="noopener noreferrer" title="On GitHub; it changes there">GitHub ↗</a>`];
+    if (root && g.kind === 'review') tags.push(`<span class="tag tag-github">review · ${esc(String(g.review_state || '').toLowerCase().replace(/_/g, ' '))}</span>`);
+    if (root && g.outdated) tags.push(`<span class="tag tag-outdated" title="Outdated on GitHub${g.original_line ? ` — it was on ${g.side === 'LEFT' ? 'old' : 'new'} line ${esc(g.original_line)} of an earlier version` : ''}">outdated</span>`);
+    if (root && g.resolved_on_github) tags.push('<span class="tag tag-round" title="Resolved on GitHub">resolved there</span>');
+    if (g.state === 'PENDING') tags.push('<span class="tag tag-pending" title="In a pending review on GitHub: nobody else sees it yet">pending there</span>');
+    if (root && g.deleted) tags.push('<span class="tag tag-outdated" title="Gone from GitHub; kept here for the replies in ccr">deleted there</span>');
+    return tags.join('');
+  }
+
   function commentTags(c, root) {
     const tags = [];
-    if (root && c.github) tags.push(githubTagHtml(c));
-    else if (root && prMode() && c.author === 'user') tags.push('<span class="tag tag-question" title="A question for Claude: it is answered here, nothing goes to GitHub">Question</span>');
+    if (isMirrored(c)) tags.push(mirroredTagsHtml(c, root));
+    else if (c.github) tags.push(githubTagHtml(c));
+    else if (prMode() && c.author === 'user' && (root || githubThreadOf(rootOf(c)))) {
+      tags.push('<span class="tag tag-question" title="A question for Claude: it is answered here, nothing goes to GitHub">Question</span>');
+    }
     if (c.state === 'pending') tags.push(`<span class="tag tag-pending" title="${esc(NEW_DOT_TITLE)}">Pending</span>`);
     else if (c.round != null) tags.push(`<span class="tag tag-round" title="Submitted in round ${esc(c.round)}">R${esc(c.round)}</span>`);
     if (c.updated_at > c.created_at) tags.push(`<span class="tag tag-edited" title="Edited ${esc(fmtAbs(c.updated_at))}">edited</span>`);
@@ -1763,12 +1797,12 @@
   function commentHtml(c, root) {
     const editKey = `edit:${c.id}`;
     const editing = state.openEditors.has(editKey);
-    const name = c.author === 'claude' ? 'Claude' : 'user';
-    return `<div class="comment" data-id="${esc(c.id)}" data-author="${esc(c.author)}">
-      <div class="comment-meta">${avatarHtml(c.author, name)}<span class="author">${esc(name)}</span>${timeHtml(c.created_at)}${commentTags(c, root)}
+    const name = c.author === 'claude' ? 'Claude' : isMirrored(c) ? `@${c.github.login}${c.github.own ? ' (you)' : ''}` : 'user';
+    return `<div class="comment" data-id="${esc(c.id)}" data-author="${esc(c.author)}"${channelAttr(c.github)}>
+      <div class="comment-meta">${avatarHtml(c.author, isMirrored(c) ? c.github.login : name)}<span class="author">${esc(name)}</span>${timeHtml(c.created_at)}${commentTags(c, root)}
         <div class="comment-actions" role="group" aria-label="Comment actions">
-          ${isPosted(c) ? '' : '<button type="button" class="act-edit" aria-label="Edit comment">Edit</button>'}
-          <button type="button" class="act-delete" aria-label="Delete comment">Delete</button>
+          ${isPosted(c) || isMirrored(c) ? '' : '<button type="button" class="act-edit" aria-label="Edit comment">Edit</button>'}
+          ${isMirrored(c) ? '' : '<button type="button" class="act-delete" aria-label="Delete comment">Delete</button>'}
           <button type="button" class="act-reply" aria-label="Reply to thread">Reply</button>
           ${root ? `<button type="button" class="act-resolve" aria-label="${c.resolved ? 'Unresolve' : 'Resolve'} thread">${c.resolved ? 'Unresolve' : 'Resolve'}</button>` : ''}
         </div>
@@ -1783,20 +1817,23 @@
     const members = threadMembers(rootId);
     const newest = members.reduce((m, c) => (c.created_at > m ? c.created_at : m), '');
     const hasNew = members.some(isUnseen);
-    const collapsed = root.resolved && !hasNew && !state.expandedResolved.has(rootId);
+    const collapsed = (root.resolved || isQuiet(root)) && !hasNew && !state.expandedResolved.has(rootId);
     const a = renderAnchor(root) || root.anchor || {}; // range rows follow the projected location (7.3)
     const cls = ['thread', root.resolved ? 'is-resolved' : '', hasNew ? 'has-new' : '', state.currentThread === rootId ? 'is-current' : '', state.orphans.has(rootId) ? 'is-orphan' : ''].filter(Boolean).join(' ');
     const rangeAttrs = a.kind === 'line' && a.start_line ? ` data-range-start="${esc(a.start_line)}" data-range-end="${esc(a.line)}" data-range-side="${esc(a.side)}"` : '';
     let inner;
     if (collapsed) {
-      inner = `<div class="resolved-line"><span class="tick">✓</span> Resolved · ${members.length} comment${members.length === 1 ? '' : 's'}${isPosted(root) ? ' ' + githubTagHtml(root) : ''} <button type="button" class="link-btn btn-show-resolved">Show</button></div>`;
+      const what = root.resolved ? '<span class="tick">✓</span> Resolved'
+        : `GitHub ${root.github.kind === 'review' ? 'review' : 'thread'} by @${esc(root.github.login)}${root.github.outdated ? ' · outdated' : ''}`;
+      const link = isPosted(root) ? ' ' + githubTagHtml(root) : isMirrored(root) ? ' ' + mirroredTagsHtml(root, false) : '';
+      inner = `<div class="resolved-line">${what} · ${members.length} comment${members.length === 1 ? '' : 's'}${link} <button type="button" class="link-btn btn-show-resolved">Show</button></div>`;
     } else {
       inner = a.kind === 'line' && a.start_line ? `<div class="range-note">Lines ${esc(a.start_line)}–${esc(a.line)} (${esc(a.side)} side)</div>` : '';
       inner += members.map((c) => commentHtml(c, c.id === rootId)).join('');
       if (!commentsDisabled()) {
         inner += `<div class="thread-foot"><button type="button" class="btn-reply${hasDraft(`reply:${rootId}`) ? ' has-draft' : ''}" aria-label="Reply">Reply</button>
           <button type="button" class="btn-resolve-thread" aria-label="${root.resolved ? 'Unresolve' : 'Resolve'} thread">${root.resolved ? 'Unresolve' : 'Resolve'}</button>
-          ${root.resolved ? '<button type="button" class="link-btn btn-hide-resolved">Hide</button>' : ''}</div>`;
+          ${root.resolved || isQuiet(root) ? '<button type="button" class="link-btn btn-hide-resolved">Hide</button>' : ''}</div>`;
       }
       if (state.openEditors.has(`reply:${rootId}`)) inner += `<div class="editor-block">${editorHtml(`reply:${rootId}`)}</div>`;
     }
@@ -1805,10 +1842,12 @@
 
   /* ---- editors */
 
-  /** What a new comment is in PR mode: 'github' (a line or file only) or 'question'; null outside PR mode and for
-   *  replies and edits. */
+  /** What a new comment or reply is in PR mode: 'github' (a root on a line or file, or a reply in a GitHub review
+   *  thread) or 'question'; null outside PR mode, for edits and for replies in threads that are not on GitHub. */
   function editorIntent(entry) {
-    if (!prMode() || entry.mode !== 'new') return null;
+    if (!prMode()) return null;
+    if (entry.mode === 'reply') return githubThreadOf(state.comments.get(entry.rootId)) ? (entry.intent === 'github' ? 'github' : 'question') : null;
+    if (entry.mode !== 'new') return null;
     const kind = entry.anchor && entry.anchor.kind;
     return (kind === 'line' || kind === 'file') && entry.intent === 'github' ? 'github' : 'question';
   }
@@ -1821,14 +1860,16 @@
     const initial = draft != null ? draft : original;
     const intent = editorIntent(entry);
     const github = intent === 'github' || Boolean(editing && editing.github);
-    const label = entry.mode === 'edit' ? 'Save' : entry.mode === 'reply' ? 'Reply' : intent === 'github' ? 'Add GitHub comment'
-      : intent === 'question' ? 'Ask' : 'Add comment';
-    const placeholder = entry.mode === 'reply' ? 'Reply (Markdown)…' : github ? 'GitHub comment, posted verbatim to your pending review once Claude has checked it (Markdown)…'
-      : intent === 'question' ? 'Ask Claude (Markdown)…' : 'Leave a comment (Markdown)…';
+    const reply = entry.mode === 'reply';
+    const what = reply ? 'GitHub reply' : 'GitHub comment';
+    const label = entry.mode === 'edit' ? 'Save' : intent === 'github' ? `Add ${what}` : intent === 'question' ? 'Ask'
+      : reply ? 'Reply' : 'Add comment';
+    const placeholder = github ? `${what}, posted verbatim to your pending review once Claude has checked it (Markdown)…`
+      : intent === 'question' ? 'Ask Claude (Markdown)…' : reply ? 'Reply (Markdown)…' : 'Leave a comment (Markdown)…';
     const kind = entry.anchor && entry.anchor.kind;
     const intentButton = (name, text) => `<button type="button" class="intent-btn${intent === name ? ' is-active' : ''}" data-intent="${name}" aria-pressed="${intent === name}">${text}</button>`;
-    const intentSwitch = intent && (kind === 'line' || kind === 'file')
-      ? `<div class="editor-intent" role="group" aria-label="What this comment is">${intentButton('question', 'Question')}${intentButton('github', 'GitHub comment')}</div>` : '';
+    const intentSwitch = intent && (reply || kind === 'line' || kind === 'file')
+      ? `<div class="editor-intent" role="group" aria-label="What this comment is">${intentButton('question', 'Question')}${intentButton('github', what)}</div>` : '';
     let info = '';
     if (entry.anchor && entry.anchor.kind === 'line') {
       const a = entry.anchor;
@@ -1839,7 +1880,7 @@
     const tab = entry.tab === 'preview' ? 'preview' : 'write';
     const tabHtml = (name, label) => `<button type="button" class="editor-tab${tab === name ? ' is-active' : ''}" data-tab="${name}" role="tab" aria-selected="${tab === name}">${label}</button>`;
     const hint = github ? 'Markdown · posted verbatim to your pending GitHub review once Claude has checked it' : 'Markdown · Ctrl+Enter to post · Esc to cancel';
-    return `<form class="comment-editor" data-key="${esc(key)}" data-mode="${esc(entry.mode)}" data-tab="${tab}"${github ? ' data-intent="github"' : ''} novalidate>
+    return `<form class="comment-editor" data-key="${esc(key)}" data-mode="${esc(entry.mode)}" data-tab="${tab}"${github ? ' data-intent="github"' : ''}${channelAttr(github)} novalidate>
       <div class="editor-head"><div class="editor-tabs" role="tablist">${tabHtml('write', 'Write')}${tabHtml('preview', 'Preview')}</div>${intentSwitch}</div>
       <textarea rows="3" placeholder="${placeholder}" aria-label="Comment text"${tab === 'preview' ? ' hidden' : ''}>${esc(initial)}</textarea>
       <div class="md-preview md"${tab === 'preview' ? '' : ' hidden'}>${tab === 'preview' ? previewHtml(initial) : ''}</div>
@@ -1929,10 +1970,10 @@
   function setEditorIntent(form, intent) {
     const key = form && form.dataset.key;
     const entry = key && state.openEditors.get(key);
-    if (!entry || entry.mode !== 'new' || entry.intent === intent) return;
+    if (!entry || (entry.mode !== 'new' && entry.mode !== 'reply') || entry.intent === intent) return;
     entry.intent = intent;
     saveDraft(key, form.querySelector('textarea').value);
-    patchKey(key);
+    if (entry.mode === 'reply') patchThreadById(entry.rootId); else patchKey(key);
     focusEditor(key);
   }
 
@@ -2004,7 +2045,8 @@
       }
       else if (entry.mode === 'reply') {
         const root = state.comments.get(entry.rootId);
-        c = await api('/api/comments', { method: 'POST', body: { body, parent_id: entry.rootId, anchor: root ? root.anchor : undefined } });
+        const github = editorIntent(entry) === 'github' ? { github: true } : {};
+        c = await api('/api/comments', { method: 'POST', body: Object.assign({ body, parent_id: entry.rootId, anchor: root ? root.anchor : undefined }, github) });
       } else c = await api(`/api/comments/${encodeURIComponent(entry.id)}`, { method: 'PATCH', body: { body } });
       state.inflight.delete(key);
       clearTimeout(draftTimers.get(key));
@@ -2211,8 +2253,10 @@
     if (st.server && state.startedAt && st.server.started_at !== state.startedAt) { await fullReinit(); return; }
     const genChanged = st.generation !== state.generation;
     const roundsChanged = state.review && typeof st.rounds === 'number' && st.rounds !== state.review.rounds.length;
+    // a GitHub sync changes review.pr (the sync times New dots depend on) without a new generation
+    const syncChanged = state.review && (st.pr_synced_at || null) !== ((state.review.pr || {}).synced_at || null);
     const prev = state.review;
-    if (genChanged || roundsChanged) applyReview(await api('/api/review'));
+    if (genChanged || roundsChanged || syncChanged) applyReview(await api('/api/review'));
     if (await loadComments(projectView())) state.version = Math.max(state.version, st.version || 0);
     if (genChanged) {
       await reloadCurrentView();

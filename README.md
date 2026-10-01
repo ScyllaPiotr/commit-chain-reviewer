@@ -122,6 +122,7 @@ merge-base <sha>`. Empty ranges without `--worktree` and ranges above 2000 commi
 | `ccr reply ID (BODY \| --file F \| -) [--resolve] [--as claude\|user] [--force]` | Reply to a thread; `--resolve` resolves it after a successful reply. An identical reply by the same author is refused unless `--force`. |
 | `ccr reply --batch (FILE \| -) [--json]` | Post many replies at once, from JSON (`[{"id","body","resolve"?}, …]`) or Markdown (`## <id> [resolve]` headings, each followed by its body). Prints `<id>: replied[, resolved]` or `<id>: ERROR …` per item, continues on error, exit 1 if any failed. |
 | `ccr comment (--review \| --commit REV [--path P [--line N [--side new\|old] [--start-line M]]]) (BODY \| --file F \| -) [--as claude\|user] [--github]` | Create a comment on the whole review, a commit, a file, a line or a range (`--start-line M` < `N`). `REV` is a listed sha, a short sha, `combined`, `worktree`, or any rev that resolves to a listed commit. `--side` defaults to `new`. `--github` (PR mode, with `--as user`) makes it a GitHub comment. |
+| `ccr gh-sync [--json]` | PR mode: mirror the pull request's review threads and review bodies from GitHub into the review, read-only; run it again to catch up. |
 | `ccr gh-post ID [ID…] [--dry-run] [--json]` | PR mode: post submitted GitHub comments verbatim into your pending review on the pull request, one at a time, starting the review when you have none; never submits it. `--dry-run` shows where each would go and what it says without asking GitHub anything. |
 | `ccr resolve ID [ID…]` / `ccr unresolve ID [ID…]` | Set or clear the resolved flag of threads. |
 | `ccr edit ID (BODY \| --file F \| -)` | Replace a comment body (shown as `edited` in the UI). |
@@ -333,6 +334,14 @@ changes no code; each comment you leave is one of two kinds:
   and a corrected wording, and you edit the comment (which makes it pending again) or tell it to post as it is, and
   submit again.
 
+**What others said** comes in too: `ccr gh-sync` (the agent runs it when it starts the review and before every
+round) mirrors the pull request's review threads and review bodies into ccr, read-only. A thread shows on its
+line in **All changes** while GitHub still has one there; an outdated one sits collapsed on its file, as on GitHub.
+Ask the agent about any of them, or reply on GitHub right from ccr: the reply editor of a review thread has a
+*Question | GitHub reply* switch, and a GitHub reply is checked and posted into your pending review like a GitHub
+comment. Within a thread the two conversations read apart: what is or goes on GitHub sits on grey, your questions
+and the agent's answers on blue, and the editor takes the colour of what you are writing.
+
 The editor has a *Question | GitHub comment* switch that keeps what you typed. GitHub only takes comments on the
 lines its pull request diff shows, so a GitHub comment on any other line is refused right away (keep it as a
 question, or write it in **All changes**). Threads show *Question*, *GitHub · not posted* or, once posted, a
@@ -346,9 +355,9 @@ that it landed exactly where intended and that nothing else in the review change
 * The server binds **127.0.0.1 only** and refuses requests whose `Host` (and, when present,
   `Origin`/`Referer`) is not `127.0.0.1`, `localhost` or `[::1]` — ports are not compared, so SSH port
   forwarding works. Cross-site fetches are rejected; there are no CORS headers.
-* The server never reaches the network. Only `ccr gh-post` (PR mode) talks to GitHub, through the `gh` CLI and your
-  `gh auth` login: it reads the pull request and your pending review, starts that review when you have none and adds
-  review threads to it. It never submits or edits anything there, and deletes nothing but an empty pending review it
+* The server never reaches the network. Only `ccr gh-sync` and `ccr gh-post` (PR mode) talk to GitHub, through the
+  `gh` CLI and your `gh auth` login: `gh-sync` only reads the pull request's discussion; `gh-post` reads the pull
+  request and your pending review, starts that review when you have none and adds review threads and replies to it. It never submits or edits anything there, and deletes nothing but an empty pending review it
   started itself a moment earlier, when the comment it was started for did not get in.
 * Every `/api/*` call must carry the per-process random token in the `X-CCR-Token` header. The URL's
   `?t=` is only how the browser receives the token on the first page load; the page immediately

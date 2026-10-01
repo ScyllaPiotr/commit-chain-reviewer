@@ -293,7 +293,7 @@ def test_review_and_state(live):
     state = live.get("/api/state").json
     assert state["commits"] == 7 and state["rounds"] == 0 and state["last_round"] is None
     assert set(state) == {"version", "generation", "loading", "now", "server", "counts", "rounds", "last_round",
-                          "commits", "ui"}
+                          "commits", "ui", "pr_synced_at"}
 
 
 def test_commit_routes(live):
@@ -684,3 +684,24 @@ def test_pr_mode_routes(live):
     assert frozen.status == 409 and "change it there" in frozen.json["error"]
     assert live.post("/api/comments/%s/github" % question["id"], {}).status == 400
     assert live.request("PUT", "/api/comments/%s/github" % root["id"]).status in (404, 501)
+
+
+def test_github_sync_route_and_replies_to_mirrored_threads(live):
+    payload = {"viewer": "reviewer", "head": live.repo.feature, "reviews": [], "threads": [
+        {"id": "T1", "path": "src/app.py", "line": 5, "start_line": None, "original_line": 5, "original_start_line": None,
+         "side": "RIGHT", "subject_type": "LINE", "outdated": False, "resolved": False,
+         "comments": [{"id": "C1", "database_id": 1, "body": "Why 500?", "url": "https://github.com/o/r/pull/7#discussion_r1",
+                       "created_at": "2026-09-01T10:00:00Z", "edited_at": None, "state": "SUBMITTED", "login": "nyh",
+                       "reply_to": None}]}]}
+    assert live.post("/api/github/sync", payload).status == 409, "not in PR mode"
+    live.post("/api/pr", {"url": "o/r#7"})
+    assert live.post("/api/github/sync", {"threads": "nope"}).status == 400
+    synced = live.post("/api/github/sync", payload)
+    assert synced.status == 200 and synced.json["added"] == 1 and synced.json["threads"] == 1
+    assert live.get("/api/state").json["pr_synced_at"] == synced.json["synced_at"]
+    root = next(c for c in live.get("/api/comments").json["comments"] if c["author"] == "github")
+    assert live.request("DELETE", "/api/comments/%s" % root["id"]).status == 409
+    reply = live.post("/api/comments", {"body": "Agreed.", "parent_id": root["id"], "github": True})
+    assert reply.status == 201 and reply.json["github"] == {"status": "local"}
+    target = live.get("/api/comments/%s/github" % reply.json["id"]).json
+    assert (target["subject_type"], target["thread_id"], target["reply_to"]) == ("REPLY", "T1", "C1")

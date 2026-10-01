@@ -107,7 +107,7 @@ def test_review_shape_and_pseudo_commits(fixture_repo, store):
 def test_state_shape_and_ui_tracking(store):
     state = store.state()
     assert set(state) == {"version", "generation", "loading", "now", "server", "counts", "rounds", "last_round",
-                          "commits", "ui"}
+                          "commits", "ui", "pr_synced_at"}
     assert state["rounds"] == 0 and state["last_round"] is None and state["commits"] == 7
     assert state["server"]["pid"] == os.getpid() and state["server"]["version"]
     store.touch_ui()
@@ -1127,7 +1127,7 @@ def test_github_comments_need_pr_mode_a_user_root_and_a_line_or_file(fixture_rep
     question = store.add_comment("What does this do?", line_anchor(sha, "src/app.py", 5))
     assert question["github"] is None
     rejects = {
-        "reply stays in ccr": dict(anchor=None, parent_id=root["id"]),
+        "not a review thread on GitHub, so a reply to it stays in ccr": dict(anchor=None, parent_id=root["id"]),
         "the user's to write": dict(anchor=line_anchor(sha, "src/app.py", 5), author="claude"),
         "goes on a line or a file": dict(anchor={"kind": "commit", "commit": sha}),
         "goes on a line or a file ": dict(anchor={"kind": "review"}),
@@ -1343,3 +1343,209 @@ def test_editing_a_submitted_github_comment_makes_it_a_draft_again(fixture_repo,
     assert (switched["state"], switched["github"]) == ("pending", {"status": "local"})
     pr_store.submit("comment", "")
     assert pr_store.edit_comment(question["id"], github=False)["state"] == "submitted"
+
+
+# --------------------------------------------------------------------------- the pull request's discussion (10.5)
+
+def gh_comment(node_id, login, body, created="2026-09-01T10:00:00Z", state="SUBMITTED", reply_to=None, database_id=None,
+               edited=None):
+    return {"id": node_id, "database_id": database_id or sum(map(ord, node_id)), "body": body,
+            "url": "https://github.com/o/r/pull/7#discussion_%s" % node_id, "created_at": created, "edited_at": edited,
+            "state": state, "login": login, "reply_to": reply_to}
+
+
+def gh_thread(thread_id, comments, path="src/app.py", line=5, side="RIGHT", outdated=False, resolved=False,
+              subject="LINE", start=None, original=None):
+    return {"id": thread_id, "path": path, "line": None if outdated else line, "start_line": start,
+            "original_line": original or line, "original_start_line": None, "side": side, "subject_type": subject,
+            "outdated": outdated, "resolved": resolved, "comments": comments}
+
+
+def discussion(head, threads, reviews=()):
+    return {"viewer": "reviewer", "head": head, "threads": list(threads), "reviews": list(reviews)}
+
+
+def test_sync_mirrors_the_pull_request_discussion(fixture_repo, pr_store):
+    head = fixture_repo.feature
+    why = gh_comment("C1", "nyh", "Why 500?", created="2026-09-01T10:00:00Z")
+    because = gh_comment("C2", "radek", "Because.", created="2026-09-01T11:00:00Z", reply_to="C1")
+    threads = [
+        gh_thread("T1", [why, because], resolved=True),
+        gh_thread("T2", [gh_comment("C3", "nyh", "Old remark")], outdated=True, original=2),
+        gh_thread("T3", [gh_comment("C4", "nyh", "On a file that left the PR")], path="hotfix.txt", line=1),
+        gh_thread("T4", [gh_comment("C5", "nyh", "On the whole file")], path="src/utils.py", line=1, subject="FILE"),
+        gh_thread("T5", [gh_comment("C6", "nyh", "Outside the hunks")], line=10),
+        gh_thread("T6", [gh_comment("C7", "nyh", "A range")], line=5, start=3),
+        gh_thread("T7", [gh_comment("C8", "reviewer", "My draft", state="PENDING")], line=6, start=6, side="RIGHT"),
+        gh_thread("T8", [gh_comment("C9", "nyh", "Deleted line")], line=5, side="LEFT"),
+    ]
+    reviews = [{"id": "R1", "database_id": 1, "body": "Please fix.", "url": "https://github.com/o/r/pull/7#pullrequestreview-1",
+                "state": "CHANGES_REQUESTED", "submitted_at": "2026-09-01T12:00:00Z", "login": "nyh"},
+               {"id": "R2", "database_id": 2, "body": "  ", "url": "u", "state": "APPROVED", "submitted_at": None, "login": "x"}]
+    version = pr_store.version
+    result = pr_store.sync_github(discussion(head, threads, reviews))
+    assert {k: result[k] for k in ("threads", "reviews", "added", "updated", "removed")} == \
+        {"threads": 8, "reviews": 1, "added": 10, "updated": 0, "removed": 0}
+    assert pr_store.version == version + 1 and pr_store.review()["pr"]["synced_at"] == result["synced_at"]
+    assert pr_store.review()["pr"]["first_synced_at"] == result["synced_at"] and pr_store.state()["pr_synced_at"] == result["synced_at"]
+    by_body = {c["body"]: c for c in pr_store.list_comments()}
+    assert all(c["author"] == "github" and c["state"] == "submitted" and c["round"] is None for c in by_body.values())
+    root, reply = by_body["Why 500?"], by_body["Because."]
+    assert root["anchor"] == line_anchor(COMBINED, "src/app.py", 5) and root["snippet"] == "value_05 = 500  # changed"
+    assert root["resolved"] is True and root["created_at"] == "2026-09-01T10:00:00Z", "resolved as GitHub has it, at first"
+    assert root["github"] == {"status": "remote", "node_id": "C1", "comment_id": why["database_id"], "url": why["url"],
+                              "login": "nyh", "own": False, "state": "SUBMITTED", "thread_id": "T1",
+                              "resolved_on_github": True, "outdated": False, "placement": "line", "path": "src/app.py",
+                              "side": "RIGHT", "line": 5, "original_line": 5}
+    assert reply["parent_id"] == root["id"] and reply["anchor"] == root["anchor"]
+    assert reply["github"] == {"status": "remote", "node_id": "C2", "comment_id": because["database_id"], "url": because["url"],
+                               "login": "radek", "own": False, "state": "SUBMITTED"}
+    placements = {body: (c["anchor"]["kind"], c["anchor"]["path"], c["github"].get("placement")) for body, c in by_body.items()
+                  if c["parent_id"] is None}
+    assert placements == {"Why 500?": ("line", "src/app.py", "line"), "Old remark": ("file", "src/app.py", "file"),
+                          "On a file that left the PR": ("review", None, "review"),
+                          "On the whole file": ("file", "src/utils.py", "file"), "Outside the hunks": ("file", "src/app.py", "file"),
+                          "A range": ("line", "src/app.py", "line"), "My draft": ("line", "src/app.py", "line"),
+                          "Deleted line": ("line", "src/app.py", "line"), "Please fix.": ("review", None, None)}
+    assert (by_body["A range"]["anchor"]["start_line"], by_body["My draft"]["anchor"]["start_line"]) == (3, None)
+    assert by_body["Deleted line"]["anchor"]["side"] == "old" and by_body["Deleted line"]["snippet"] == "value_05 = 5"
+    assert by_body["My draft"]["github"]["own"] is True and by_body["My draft"]["github"]["state"] == "PENDING"
+    assert by_body["Please fix."]["github"] == {"kind": "review", "review_state": "CHANGES_REQUESTED", "status": "remote",
+                                               "node_id": "R1", "comment_id": 1, "url": reviews[0]["url"], "login": "nyh",
+                                               "own": False, "state": "SUBMITTED"}
+
+    again = pr_store.sync_github(discussion(head, threads, reviews))
+    assert (again["added"], again["updated"], again["removed"]) == (0, 0, 0), "a second sync of the same discussion is a no-op"
+
+    question = pr_store.add_comment("What does Because mean?", None, parent_id=root["id"])
+    pr_store.edit_comment(root["id"], resolved=False)
+    moved = [gh_thread("T1", [why, dict(because, body="Because of the spec.", edited_at="2026-09-02T09:00:00Z")], line=6,
+                       resolved=False)] + threads[2:]
+    third = pr_store.sync_github(discussion(head, moved, reviews))
+    assert (third["added"], third["updated"], third["removed"]) == (0, 2, 1), "T1 moved and its reply edited; T2 is gone"
+    by_id = {c["id"]: c for c in pr_store.list_comments()}
+    assert by_id[root["id"]]["anchor"]["line"] == 6 and by_id[question["id"]]["anchor"]["line"] == 6, "replies follow"
+    assert by_id[root["id"]]["resolved"] is False and by_id[root["id"]]["github"]["resolved_on_github"] is False
+    assert by_id[reply["id"]]["body"] == "Because of the spec." and by_id[reply["id"]]["updated_at"] == "2026-09-02T09:00:00Z"
+    assert "Old remark" not in {c["body"] for c in by_id.values()}
+
+    gone = pr_store.sync_github(discussion(head, threads[2:], ()))
+    assert (gone["removed"], gone["updated"]) == (2, 1), "T1's reply and the review body go; T1 stays for the question"
+    kept = {c["id"]: c for c in pr_store.list_comments()}
+    assert kept[root["id"]]["github"]["deleted"] is True and question["id"] in kept and reply["id"] not in kept
+
+    pr_store.set_pr(PR_URL + "/files")
+    assert pr_store.review()["pr"]["first_synced_at"] == result["synced_at"], "relinking the same PR keeps its sync times"
+
+
+def test_github_replies_and_what_ccr_cannot_change_about_github(fixture_repo, pr_store):
+    head = fixture_repo.feature
+    pr_store.sync_github(discussion(head, [gh_thread("T1", [gh_comment("C1", "nyh", "Why 500?")])]))
+    root = next(c for c in pr_store.list_comments() if c["author"] == "github")
+    for change in (dict(body="Rewritten"), dict(github=True), dict(anchor=line_anchor(COMBINED, "src/app.py", 6))):
+        with pytest.raises(StoreError, match="comes from the pull request's discussion on GitHub") as info:
+            pr_store.edit_comment(root["id"], **change)
+        assert info.value.status == 409
+    with pytest.raises(StoreError, match="comes from the pull request's discussion"):
+        pr_store.delete_comment(root["id"])
+    assert pr_store.edit_comment(root["id"], resolved=True)["resolved"] is True
+
+    reply = pr_store.add_comment("Agreed, see the design.", None, parent_id=root["id"], github=True)
+    assert reply["github"] == {"status": "local"} and reply["state"] == "pending"
+    target = pr_store.github_target(reply["id"])
+    assert {k: target[k] for k in ("subject_type", "thread_id", "reply_to", "thread_author", "commit", "body")} == {
+        "subject_type": "REPLY", "thread_id": "T1", "reply_to": "C1", "thread_author": "nyh", "commit": head,
+        "body": "Agreed, see the design."}
+    with pytest.raises(StoreError, match="the user's to write"):
+        pr_store.add_comment("From Claude", None, parent_id=root["id"], author="claude", github=True)
+
+    sha = fixture_repo.sha(THREE_HUNKS)
+    question = pr_store.add_comment("Is this right?", line_anchor(sha, "src/app.py", 6))
+    with pytest.raises(StoreError, match="not a review thread on GitHub"):
+        pr_store.add_comment("x", None, parent_id=question["id"], github=True)
+    remark = pr_store.add_comment("Why 500 here?", line_anchor(sha, "src/app.py", 5), github=True)
+    pr_store.record_github_post(remark["id"], {"url": PR_URL + "#discussion_r9", "comment_id": 9, "node_id": "C9",
+                                               "thread_id": None})
+    with pytest.raises(StoreError, match="not a review thread on GitHub"):
+        pr_store.add_comment("x", None, parent_id=remark["id"], github=True)
+
+    linked = pr_store.sync_github(discussion(head, [
+        gh_thread("T1", [gh_comment("C1", "nyh", "Why 500?")]),
+        gh_thread("T9", [gh_comment("C9", "reviewer", "Why 500 here?", database_id=9, state="PENDING"),
+                         gh_comment("C10", "nyh", "Good question.", reply_to="C9")])]))
+    assert linked["added"] == 1, "the posted comment is not mirrored again; nyh's reply joins its thread"
+    mine = next(c for c in pr_store.list_comments() if c["id"] == remark["id"])
+    assert (mine["github"]["thread_id"], mine["github"]["github_state"]) == ("T9", "PENDING")
+    joined = next(c for c in pr_store.list_comments() if c["body"] == "Good question.")
+    assert joined["parent_id"] == remark["id"] and joined["anchor"] == mine["anchor"]
+    follow_up = pr_store.add_comment("Thanks.", None, parent_id=remark["id"], github=True)
+    assert pr_store.github_target(follow_up["id"])["thread_id"] == "T9"
+
+
+def test_a_thread_that_lost_its_first_comment_on_github_is_a_new_thread(fixture_repo, pr_store):
+    head = fixture_repo.feature
+    why, because, ok = (gh_comment("C1", "nyh", "Why 500?"), gh_comment("C2", "radek", "Because.", reply_to="C1"),
+                        gh_comment("C3", "nyh", "OK.", reply_to="C1"))
+    typo = gh_thread("T2", [gh_comment("C4", "nyh", "Typo"), gh_comment("C5", "radek", "Fixed.", reply_to="C4")], line=6)
+    pr_store.sync_github(discussion(head, [gh_thread("T1", [why, because, ok]), typo]))
+    old_root = next(c for c in pr_store.list_comments() if c["body"] == "Why 500?")
+    question = pr_store.add_comment("Who is right?", None, parent_id=old_root["id"])
+    result = pr_store.sync_github(discussion(head, [gh_thread("T1", [because, ok])]))
+    assert (result["added"], result["updated"], result["removed"]) == (2, 1, 4), "T2 goes with its reply"
+    by_body = {c["body"]: c for c in pr_store.list_comments()}
+    assert set(by_body) == {"Why 500?", "Who is right?", "Because.", "OK."}
+    assert by_body["Because."]["parent_id"] is None and by_body["OK."]["parent_id"] == by_body["Because."]["id"], \
+        "never a reply to a reply"
+    assert by_body["Because."]["github"]["thread_id"] == "T1" and by_body["Why 500?"]["github"]["deleted"] is True
+    assert by_body["Who is right?"]["parent_id"] == old_root["id"] == question["parent_id"]
+    again = pr_store.sync_github(discussion(head, [gh_thread("T1", [because, ok])]))
+    assert (again["added"], again["updated"], again["removed"]) == (0, 0, 0)
+
+
+def test_replies_posted_from_ccr_stay_put_when_their_thread_starts_anew(fixture_repo, pr_store):
+    head = fixture_repo.feature
+    because = gh_comment("C2", "radek", "Because.", reply_to="C1")
+    pr_store.sync_github(discussion(head, [gh_thread("T1", [gh_comment("C1", "nyh", "Why 500?"), because]),
+                                           gh_thread("T2", [gh_comment("C4", "nyh", "Typo")], line=6)]))
+    roots = {c["body"]: c for c in pr_store.list_comments() if c["parent_id"] is None}
+    for body, root, number in (("Agreed.", roots["Why 500?"], 77), ("Done.", roots["Typo"], 78)):
+        reply = pr_store.add_comment(body, None, parent_id=root["id"], github=True)
+        pr_store.record_github_post(reply["id"], {"url": PR_URL + "#discussion_r%d" % number, "comment_id": number,
+                                                  "node_id": "P%d" % number, "thread_id": root["github"]["thread_id"]})
+    agreed = gh_comment("P77", "reviewer", "Agreed.", database_id=77, state="PENDING", reply_to="C1")
+    done = gh_comment("P78", "reviewer", "Done.", database_id=78, state="PENDING", reply_to="C4")
+    threads = [gh_thread("T1", [because, agreed]), gh_thread("T2", [done, gh_comment("C5", "nyh", "Thanks.")], line=6)]
+    pr_store.sync_github(discussion(head, threads))
+    comments = pr_store.list_comments()
+    by_id = {c["id"]: c for c in comments}
+    assert all(by_id[c["parent_id"]]["parent_id"] is None for c in comments if c["parent_id"]), "never a reply to a reply"
+    replies = {}  # root body -> [(author, body)]
+    for c in comments:
+        if c["parent_id"]:
+            replies.setdefault(by_id[c["parent_id"]]["body"], []).append((c["author"], c["body"]))
+    assert replies == {"Why 500?": [("user", "Agreed.")], "Typo": [("user", "Done.")],
+                       "Because.": [("github", "Agreed.")], "Done.": [("github", "Thanks.")]}, \
+        "the posted replies stay in their ccr threads; GitHub's threads show them in their places"
+    assert all(by_id[r["id"]]["github"]["deleted"] for r in (roots["Why 500?"], roots["Typo"]))
+    again = pr_store.sync_github(discussion(head, threads))
+    assert (again["added"], again["updated"], again["removed"]) == (0, 0, 0)
+
+
+def test_sync_places_lines_of_a_newer_pull_request_head(tmp_path):
+    repo = SmallRepo(str(tmp_path / "newer"))
+    base = repo.commit("base", **{"a.txt": TEN})
+    reviewed = repo.commit("edit line 5", **{"a.txt": TEN[:4] + ["line 5, edited"] + TEN[5:]})
+    store = repo.store(base)
+    newer = repo.commit("insert two lines on top", **{"a.txt": ["top 1", "top 2"] + TEN[:4] + ["line 5, edited"] + TEN[5:]})
+    run_git(repo.path, ["checkout", "-q", reviewed])  # ccr keeps showing the commit it was started on
+    store.sync_github(discussion(newer, [gh_thread("T1", [gh_comment("C1", "nyh", "Why?")], path="a.txt", line=7)]))
+    root = next(c for c in store.list_comments() if c["author"] == "github")
+    assert (root["anchor"]["commit"], root["anchor"]["line"], root["snippet"]) == (COMBINED, 5, "line 5, edited")
+    store.sync_github(discussion(newer, [gh_thread("T2", [gh_comment("C2", "nyh", "Why gone?")], path="a.txt", line=5,
+                                                   side="LEFT")]))
+    left = next(c for c in store.list_comments() if c["body"] == "Why gone?")
+    assert left["anchor"]["kind"] == "file", "old-side lines of another head may count from another base"
+    store.sync_github(discussion("f" * 40, [gh_thread("T1", [gh_comment("C1", "nyh", "Why?")], path="a.txt", line=7)]))
+    root = next(c for c in store.list_comments() if c["author"] == "github")
+    assert (root["anchor"]["kind"], root["github"]["placement"]) == ("file", "file"), "an unknown head: the file at least"
+    store.close()

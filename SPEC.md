@@ -189,7 +189,7 @@ serialisation; anchor validation and snippet capture use untrimmed data.
 {
   "id": "k3f9a2",                   // 6 lowercase base36 chars, unique per database
   "parent_id": null,                // root comment; replies carry the root's id (threads are flat: one level)
-  "author": "user",                 // "user" | "claude"
+  "author": "user",                 // "user" | "claude" | "github" (mirrored from the pull request's discussion, 10.5)
   "body": "Markdown text",          // non-empty, ≤ 64 KiB
   "created_at": "…Z", "updated_at": "…Z",   // updated_at > created_at ⇒ "edited"
   "state": "pending",               // "pending" | "submitted". author=claude comments are created "submitted".
@@ -257,7 +257,8 @@ Submitting with zero pending comments **and** empty summary is allowed only when
 `generation` increases on every successful `load()` (start and reload) — the client uses it to know the diffs changed.
 
 `state()` (`/api/state`, `/api/events`): `{"version", "generation", "loading", "now", "server", "counts",
-"rounds": <count>, "last_round": Round|null, "commits": <count>, "ui"}`. `ui.last_seen` is the time of the last
+"rounds": <count>, "last_round": Round|null, "commits": <count>, "ui", "pr_synced_at"}` (the last GitHub sync,
+10.5, so a page can refetch the review when it changes). `ui.last_seen` is the time of the last
 `/api/events` request whose `User-Agent` does not start with `ccr-cli/`; `connected` = seen within 60 s.
 
 ---
@@ -554,6 +555,7 @@ paths → 404 JSON. Log line (only with `--verbose`): `"%s %s %d %dms"` with the
 | POST | `/api/reload` | `{range?, n?, worktree?, first_parent?}` (omitted = keep) → `{"review": Review, "remapped": [...], "outdated": [Comment], "commits_added", "commits_removed"}`; git errors → 400, previous data kept |
 | POST | `/api/cover` | `{text}` → `{"cover", "version"}`; sets the cover letter (≤ 64 KiB Markdown, stored in `meta`; bumps `version` **and** `generation` so open pages re-render) |
 | POST | `/api/pr` | `{url}` → `{"pr", "version"}`; links the review to a pull request (section 10; bumps `version` and `generation`) |
+| POST | `/api/github/sync` | `{viewer, head, threads, reviews}` → `{"threads", "reviews", "added", "updated", "removed", "synced_at"}`; mirrors the pull request's discussion (10.5); 409 outside PR mode |
 | POST | `/api/shutdown` | 202; sets `stopping`, `cond.notify_all()`, then `threading.Thread(target=httpd.shutdown, daemon=True).start()` |
 
 Errors are always JSON `{"error": "…"}`. Unknown `/api/*` → 404.
@@ -656,6 +658,9 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
   the `## Rounds` block, then the 6.3 Markdown for `--all --outdated --context 3`; `--json` =
   `{"review": Review-without-files, "rounds", "comments", "threads": [{"root","replies","last_author","answered"}]}`.
   `-o FILE` is created with mode 0600. In PR mode the title carries ` — PR <owner/repo#N>` after the range.
+* `ccr gh-sync [--json]` — PR mode (10.5): reads the pull request's review threads and review bodies through `gh api`
+  and mirrors them into the review; prints `ccr: <owner/repo#N>: T review threads, R review bodies; a comments
+  added, u updated, r removed`.
 * `ccr gh-post ID [ID…] [--dry-run] [--json]` — PR mode (10.3): posts each submitted, unposted GitHub comment
   verbatim into the user's pending review, one at a time (a repeated id once), and records it; every comment's
   state and body are read from the server right before it is posted; prints `ccr: started your pending review
@@ -1072,10 +1077,13 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
   GitHub behind ccr's named operations that keeps one pending review per user and threads on diff lines only —
   starting the review without body or event, adding to the user's own review and keeping their comments, file
   threads, ranges, the duplicate, refusals (a review on another commit, another merge base, a line outside the
-  diff, which leaves no empty review behind), the moved-head note and the warnings of the re-read.
+  diff, which leaves no empty review behind), the moved-head note and the warnings of the re-read; reading the
+  discussion page by page (threads, their comments, review bodies; other users' pending comments unseen) and replies
+  into threads.
 * PR mode in the other suites: `test_store.py` (`set_pr` and its persistence, which roots may be GitHub comments,
   targets on both sides, from commits and for files, every refusal, switching, the frozen posted comment, the
-  schema-2 migration), `test_server.py` (the PR routes), `test_cli.py` (`start --pr`, `comment --github`, the round
+  schema-2 migration, mirroring the discussion — placements, updates, removals, a newer pull request head, comments
+  posted from ccr — and GitHub replies), `test_server.py` (the PR routes), `test_cli.py` (`start --pr`, `comment --github`, the round
   header, `gh-post` refusing pending comments and questions, `--dry-run` asking GitHub nothing, posting and
   re-posting through a fake `gh` on PATH, `start --pr` on reuse) and `test_e2e.py` (the driver's second
   scenario, `pr`: the PR link, the forked gutter and file buttons, the editor switch, a GitHub comment refused
@@ -1199,6 +1207,54 @@ verbatim to your pending GitHub review once Claude has checked it*, and a questi
 draft remembers which of the two it was written as (`ccr:draft-intent:<key>`), so its dot shows on the matching
 button. Roots are tagged *Question* or *GitHub · not posted*; a posted one carries `a.tag-github.is-posted`
 (*GitHub ↗*, also on its collapsed resolved line) linking to the comment, and has no Edit action (Delete says it
-removes the comment from ccr only). When comments become posted, a toast says *"N GitHub comments posted to your
-pending review — submit it on GitHub"* with *Open on GitHub* (the pull request's `/files`). The Submit tooltip says
-that questions get answered and GitHub comments get checked and posted.
+removes the comment from ccr only). Every comment carries `data-channel`: `github` for what is or goes on GitHub (a
+GitHub comment or reply, posted or not, and every mirrored comment, 10.5) and `claude` for the exchange with Claude
+(questions and Claude's comments), on a grey and a blue background with a GitHub-dark and a blue left stripe; an
+editor takes the colour of what it writes, so the two read apart even inside one review thread. When comments
+become posted, a toast says *"N GitHub comments posted to your pending review — submit it on GitHub"* with *Open on
+GitHub* (the pull request's `/files`). The Submit tooltip says that questions get answered and GitHub comments get
+checked and posted.
+
+### 10.5 The pull request's discussion (`ccr gh-sync`)
+
+`ccr gh-sync` mirrors the pull request's discussion into the review, read-only: every review thread with all its
+comments (`CcrThreads`, paged, `CcrThreadComments` beyond a page of comments) and the non-empty bodies of its
+submitted reviews (`CcrReviews`), posted to `/api/github/sync` as `{viewer, head, threads, reviews}` and stored by
+`sync_github` as comments by `github`. A mirrored comment keeps GitHub's body, time (`created_at`; an edit's time
+as `updated_at`) and author, and carries `github` = `{"status": "remote", "node_id", "comment_id", "url", "login",
+"own" (the viewer wrote it), "state" (PENDING / SUBMITTED)}`, on a thread's first comment also `"thread_id",
+"outdated", "resolved_on_github", "placement", "path", "side", "line", "original_line"`, on a review body
+`"kind": "review", "review_state"`.
+
+* **Placement.** A current thread (not outdated, with a `line`) goes on its lines in "All changes": `line` and
+  `startLine` (one line when GitHub repeats `line` as `startLine`) on the side GitHub gives, provided those lines
+  are in the diff; when the pull request head is not `range.head`, new-side lines are carried there with `map_line`
+  and old-side lines (of a base that may have moved too) are not trusted.
+  Otherwise, and for outdated and file threads, it goes on its file in "All changes", or on the whole review when
+  the file left the pull request; review bodies go on the whole review. `placement` says which (`line`, `file`,
+  `review`).
+* **Every sync** places threads again, updates edited bodies and changed states, adds new comments and removes the
+  ones GitHub no longer has — a root with replies in ccr stays, marked `deleted`. A mirrored thread starts
+  resolved in ccr when it is resolved on GitHub; from then on that flag is the user's. A comment posted from ccr
+  is recognised by its `comment_id` and not mirrored again: its record learns `thread_id` and `github_state`, and
+  GitHub's replies to it join its ccr thread. Mirrored comments cannot be edited, moved or deleted in ccr (409
+  *"… comes from the pull request's discussion on GitHub (<url>); it changes there"*).
+* **GitHub replies.** In a review thread on GitHub — a mirrored one, or a comment posted from ccr once a sync has
+  told it its thread — the user's reply can be a GitHub reply (`github: true` on a reply). It is checked and posted
+  like a GitHub comment: `github_target` gives `{"subject_type": "REPLY", "thread_id", "reply_to" (the thread's
+  first comment), "thread_url", "thread_author"}`, and `ccr gh-post` adds it with `CcrAddReply`
+  (`addPullRequestReviewThreadReply` with `pullRequestReviewId` and `pullRequestReviewThreadId`) into the pending
+  review, which may be on another commit (a reply is placed by its thread); a reply already in the pending review
+  with the same body under the same first comment counts as posted. Elsewhere replies stay in ccr (400 *"this
+  thread is not a review thread on GitHub, so a reply to it stays in ccr"*).
+* **UI.** A mirrored comment shows `@login` (*(you)* for the viewer's), a *GitHub ↗* link and the tags *outdated*,
+  *resolved there*, *pending there* or *deleted there* (a review body: *review · changes requested* and the like),
+  and has no Edit or Delete. Outdated threads, review bodies and deleted threads start collapsed (*GitHub thread by
+  @nyh · outdated · N comments — Show*). The reply editor of a review thread has a *Question | GitHub reply*
+  switch, and the user's replies there are tagged *Question* or *GitHub · not posted* / *GitHub ↗*. Comments a
+  later sync brings get *New* and a toast *"N new comments from GitHub"*; comments older than the first sync
+  (`pr.first_synced_at`) do not.
+* **For the agent** (6.3): a mirrored author is `@login (GitHub[, you])`, a mirrored root reads `GitHub thread
+  (outdated, was new:N, shown on the file, resolved there, pending, deleted there)` or `GitHub review (<state>)`, a
+  mirrored reply `on GitHub (pending)` when it is, and the user's GitHub reply `GitHub reply (not posted)` or
+  `GitHub reply (posted: <url>)`; mirrored comments carry `on GitHub` instead of a round.

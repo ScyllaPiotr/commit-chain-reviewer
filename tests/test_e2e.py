@@ -159,14 +159,22 @@ def test_browser_pr_mode_flow(live_pr, tmp_path):
         "load page in PR mode", "question about the whole pull request", "click 2nd commit", "gutter forks into ? and GH",
         "GitHub comment on a line", "question with the editor switch", "a draft keeps its kind",
         "a line outside the pull request diff stays a question",
-        "file header forks too", "posted comment links to GitHub"], pretty
-    assert len(report["screenshots"]) == 3, pretty
+        "file header forks too", "posted comment links to GitHub", "GitHub threads come into ccr"], pretty
+    assert len(report["screenshots"]) == 4, pretty
 
-    # -- what the browser left: five pending user comments, two of them GitHub comments (one recorded as posted)
-    comments = {c["body"]: c for c in live_pr.store.list_comments()}
+    # -- what the browser left: seven pending user comments, three of them for GitHub (one recorded as posted, one a
+    #    reply in the mirrored thread, which holds a question too), next to the four comments mirrored from GitHub
+    everything = live_pr.store.list_comments()
+    comments = {c["body"]: c for c in everything if c["author"] == "user"}
     assert set(comments) == {"Why does the series need two commits?", "Why 500?", "What is value 6 for?",
-                             "Unrelated to the change", "Please split this file."}, pretty
-    assert all(c["author"] == "user" and c["state"] == "pending" for c in comments.values())
+                             "Unrelated to the change", "Please split this file.", "Agreed, see the design.",
+                             "Which spec does radek mean?"}, pretty
+    assert all(c["state"] == "pending" for c in comments.values())
+    mirrored = [c for c in everything if c["author"] == "github"]
+    assert len(mirrored) == 4 and comments["Agreed, see the design."]["github"] == {"status": "local"}
+    assert comments["Agreed, see the design."]["parent_id"] == next(c["id"] for c in mirrored if c["github"]["node_id"] == "C1")
+    assert comments["Which spec does radek mean?"]["github"] is None, "a question in a GitHub thread stays in ccr"
+    assert comments["Which spec does radek mean?"]["parent_id"] == comments["Agreed, see the design."]["parent_id"]
     assert comments["Why 500?"]["github"]["status"] == "posted" and comments["Why 500?"]["anchor"]["line"] == 5
     assert comments["Please split this file."]["github"] == {"status": "local"}
     assert comments["Please split this file."]["anchor"]["kind"] == "file"
