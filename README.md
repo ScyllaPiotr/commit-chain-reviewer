@@ -28,10 +28,12 @@ buttons, and so do the threads that come from GitHub:
   it against the code and posts it verbatim into your pending GitHub review, or replies with what is wrong with it.
 
 The pull request's discussion on GitHub comes in too, so you can ask Claude about a GitHub thread or answer it on
-the spot. Both conversations share the thread: the one with Claude on blue, the one on GitHub on grey. Submitting
-the review, with its verdict, stays yours, on GitHub.
+the spot, in that same thread. The background colour tells the two dialogues apart: **blue** for yours with Claude,
+**grey** for the messages from and to GitHub, both the ones that came from there and yours, posted or still a draft.
+The editor takes the colour of what you are writing. Submitting the review, with its verdict, stays yours, on
+GitHub.
 
-![A GitHub thread holding a question for Claude, its answer and a GH reply draft; the Ask AI and GH comment buttons on a line](docs/screenshot-pull-request.png)
+![A GitHub thread on grey holding a question for Claude and its answer on blue, then a GH reply draft on grey; the Ask AI and GH comment buttons on a line](docs/screenshot-pull-request.png)
 
 ## Install
 
