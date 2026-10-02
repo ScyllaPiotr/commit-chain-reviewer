@@ -31,7 +31,8 @@ Design constraints:
 
 ```
 commit-chain-reviewer/
-  README.md                 user-facing docs (install, usage, agent loop, SSH forwarding)
+  README.md                 user-facing overview: the two ways to use ccr, install
+  docs/                     the README's screenshots
   SPEC.md                   this file
   pyproject.toml            package "ccr", console script ccr = ccr.cli:main, no deps, python>=3.10
   bin/ccr                   shim: PYTHONPATH=<repo root> exec python3 -m ccr "$@"  (usable without install)
