@@ -32,6 +32,7 @@ Design constraints:
 ```
 commit-chain-reviewer/
   README.md                 user-facing overview: the two ways to use ccr, install
+  LICENSE                   MIT
   docs/                     the README's screenshots
   SPEC.md                   this file
   pyproject.toml            package "ccr", console script ccr = ccr.cli:main, no deps, python>=3.10
@@ -52,7 +53,7 @@ commit-chain-reviewer/
       app.js                all UI logic (section 7)
       style.css             all styles (light + dark via CSS custom properties)
       favicon.svg
-      vendor/               highlight.min.js, github.min.css, github-dark.min.css, lang-*.min.js
+      vendor/               highlight.min.js, github.min.css, github-dark.min.css, lang-*.min.js, LICENSE (BSD-3-Clause)
   .claude-plugin/plugin.json  Claude Code plugin manifest (name "ccr"; bin/ is put on PATH while the plugin is enabled)
   .claude-plugin/marketplace.json  single-plugin marketplace so `claude plugin install ccr@ccr-local` works from a checkout
   skills/review-commit-series/SKILL.md    Claude Code skill (`/review-commit-series [range]`) describing the agent loop (section 8)

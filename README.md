@@ -53,3 +53,8 @@ build and no package to install.
 * `ccr --help`: the command line.
 * Local by design: the server listens on 127.0.0.1 only, and every API call needs the session's token. Only
   `ccr gh-sync` and `ccr gh-post` talk to GitHub, through your `gh` login, and neither submits a review.
+
+## License
+
+ccr is under the [MIT License](LICENSE). The vendored [highlight.js](https://highlightjs.org/) in `ccr/static/vendor/`
+is under its own [BSD 3-Clause License](ccr/static/vendor/LICENSE).
