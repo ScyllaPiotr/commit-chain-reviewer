@@ -451,6 +451,12 @@ export async function runScenario(page, url) {
     await page.click('#btn-viewmode');
     await page.waitFor(`document.querySelector('#btn-viewmode').textContent === 'Split' && document.querySelector('table.diff[data-view="split"]')`);
     await page.waitFor(`document.querySelector('table.diff[data-view="split"] tr.threads .thread .comment[data-author="user"]')`, { label: 'thread present in split view' });
+    const half = await page.evaluate(`(() => { const tr = document.querySelector('table.diff[data-view="split"] tr.threads');
+      const on = tr.querySelector('td.on-side'); const off = tr.querySelector('td.off-side'); const w = (el) => el.getBoundingClientRect().width;
+      const code = document.querySelector('table.diff[data-view="split"] tr.line td.code.new');
+      return { cells: [...tr.children].map((td) => td.className).join(','), thread: Boolean(on.querySelector('.thread')), empty: off.childElementCount === 0,
+        right: Math.round(on.getBoundingClientRect().right) === Math.round(code.getBoundingClientRect().right), ratio: Math.round(100 * w(on) / w(tr)) }; })()`);
+    if (half.cells !== 'off-side side-old,on-side side-new' || !half.thread || !half.empty || !half.right || half.ratio < 45 || half.ratio > 55) throw new Error('split thread row: ' + JSON.stringify(half));
     await page.shot('03-split');
     await page.click('#btn-viewmode');
     await page.waitFor(`document.querySelector('#btn-viewmode').textContent === 'Unified' && document.querySelector('table.diff[data-view="unified"] tr.threads .thread')`);
@@ -538,6 +544,11 @@ export async function runPrScenario(page, url) {
   const editorLabel = `document.querySelector('tr.editor .btn-submit-comment').textContent`;
   const threadOf = (text) => `[...document.querySelectorAll('#main .thread')].find((t) => t.textContent.includes(${JSON.stringify(text)}))`;
   let githubId = null;
+  const openFork = async (n) => {
+    await page.hover(row(n) + ' td.code');
+    await page.hover(row(n) + ' .btn-fork');
+    await page.waitFor(isShown(row(n) + ' .btn-add-comment[data-intent="github"]'), { label: `[+] of line ${n} open` });
+  };
   // the smallest screen PR mode is meant for
   await page.cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
 
@@ -570,19 +581,25 @@ export async function runPrScenario(page, url) {
     return await page.evaluate(`document.querySelector('#commit-header .subject').textContent.trim()`);
   });
 
-  await runner.step('gutter forks into Ask AI and GH comment', async () => {
+  await runner.step('gutter [+] opens into Ask AI and GH comment', async () => {
     await page.hover(row(5) + ' td.code');
-    const q = row(5) + ' td.gutter .btn-add-comment[data-intent="question"]';
-    const g = row(5) + ' td.gutter .btn-add-comment[data-intent="github"]';
-    await page.waitFor(`${isShown(q)} && ${isShown(g)}`, { label: 'both gutter buttons in the hovered row' });
+    const plus = row(5) + ' td.num.new .btn-fork';
+    const q = row(5) + ' td.num.new .btn-add-comment[data-intent="question"]';
+    const g = row(5) + ' td.num.new .btn-add-comment[data-intent="github"]';
+    await page.waitFor(`${isShown(plus)} && !${isShown(q)} && !${isShown(g)}`, { label: 'a closed [+] in the hovered row' });
+    const plusLeft = await page.evaluate(`document.querySelector(${JSON.stringify(plus)}).getBoundingClientRect().left`);
+    await page.hover(plus);
+    await page.waitFor(`${isShown(q)} && ${isShown(g)} && !${isShown(plus)}`, { label: 'hovering [+] opens it' });
+    await page.hover(row(5) + ' td.code'); // off the buttons (a hovered one grows), still on the line: it stays open
     const boxes = await page.evaluate(`[${JSON.stringify(q)}, ${JSON.stringify(g)}].map((s) => { const el = document.querySelector(s); const r = el.getBoundingClientRect(); return { text: el.textContent, left: r.left, right: r.right, label: el.getAttribute('aria-label'), clipped: el.scrollWidth > el.clientWidth }; })`);
-    if (boxes[0].text !== 'Ask AI' || boxes[1].text !== 'GH comment' || boxes[0].right > boxes[1].left || boxes.some((b) => b.clipped)) throw new Error('gutter buttons: ' + JSON.stringify(boxes));
-    const numLeft = await page.evaluate(`document.querySelector(${JSON.stringify(row(5) + ' td.num')}).getBoundingClientRect().left`);
-    if (boxes[1].right > numLeft) throw new Error(`gutter buttons reach into the line numbers: ${boxes[1].right} > ${numLeft}`);
+    if (boxes[0].text !== 'Ask AI' || boxes[1].text !== 'GH comment' || boxes[0].right > boxes[1].left || boxes.some((b) => b.clipped)
+        || Math.abs(boxes[0].left - plusLeft) > 4) throw new Error('gutter buttons: ' + JSON.stringify({ plusLeft, boxes }));
     const tint = (sel) => `getComputedStyle(document.querySelector(${JSON.stringify(sel)})).backgroundImage !== 'none'`;
     if (!(await page.evaluate(`${tint(row(5) + ' td.code')} && !${tint(row(6) + ' td.code')}`))) throw new Error('the hovered row alone is not grey');
-    if (await page.evaluate(`Boolean(document.querySelector('#main .btn-add-comment:not([data-intent])'))`)) throw new Error('a plain [+] is left in PR mode');
+    if (await page.evaluate(`Boolean(document.querySelector('#main .btn-add-comment:not([data-intent]):not(.btn-fork)'))`)) throw new Error('a plain [+] is left in PR mode');
     await page.shot('pr-01-gutter');
+    await page.hover(row(6) + ' td.code');
+    await page.waitFor(`${isShown(row(6) + ' .btn-fork')} && !${isShown(row(6) + ' .btn-add-comment[data-intent="github"]')}`, { label: 'closed again on another line' });
     return boxes.map((b) => b.label).join(' | ');
   });
 
@@ -592,13 +609,16 @@ export async function runPrScenario(page, url) {
     const sides = {};
     for (const side of ['old', 'new']) {
       await page.hover(`${row(6)} td.code.${side}`);
-      await page.waitFor(`${isShown(`${row(6)} td.gutter.${side} .btn-add-comment[data-intent="github"]`)}`, { label: `buttons in the ${side} gutter` });
+      await page.waitFor(`${isShown(`${row(6)} td.num.${side} .btn-fork`)}`, { label: `[+] by the ${side} side` });
+      await page.click(`${row(6)} td.num.${side} .btn-fork`);
+      await page.waitFor(`${isShown(`${row(6)} td.num.${side} .btn-add-comment[data-intent="github"]`)}`, { label: `clicking [+] opens it on the ${side} side` });
+      if (await page.evaluate(`Boolean(document.querySelector('tr.editor'))`)) throw new Error('the click on [+] went to Ask AI, which took its place');
       sides[side] = await page.evaluate(`(() => { const r = document.querySelector(${JSON.stringify(row(6))});
         const grey = [...r.children].filter((td) => getComputedStyle(td).backgroundImage !== 'none').map((td) => td.className.trim()).join(',');
-        return { buttons: [...r.querySelectorAll('.btn-add-comment')].map((b) => b.closest('td').className + ':' + b.dataset.side).join(','), grey }; })()`);
+        return { buttons: [...r.querySelectorAll('.btn-add-comment[data-intent]')].map((b) => b.closest('td').className.trim() + ':' + b.dataset.side).join(','), grey }; })()`);
     }
-    if (sides.old.buttons !== 'gutter old:old,gutter old:old' || sides.new.buttons !== 'gutter new:new,gutter new:new'
-        || sides.old.grey !== 'gutter old,num old,code old' || sides.new.grey !== 'gutter new,num new,code new') throw new Error('split gutter: ' + JSON.stringify(sides));
+    if (sides.old.buttons !== 'num old:old,num old:old' || sides.new.buttons !== 'num new:new,num new:new'
+        || sides.old.grey !== 'num old,code old' || sides.new.grey !== 'num new,code new') throw new Error('split gutter: ' + JSON.stringify(sides));
     // the whole interface fits a 1080p screen in either view, and the 1280x720 one this scenario runs at
     const overflow = `[document.documentElement, document.querySelector('#main')].map((e) => e.scrollWidth - e.clientWidth).join(',')`;
     const fits = [await page.evaluate(overflow)];
@@ -609,11 +629,11 @@ export async function runPrScenario(page, url) {
     fits.push(await page.evaluate(overflow));
     await page.cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
     if (fits.some((f) => f !== '0,0')) throw new Error('horizontal overflow (split 1280, split 1920, unified 1920): ' + fits.join(' / '));
-    await page.hover(row(5) + ' td.code');
     return `old: ${sides.old.grey} · new: ${sides.new.grey}`;
   });
 
   await runner.step('GitHub comment on a line', async () => {
+    await openFork(5);
     await page.click(row(5) + ' .btn-add-comment[data-intent="github"]');
     await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-intent="github"] textarea')`, { label: 'GitHub editor' });
     const label = await page.evaluate(editorLabel);
@@ -630,7 +650,7 @@ export async function runPrScenario(page, url) {
   });
 
   await runner.step('question with the editor switch', async () => {
-    await page.hover(row(6) + ' td.code');
+    await openFork(6);
     await page.click(row(6) + ' .btn-add-comment[data-intent="question"]');
     await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-channel="claude"]:not([data-intent]) textarea')`, { label: 'question editor' });
     if ((await page.evaluate(editorLabel)) !== 'Ask AI') throw new Error('question label ' + (await page.evaluate(editorLabel)));
@@ -648,7 +668,7 @@ export async function runPrScenario(page, url) {
   await runner.step('a draft keeps its kind', async () => {
     const gh = row(7) + ' .btn-add-comment[data-intent="github"]';
     const q = row(7) + ' .btn-add-comment[data-intent="question"]';
-    await page.hover(row(7) + ' td.code');
+    await openFork(7);
     await page.click(gh);
     await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-intent="github"] textarea')`, { label: 'GitHub editor on line 7' });
     const key = await page.evaluate(`document.querySelector('tr.editor form.comment-editor').dataset.key`);
@@ -656,6 +676,8 @@ export async function runPrScenario(page, url) {
     await page.click('tr.editor .btn-cancel-comment');
     await page.waitFor(`!document.querySelector('tr.editor')`, { label: 'editor closed, draft kept' });
     await page.hover(row(7) + ' td.code');
+    await page.waitFor(`document.querySelector(${JSON.stringify(row(7) + ' .btn-fork.has-draft')})`, { label: 'the closed [+] shows the draft' });
+    await openFork(7);
     await page.waitFor(`document.querySelector(${JSON.stringify(gh + '.has-draft')}) && !document.querySelector(${JSON.stringify(q + '.has-draft')})`, { label: 'the dot is on GH only' });
     if ((await page.evaluate(`localStorage.getItem(${JSON.stringify('ccr:draft-intent:' + key)})`)) !== 'github') throw new Error('draft intent not stored');
     await page.click(gh);
@@ -669,7 +691,7 @@ export async function runPrScenario(page, url) {
   await runner.step('a line outside the pull request diff stays a question', async () => {
     await page.click(`${card} tr.hunk[data-gap="1"] .btn-expand-all`);
     await page.waitFor(`document.querySelector(${JSON.stringify(row(10) + '[data-x="1"]')})`, { label: 'context line 10 expanded' });
-    await page.hover(row(10) + ' td.code');
+    await openFork(10);
     await page.click(row(10) + ' .btn-add-comment[data-intent="github"]');
     await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-intent="github"] textarea')`, { label: 'GitHub editor on a context line' });
     await page.type('Unrelated to the change');
@@ -785,7 +807,7 @@ export async function runPrScenario(page, url) {
   });
 
   await runner.step('Bold and Italic on the selected text', async () => {
-    await page.hover(row(8) + ' td.code');
+    await openFork(8);
     await page.click(row(8) + ' .btn-add-comment[data-intent="question"]');
     await page.waitFor(`document.querySelector('tr.editor form.comment-editor textarea')`, { label: 'editor on line 8' });
     const ta = `document.querySelector('tr.editor textarea')`;

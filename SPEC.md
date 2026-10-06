@@ -844,10 +844,10 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
   `td.num.empty` + `td.code.empty` (hatched). Ctx rows show the line on both sides. Columns: `td.num.old` ·
   `td.code.old` · `td.num.new` · `td.code.new`. Selecting text: `pointerdown` in a `.code.old|new` cell adds `sel-old|sel-new`
   to the table whose CSS sets `user-select: none` on the other side; removed on `pointerup`.
-* Both tables have 4 columns, so thread and editor rows are `<tr class="threads|editor" data-key><td colspan="4">`.
-  In PR mode outside compare views the table carries `has-gutter` and a `td.gutter` column (`col.c-gutter`) left of
-  the line numbers for the gutter buttons, one in unified view and one per side in split view (`td.gutter.old|new`,
-  `td.gutter.empty` beside an empty side), so the colspan is 5 or 6.
+* Both tables have 4 columns, so thread and editor rows are `<tr class="threads|editor" data-key><td colspan="4">`
+  in unified view. In split view such a row sits under its own side: `<td colspan="2" class="on-side side-old|new">`
+  holds the threads or the editor and `<td colspan="2" class="off-side side-…">` under the other side stays empty, so
+  rows for both sides of one line pair stack, the old side's first.
 * `td.num[data-side][data-line]` on every number cell that has a line; `data-o`/`data-n` on the row (split rows: left/right).
 * **Hunk row** `tr.hunk`: `@@ -a,b +c,d @@ section` plus expand controls: gap ≤ 20 lines → single *"expand N lines"*;
   otherwise `.btn-expand-up` (20 lines just above the lower hunk), `.btn-expand-down` (20 lines below the upper hunk),
@@ -878,9 +878,11 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
   `pointerover` moves it into the hovered row's target number cell and shows it: unified → `td.num.new` for ctx/add rows,
   `td.num.old` for del rows; split → the number cell of the side under the pointer. Also shown on `:focus-within` and
   on `tr.line.is-selected`. Hidden in compare view. `td.num{position:relative}`; the button is absolutely positioned
-  overlapping the code edge; in PR mode the buttons go into the row's `td.gutter` of that side instead, so they never
-  cover code, and the row under the pointer — in split view only its cells on the side under the pointer — is tinted
-  `--line-hover` grey (the yellow of selected rows wins). Click → `openEditor(rangeAnchor if a selection ends on this row else rowAnchor)`.
+  overlapping the code edge. In PR mode it is `.btn-fork`, a `[+]` that opens (`.is-open` on the card's buttons)
+  into *Ask AI* where it was and *GH comment* right of it when it is hovered or clicked, and closes when the buttons
+  move to another line; a click at the spot where hovering opened it, within 600 ms, does not reach the *Ask AI* now
+  under the pointer. The table carries `has-fork` there, and the row under the pointer — in split view only its
+  cells on the side under the pointer — is tinted `--line-hover` grey (the yellow of selected rows wins). Click → `openEditor(rangeAnchor if a selection ends on this row else rowAnchor)`.
   **Side rule**: unified ctx rows anchor to `new` via `[+]`; clicking the *old* number cell of a ctx row (or the left
   `[+]` in split) anchors to `old`; del → old; add → new.
 * **Selection & ranges** (single-sided): Pointer Events. `pointerdown` (button 0) on a `td.num[data-line]`:
@@ -1001,7 +1003,7 @@ resembles GitHub dark-dimmed. `prefers-reduced-motion` disables animations. Focu
 | Header | `#commit-header .subject`, `.sha-copy`, `#btn-comment-commit`, `#commit-header .thread-block[data-key-host="commit"]`; combined view only: `#outdated-note` (hidden at 0), `#cover-letter` (`.cover-body` rendered Markdown, or `.is-empty` with the *"No cover letter"* hint), `#btn-comment-review`, `#commit-header .thread-block[data-key-host="review"]` |
 | File card | `.file-card[data-path][data-rendered="0|1"]` → `.file-header` (`.file-path`, `.status-badge`, `.btn-comment-file` — in PR mode two, `[data-intent="question"]` and `[data-intent="github"]` —, `.btn-collapse`), `.diff-body`, `.file-card.is-collapsed` |
 | Diff table | `table.diff[data-view]`; `tr.hunk` (`.btn-expand-up`, `.btn-expand-down`, `.btn-expand-all`); `tr.line.add|del|ctx[data-o][data-n][data-x]` (`.is-selected`, `.in-range`); `td.num.old|new[data-side][data-line]`, `td.num.empty`, `td.marker`, `td.code.old|new`, `td.code.empty`, `span.wd`, `span.cr` |
-| Gutter | `button.btn-add-comment[data-side][data-line]` (shared, moved into the hovered `td.num`); in PR mode two of them, `[data-intent="question"]` (*Ask AI*) and `[data-intent="github"]` (*GH comment*), moved together into the hovered `td.gutter` |
+| Gutter | `button.btn-add-comment[data-side][data-line]` (shared, moved into the hovered `td.num`); in PR mode two of them, `[data-intent="question"]` (*Ask AI*) and `[data-intent="github"]` (*GH comment*), moved together and shown once the PR-mode `[+]` (`.btn-fork`) opens |
 | Editor | `tr.editor` / `div.editor-block` → `form.comment-editor[data-key][data-tab]` (`[data-intent="github"]` while it writes a GitHub comment; `.editor-head > .editor-tabs > .editor-tab[data-tab]`, in PR mode on a line or file `.editor-head > .editor-intent > .intent-btn[data-intent]`, `textarea`, `.md-preview`, `.btn-submit-comment`, `.btn-cancel-comment`) |
 | Thread | `tr.threads[data-key]` / `div.thread-block` → `.thread[data-thread-id]` (`.is-resolved`, `.has-new`) → `.comment[data-id][data-author]` (`.comment-meta` `.author .time .tag-pending .tag-round .tag-edited .tag-new .tag-moved`, `a.tag-from[data-sha]` on a projected root, PR mode: `.tag-question`, `.tag-github` / `a.tag-github.is-posted`, `.comment-body`, `.comment-actions` `.act-edit .act-delete .act-reply .act-resolve`), `button.btn-reply`, `button.btn-show-resolved` |
 | Banners/toasts | `#banner-disconnected`, `#banner-compare`, `#banner-reloaded`, `#toasts .toast.info|error|success`, `#notice-token` |
@@ -1104,8 +1106,8 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
   posted from ccr — and GitHub replies), `test_server.py` (the PR routes), `test_cli.py` (`start --pr`, `comment --github`, the round
   header, `gh-post` refusing pending comments and questions, `--dry-run` posting nothing, posting and
   re-posting through a fake `gh` on PATH, `start --pr` on reuse) and `test_e2e.py` (the driver's second
-  scenario, `pr`: the PR link, the forked gutter in its column (by the hovered side in split view, no horizontal
-  overflow at 1280x720 or 1920x1080) and file buttons, the editor switch, a GitHub comment refused outside the pull
+  scenario, `pr`: the PR link, the gutter `[+]` opening into the two (by the hovered side in split view, no
+  horizontal overflow at 1280x720 or 1920x1080) and the file buttons, the editor switch, a GitHub comment refused outside the pull
   request diff and kept as a question, the posted link and toast, a GH reply in a question thread, and Bold /
   Italic on a selection).
 * `test_e2e.py` (skipped without `chromium-browser`/`chromium`/`google-chrome`): starts a server, runs
@@ -1114,7 +1116,7 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
   commit, hovers a diff row and clicks the gutter `[+]`, types a comment, submits it (thread appears), types into another
   editor, checks that it grows with its content (also after leaving the commit and coming back), that the Preview tab
   renders it (`<code>`) and that Cancel keeps the draft, checks that `j` does nothing (shortcuts
-  off), toggles split view (thread still present), drags a 3-line range and comments, submits the round with `#btn-submit`,
+  off), toggles split view (thread still present, under its own side only), drags a 3-line range and comments, submits the round with `#btn-submit`,
   then creates a claude reply via the API and asserts the toast + New dot, reloads the page and asserts the token
   survives (localStorage) — prints `{ok, steps:[…], consoleErrors:[…], screenshots:[paths]}`; the test asserts `ok`,
   zero console errors, and the API state (1 round with verdict `comment`, 3 user comments + the reply).
@@ -1223,7 +1225,7 @@ Nothing else on GitHub is submitted, edited or deleted.
 ### 10.4 UI
 
 With `review.pr` set the top bar shows `#pr-link`; the gutter `[+]` forks into *Ask AI* (a question) and *GH comment*
-(a GitHub comment, right of it), moved together in a column of their own left of the line numbers (7.3); the file header's 💬 forks into *Ask AI*
+(a GitHub comment, right of it) once the `[+]` is hovered or clicked (7.3); the file header's 💬 forks into *Ask AI*
 and *GH comment*; the commit and whole-review buttons read *Ask AI about this commit* and *Ask AI about the whole
 pull request*. A new-comment editor on a line or a file has an *Ask AI | GH comment* switch (`.editor-intent`)
 beside its tabs, which keeps the text; writing a GitHub comment it carries `data-intent="github"`, the label **Add

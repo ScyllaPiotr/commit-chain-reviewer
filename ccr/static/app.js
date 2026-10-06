@@ -921,7 +921,7 @@
     const g = gapInfo(f, gapIndex, state.fileText.get(`${state.viewSha}|${f.path}`));
     if (gapIndex === 0 && g.size === 0) return '';
     const head = lower ? `<span class="hunk-head">${esc(hunkHeader(lower))}${lower.section ? `<span class="section">${esc(lower.section)}</span>` : ''}</span>` : '<span class="hunk-head"></span>';
-    return `<tr class="hunk" data-gap="${gapIndex}"><td colspan="${diffColspan()}"><div class="hunk-inner">${buttons}${head}</div></td></tr>`;
+    return `<tr class="hunk" data-gap="${gapIndex}"><td colspan="4"><div class="hunk-inner">${buttons}${head}</div></td></tr>`;
   }
 
   /* ---- highlighting */
@@ -1052,19 +1052,18 @@
   function threadRowHtml(key) {
     const ids = state.threadsByKey.get(key);
     let html = '';
-    if (ids && ids.length) html += `<tr class="threads" data-key="${esc(key)}"><td colspan="${diffColspan()}">${ids.map(threadHtml).join('')}</td></tr>`;
-    if (state.openEditors.has(key)) html += `<tr class="editor" data-key="${esc(key)}"><td colspan="${diffColspan()}">${editorHtml(key)}</td></tr>`;
+    if (ids && ids.length) html += attachmentRowHtml('threads', key, ids.map(threadHtml).join(''));
+    if (state.openEditors.has(key)) html += attachmentRowHtml('editor', key, editorHtml(key));
     return html;
   }
 
-  /** PR mode gives the gutter buttons a column of their own left of the line numbers (one per side in split view),
-   *  so they never cover the code being marked. */
-  const gutterColumn = () => prMode() && !commentsDisabled();
-  const diffColspan = () => 4 + (gutterColumn() ? (state.viewMode === 'split' ? 2 : 1) : 0);
-  /** The gutter cell left of a side's line number; `side` null for unified rows, whose buttons go by the row's kind. */
-  function gutterCell(side, line) {
-    if (!gutterColumn()) return '';
-    return `<td class="gutter ${side == null ? '' : line == null ? 'empty' : side}"></td>`;
+  /** A thread or editor row: across the whole table in unified view, under its own side only in split view. */
+  function attachmentRowHtml(cls, key, inner) {
+    const side = state.viewMode === 'split' ? (parseLineKey(key) || {}).side : null;
+    if (side !== 'old' && side !== 'new') return `<tr class="${cls}" data-key="${esc(key)}"><td colspan="4">${inner}</td></tr>`;
+    const cell = `<td colspan="2" class="on-side side-${side}">${inner}</td>`;
+    const other = `<td colspan="2" class="off-side side-${side === 'old' ? 'new' : 'old'}"></td>`;
+    return `<tr class="${cls}" data-key="${esc(key)}">${side === 'old' ? cell + other : other + cell}</tr>`;
   }
 
   function numCell(side, line, extraCls = '') {
@@ -1078,7 +1077,7 @@
 
   function unifiedRow(line, tokens, ranges) {
     const marker = line.t === 'add' ? '+' : line.t === 'del' ? '−' : '';
-    return `<tr class="line ${line.t}" ${rowAttrs(line)}>${gutterCell(null)}${numCell('old', line.o)}${numCell('new', line.n)}<td class="marker">${marker}</td><td class="code">${renderCode(tokens, ranges, line)}</td></tr>`;
+    return `<tr class="line ${line.t}" ${rowAttrs(line)}>${numCell('old', line.o)}${numCell('new', line.n)}<td class="marker">${marker}</td><td class="code">${renderCode(tokens, ranges, line)}</td></tr>`;
   }
 
   function splitRow(left, right, tl, tr, rl, rr) {
@@ -1088,8 +1087,7 @@
     const rcls = right && right.t === 'add' ? 'add' : '';
     const lcode = left ? `<td class="code old ${lcls}">${renderCode(tl, rl, left)}</td>` : '<td class="code empty"></td>';
     const rcode = right ? `<td class="code new ${rcls}">${renderCode(tr, rr, right)}</td>` : '<td class="code empty"></td>';
-    const lo = left ? left.o : null; const rn = right ? right.n : null;
-    return `<tr class="line ${cls}" ${attrs}>${gutterCell('old', lo)}${numCell('old', lo, lcls)}${lcode}${gutterCell('new', rn)}${numCell('new', rn, rcls)}${rcode}</tr>`;
+    return `<tr class="line ${cls}" ${attrs}>${numCell('old', left ? left.o : null, lcls)}${lcode}${numCell('new', right ? right.n : null, rcls)}${rcode}</tr>`;
   }
 
   /** Build the whole diff table for a file as one HTML string. */
@@ -1098,9 +1096,9 @@
     const tok = tokensFor(sha, f);
     const source = expansionSource(f);
     let oi = 0; let ni = 0;
-    const g = gutterColumn() ? '<col class="c-gutter">' : '';
-    const cols = view === 'split' ? `${g}<col class="c-num"><col class="c-code">${g}<col class="c-num"><col class="c-code">` : `${g}<col class="c-num"><col class="c-num"><col class="c-marker"><col class="c-code">`;
-    const parts = [`<table class="diff${g ? ' has-gutter' : ''}" data-view="${view}"><colgroup>${cols}</colgroup><tbody>`];
+    const cols = view === 'split' ? '<col class="c-num"><col class="c-code"><col class="c-num"><col class="c-code">' : '<col class="c-num"><col class="c-num"><col class="c-marker"><col class="c-code">';
+    const forked = prMode() && !commentsDisabled(); // PR mode tints the hovered line for its [+] (7.3)
+    const parts = [`<table class="diff${forked ? ' has-fork' : ''}" data-view="${view}"><colgroup>${cols}</colgroup><tbody>`];
     for (let hi = 0; hi <= f.hunks.length; hi++) {
       parts.push(hunkRowHtml(f, hi, source));
       if (hi === f.hunks.length) break;
@@ -1252,9 +1250,11 @@
 
   /* ==================================================================== 4. gutter [+] and selection */
 
-  /** The gutter button(s): one [+], or in PR mode a question for Claude [Ask AI] and a GitHub comment [GH comment]. */
+  /** The gutter button(s): one [+], or in PR mode a [+] that opens, when hovered or clicked, into a question for
+   *  Claude [Ask AI] and a GitHub comment [GH comment]. */
   const GUTTER_BUTTONS = {
     plain: { intent: null, text: '+', label: 'Add comment' },
+    fork: { intent: null, fork: true, text: '+', label: 'Comment on this line: Ask AI or GH comment' },
     question: { intent: 'question', text: 'Ask AI', label: 'Ask AI about this line' },
     github: { intent: 'github', text: 'GH comment', label: 'GH comment on this line, for your pending review' },
   };
@@ -1263,10 +1263,10 @@
     const body = card.querySelector('.diff-body');
     for (const old of card.querySelectorAll('.btn-add-comment')) old.remove();
     if (commentsDisabled() || !body.querySelector('table.diff')) return;
-    for (const spec of prMode() ? [GUTTER_BUTTONS.github, GUTTER_BUTTONS.question] : [GUTTER_BUTTONS.plain]) {
+    for (const spec of prMode() ? [GUTTER_BUTTONS.github, GUTTER_BUTTONS.question, GUTTER_BUTTONS.fork] : [GUTTER_BUTTONS.plain]) {
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'btn-add-comment is-parked';
+      btn.className = spec.fork ? 'btn-add-comment btn-fork is-parked' : 'btn-add-comment is-parked';
       if (spec.intent) btn.dataset.intent = spec.intent;
       btn.setAttribute('aria-label', spec.label);
       btn.title = spec.label;
@@ -1275,24 +1275,39 @@
     }
   }
 
-  /** Move a card's shared gutter button(s) into the number cell for (row, side), or in PR mode into its gutter cell. */
+  /** Move a card's shared gutter button(s) into the number cell for (row, side); the PR-mode [+] closes again
+   *  on another line. */
   function placeGutterButton(row, side, show) {
     const card = row.closest('.file-card');
     const buttons = card ? card.querySelectorAll('.btn-add-comment') : [];
     const cell = row.querySelector(`td.num.${side}[data-line]`);
     if (!buttons.length || !cell) return;
-    const host = row.querySelector(`td.gutter.${side}`) || row.querySelector('td.gutter:not(.empty)') || cell;
     const line = cell.dataset.line;
     const key = lineKey(state.viewSha, card.dataset.path, side, +line);
+    const moved = buttons[0].parentElement !== cell;
     for (const btn of buttons) {
       btn.dataset.side = side;
       btn.dataset.line = line;
       btn.classList.remove('is-parked');
+      if (moved) btn.classList.remove('is-open');
       btn.classList.toggle('is-visible', Boolean(show));
       btn.classList.toggle('has-draft', hasDraftFor(key, btn.dataset.intent || null));
-      if (btn.parentElement !== host) host.appendChild(btn);
+      if (btn.parentElement !== cell) cell.appendChild(btn);
     }
   }
+
+  /** Where and when hovering opened a [+]: a click right there belongs to the [+], not to the [Ask AI] now under it. */
+  let forkOpened = null;
+
+  /** Open the PR-mode [+] into [Ask AI] and [GH comment] where it is. */
+  function openFork(fork, e) {
+    if (fork.classList.contains('is-open')) return;
+    for (const btn of fork.closest('.file-card').querySelectorAll('.btn-add-comment')) btn.classList.add('is-open');
+    forkOpened = e && e.type === 'pointerover' ? { x: e.clientX, y: e.clientY, at: performance.now() } : null;
+  }
+
+  const clickOpenedFork = (e) => Boolean(forkOpened && performance.now() - forkOpened.at < 600
+    && Math.abs(e.clientX - forkOpened.x) < 3 && Math.abs(e.clientY - forkOpened.y) < 3);
 
   function gutterSideFor(row, td) {
     const table = row.closest('table.diff');
@@ -1315,6 +1330,7 @@
   function onGutterHover(e) {
     const row = e.target.closest('tr.line');
     if (commentsDisabled()) return;
+    if (e.target.closest('.btn-fork')) { openFork(e.target.closest('.btn-fork'), e); return; }
     if (!row) { if (!e.target.closest('.btn-add-comment')) reparkGutter(); return; }
     const td = e.target.closest('td');
     const side = gutterSideFor(row, td);
@@ -2865,6 +2881,8 @@
     if ((b = hit('.editor-tab'))) { showEditorTab(b.closest('form.comment-editor'), b.dataset.tab); return; }
     if ((b = hit('.intent-btn'))) { setEditorIntent(b.closest('form.comment-editor'), b.dataset.intent); return; }
     if ((b = hit('.fmt-btn'))) { applyFormat(b.closest('form.comment-editor').querySelector('textarea'), b.dataset.fmt); return; }
+    if ((b = hit('.btn-fork'))) { e.preventDefault(); openFork(b, e); return; }
+    if ((b = hit('.btn-add-comment')) && b.dataset.intent && clickOpenedFork(e)) { e.preventDefault(); return; }
     if ((b = hit('.btn-add-comment'))) { e.preventDefault(); const a = anchorForGutter(b); openEditor(anchorKey(a), { mode: 'new', anchor: a, intent: b.dataset.intent }); return; }
     if ((b = hit('.btn-collapse'))) { toggleCollapseCard(b.closest('.file-card')); return; }
     if ((b = hit('.btn-comment-file'))) {
