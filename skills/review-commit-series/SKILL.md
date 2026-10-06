@@ -254,6 +254,9 @@ comments in the order they were written (`gh-post` refuses a reply whose thread 
     one when there is none), one comment at a time, re-reads the review after each and records the post. That
     ends your part: no reply and no resolve in ccr (the comment shows as posted, linked to GitHub, and the user is
     told to submit the review there); a posted comment drops out of `--unanswered`.
+  - A posted comment the user edited since reads `GitHub comment (posted: <url>; edited since, the update not posted
+    yet)`: check the new text like a new comment; when sound, `ccr gh-post` updates that comment in the pending review
+    (`<id>: updated → <url>`), it never adds a second one.
   - Not sound → do not post, and never post a reworded version. Reply with what is wrong and one corrected wording,
     without `[resolve]`. The user edits the comment (an edit makes it pending again) or answers "post it as it is",
     and submits again; then check the text as it is now, and post.

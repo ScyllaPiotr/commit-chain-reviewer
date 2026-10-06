@@ -680,8 +680,12 @@ def test_pr_mode_routes(live):
     assert posted.json["github"]["url"] == "https://github.com/o/r/pull/7#discussion_r1"
     again = live.post("/api/comments/%s/github" % root["id"], {"posted": {"url": "https://github.com/x"}})
     assert again.status == 409
-    frozen = live.request("PATCH", "/api/comments/%s" % root["id"], body={"body": "Reworded"})
-    assert frozen.status == 409 and "change it there" in frozen.json["error"]
+    frozen = live.request("PATCH", "/api/comments/%s" % root["id"], body={"github": False})
+    assert frozen.status == 409 and "its place stays" in frozen.json["error"]
+    reworded = live.request("PATCH", "/api/comments/%s" % root["id"], body={"body": "Reworded"})
+    assert reworded.status == 200 and reworded.json["github"]["edited"] is True
+    updated = live.post("/api/comments/%s/github" % root["id"], {"updated": {"url": "https://github.com/o/r/pull/7#discussion_r1"}})
+    assert updated.status == 200 and "edited" not in updated.json["github"]
     assert live.post("/api/comments/%s/github" % question["id"], {}).status == 400
     assert live.request("PUT", "/api/comments/%s/github" % root["id"]).status in (404, 501)
 

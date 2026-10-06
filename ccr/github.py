@@ -21,7 +21,8 @@ import subprocess
 from . import gitx
 from .gitx import GitError
 
-__all__ = ["GitHubError", "parse_pr", "pr_label", "run_gh", "PullRequest", "post_comment", "fetch_discussion"]
+__all__ = ["GitHubError", "parse_pr", "pr_label", "run_gh", "PullRequest", "post_comment", "update_comment",
+           "fetch_discussion"]
 
 GH_TIMEOUT = 60
 DEFAULT_HOST = "github.com"
@@ -95,6 +96,9 @@ _DISCARD_REVIEW = """mutation CcrDiscardReview($input: DeletePullRequestReviewIn
 }"""
 _ADD_REPLY = """mutation CcrAddReply($input: AddPullRequestReviewThreadReplyInput!) {
   addPullRequestReviewThreadReply(input: $input) { comment { id databaseId body url replyTo { id } } }
+}"""
+_UPDATE_COMMENT = """mutation CcrUpdateComment($input: UpdatePullRequestReviewCommentInput!) {
+  updatePullRequestReviewComment(input: $input) { pullRequestReviewComment { id databaseId body url } }
 }"""
 _ADD_THREAD = """mutation CcrAddThread($input: AddPullRequestReviewThreadInput!) {
   addPullRequestReviewThread(input: $input) {
@@ -243,6 +247,15 @@ class PullRequest:
         comment = (self.graphql(_ADD_REPLY, {"input": payload}).get("addPullRequestReviewThreadReply") or {}).get("comment")
         if not comment:
             raise GitHubError("GitHub answered without the reply")
+        return comment
+
+    def update_comment(self, comment_id: str, body: str) -> dict:
+        """Replace the body of a comment in the user's pending review; returns GitHub's comment."""
+        payload = {"pullRequestReviewCommentId": comment_id, "body": body}
+        data = self.graphql(_UPDATE_COMMENT, {"input": payload}).get("updatePullRequestReviewComment") or {}
+        comment = data.get("pullRequestReviewComment")
+        if not comment:
+            raise GitHubError("GitHub answered without the comment")
         return comment
 
     def _pages(self, document: str, variables: dict, connection_of) -> list:
@@ -427,6 +440,45 @@ def post_comment(client: PullRequest, target: dict, body: str, repo=None) -> dic
         problems.append("could not re-read the pending review to confirm the comment: %s" % exc)
     return {"record": _record(review, thread, comment, target), "created_review": created, "already": False,
             "notes": notes, "problems": problems}
+
+
+def update_comment(client: PullRequest, node_id: str, body: str) -> dict:
+    """Put ``body`` verbatim into the comment ``node_id`` of the user's pending review, which ccr posted earlier.
+
+    Refused, changing nothing, when the comment is not in the pending review any more (the review was submitted
+    or deleted, or the comment removed there).  Returns ``{"url", "already", "problems"}``: ``already`` means the
+    comment had that body already; ``problems`` lists what the re-read could not confirm (it is updated anyway).
+    """
+    before = client.snapshot()
+    review = before["review"]
+    current = next((c for c in (review or {}).get("comments", []) if c["id"] == node_id), None)
+    if current is None:
+        raise GitHubError("the comment is not in your pending review on %s any more (the review submitted or "
+                          "deleted, or the comment removed there); change it on GitHub" % pr_label(client.pr))
+    if _normal(current["body"]) == _normal(body):
+        return {"url": current["url"], "already": True, "problems": []}
+    comment = client.update_comment(node_id, body)
+    problems = []
+    try:
+        after = client.snapshot()
+    except GitHubError as exc:
+        return {"url": comment.get("url") or current["url"], "already": False,
+                "problems": ["could not re-read the pending review to confirm the change: %s" % exc]}
+    now = after["review"]
+    if now is None or now["id"] != review["id"]:
+        problems.append("the pending review %s is gone from GitHub (submitted or deleted meanwhile?)" % review["id"])
+    else:
+        by_id = {c["id"]: c for c in now["comments"]}
+        stored = by_id.get(node_id)
+        if stored is None or _normal(stored["body"]) != _normal(body):
+            problems.append("GitHub does not show the new text in the pending review")
+        for old in review["comments"]:
+            if old["id"] != node_id and (old["id"] not in by_id or by_id[old["id"]]["body"] != old["body"]):
+                problems.append("comment %s of the pending review changed meanwhile" % old["databaseId"])
+    if after["submitted"] != before["submitted"]:
+        problems.append("you have %d submitted reviews on the pull request now, %d before"
+                        % (after["submitted"], before["submitted"]))
+    return {"url": comment.get("url") or current["url"], "already": False, "problems": problems}
 
 
 def fetch_discussion(client: PullRequest) -> dict:

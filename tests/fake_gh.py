@@ -2,7 +2,7 @@
 
 It understands ccr's named GraphQL operations (``CcrViewer``, ``CcrPendingReview``, ``CcrReviewComments``,
 ``CcrThreads``, ``CcrThreadComments``, ``CcrReviews``, ``CcrStartReview``, ``CcrDiscardReview``, ``CcrAddThread``,
-``CcrAddReply``) sent as ``gh api graphql --input -`` and the REST compare call that yields a merge base, and it
+``CcrAddReply``, ``CcrUpdateComment``) sent as ``gh api graphql --input -`` and the REST compare call that yields a merge base, and it
 enforces what GitHub enforces and ccr relies on: one pending review per user, reviews only on commits of the pull
 request, threads only on lines of the pull request diff, other users' pending comments invisible, everything paged
 ``first``/``after``, and nothing but pending reviews touched.  Anything else fails loudly, so a test notices
@@ -220,6 +220,22 @@ class FakeGitHub:
         return {"addPullRequestReviewThreadReply": {"comment": {"id": reply["id"], "databaseId": reply["databaseId"],
                                                                 "body": reply["body"], "url": reply["url"],
                                                                 "replyTo": {"id": found["id"]}}}}
+
+    def _op_CcrUpdateComment(self, variables: dict) -> dict:
+        data = variables["input"]
+        if set(data) != {"pullRequestReviewCommentId", "body"}:
+            raise FakeError("fake gh: ccr updates a comment's body only: %s" % sorted(data))
+        found = next(((r, c) for r in self.state["reviews"] for c in r["comments"]
+                      if c["id"] == data["pullRequestReviewCommentId"]), None)
+        if found is None:
+            raise FakeError("Could not resolve to a node with the global id of '%s'" % data["pullRequestReviewCommentId"])
+        review, comment = found
+        if review["author"] != self.state["login"] or review["state"] != "PENDING":
+            raise FakeError("fake gh: ccr updates comments of the user's own pending review only")
+        comment["body"] = data["body"]
+        self.save()
+        return {"updatePullRequestReviewComment": {"pullRequestReviewComment": {
+            "id": comment["id"], "databaseId": comment["databaseId"], "body": comment["body"], "url": comment["url"]}}}
 
     def _op_CcrReviewComments(self, variables: dict) -> dict:
         review = next((r for r in self.state["reviews"] if r["id"] == variables["review"]), None)

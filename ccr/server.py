@@ -447,7 +447,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif depth == 3 and head == "comments" and parts[2] == "github" and method == "GET":
             route = lambda: self._send_json(200, self.server.store.github_target(parts[1]))
         elif depth == 3 and head == "comments" and parts[2] == "github" and method == "POST":
-            route = lambda: self._send_json(200, self.server.store.record_github_post(parts[1], body.get("posted")))
+            store = self.server.store
+            route = (lambda: self._send_json(200, store.record_github_update(parts[1], body.get("updated")))) \
+                if isinstance(body, dict) and "updated" in body \
+                else (lambda: self._send_json(200, store.record_github_post(parts[1], body.get("posted"))))
         elif depth == 2 and head == "github" and parts[1] == "sync" and method == "POST":
             route = lambda: self._send_json(200, self.server.store.sync_github(body))
         if route is None:

@@ -673,7 +673,8 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
   verbatim into the user's pending review, one at a time (a repeated id once), and records it; every comment's
   state and body are read from the server right before it is posted; prints `ccr: started your pending review
   on <owner/repo#N>` when it had to start one, `<id>: posted <path>:<line> (<side>) → <url>` (or `(file)`), `  note: …`
-  and `  warning: …` lines, `<id>: already posted → <url>` for a comment posted earlier, and finally `ccr: your pending
+  and `  warning: …` lines, `<id>: already posted → <url>` for a comment posted earlier, `<id>: updated → <url>` for a posted comment
+  edited since (10.3), and finally `ccr: your pending
   review is on GitHub, to submit with a verdict there: <pr url>/files`. A question, a comment still pending in ccr,
   an unknown id or a refusal by ccr or GitHub is `<id>: ERROR …`; exit 1 if any item failed or drew a warning.
   `--dry-run` re-reads the discussion and lists its news too, posts nothing, and prints `<id>: would post to <owner/repo#N> <path>:<line> (<side>), commit
@@ -729,7 +730,8 @@ Why not use the existing backoff helper here?
 ```
 
 In PR mode the document header carries ` — PR <owner/repo#N>` after the range, and every root says what it is for
-right after its author: `GitHub comment (not posted)`, `GitHub comment (posted: <url>)`, or `question` for the
+right after its author: `GitHub comment (not posted)`, `GitHub comment (posted: <url>)` (with `; edited since, the
+update not posted yet` when it was edited after posting), or `question` for the
 user's other roots (`#### [id: k3f9a2] user · question · new:11 → HEAD …`).
 
 Snippet block: `--context N` (default 3) rows before/after from the cached diff, each `<old#|blank> <new#|blank>
@@ -1152,11 +1154,16 @@ per review (`reviews.pr`, schema 3) and set by `set_pr` (`--pr`, `POST /api/pr`)
 `[A-Za-z0-9_.-]+`. `Comment.github` is null for every question, `{"status": "local"}` for a GitHub comment or reply
 not on GitHub yet, and once posted `{"status": "posted", "posted_at", "url", "comment_id", "node_id", "thread_id",
 "review_id", "path", "subject_type", "line", "side", "start_line", "start_side", "commit"}` (`comments.github`). A
-posted comment is frozen in ccr: changing its body or anchor, or turning it back into a question, is 409 *"comment X
-is posted to your pending GitHub review (<url>); change it there"*; resolving and deleting it (from ccr only) stay
-possible, and posting is not an edit (`updated_at` is kept). A submitted GitHub comment that is not posted yet goes
-back to `pending` (`round` null) when its body or anchor is edited or when a question is turned into one: what the
-agent checked is not what would be posted, so it is a draft again until the user submits it.
+posted comment keeps its place and kind: moving it or turning it back into a question is 409 *"comment X is posted
+to your pending GitHub review (<url>); its place stays, only its text can change"*. Its body can change while its
+review is pending on GitHub: the record gains `"edited": true` until `ccr gh-post` has put the new text into the
+pending review (10.3), which `POST /api/comments/{id}/github` with `{"updated": {"url"}}` records (dropping `edited`,
+adding `updated_at`; 409 without an edit waiting). Once a sync says GitHub has it as SUBMITTED (`github_state`, the
+user submitted the review) a new body is 409 *"… is published on GitHub with your submitted review (<url>); change
+it there"*. Resolving and deleting a posted comment (from ccr only) stay possible, and posting is not an edit
+(`updated_at` is kept). A submitted GitHub comment, posted or not, goes back to `pending` (`round` null) when its body
+or anchor is edited or when a question is turned into one: what the agent checked is not what would be posted, so it
+is a draft again until the user submits it.
 
 ### 10.2 Where GitHub anchors a comment
 
@@ -1220,6 +1227,14 @@ account `gh auth` holds:
 7. `POST /api/comments/{id}/github` records the post (10.1). When that fails the line says the comment was posted
    but not recorded; running `ccr gh-post` again finds it (step 3) and records it.
 
+A posted comment edited in ccr since (`edited`, 10.1) is updated instead, through `ccr.github.update_comment`:
+`CcrPendingReview`, refused (nothing changed) when the comment is no longer in the user's pending review — submitted,
+deleted or removed there — and a no-op when it has the new body already; else `CcrUpdateComment`
+(`updatePullRequestReviewComment` with `pullRequestReviewCommentId` and `body`), then a re-read that must show the
+new body and every other comment of the review unchanged (each discrepancy a `warning`), and `{"updated"}` is
+recorded. `--dry-run` prints `<id>: would update <url> in your pending review on <owner/repo#N>; new body:` and the
+body.
+
 Nothing else on GitHub is submitted, edited or deleted.
 
 ### 10.4 UI
@@ -1236,7 +1251,8 @@ shows on the matching button. A thread's Reply, in its foot and among a comment'
 review body); each opens the reply editor as that kind (or switches
 the open one), and a collapsed thread's line has **Ask AI** too, which expands the thread for the question. Roots
 are tagged *Question* or *GitHub · not posted*; a posted one carries `a.tag-github.is-posted` (*GitHub ↗*, also on
-its collapsed resolved line) linking to the comment, and has no Edit action (Delete says it removes the comment from
+its collapsed resolved line) linking to the comment; it keeps its Edit action while GitHub has its review pending,
+and an edit not in the pending review yet adds the tag *edit not posted* (Delete says it removes the comment from
 ccr only, and is gone once its thread holds a mirrored reply, 10.5). Every comment carries `data-channel`: `github`
 for what is or goes on GitHub (a GitHub comment or reply, posted or not, and every mirrored comment, 10.5) and
 `claude` for the exchange with Claude (questions and Claude's comments), on a grey and a blue background with a

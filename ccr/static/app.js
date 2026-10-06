@@ -1790,7 +1790,8 @@
   /** The tag of a GitHub comment: "not posted" until Claude posts it, then a link to it in the pending review. */
   function githubTagHtml(c) {
     if (isPosted(c)) {
-      return `<a class="tag tag-github is-posted" href="${esc(c.github.url)}" target="_blank" rel="noopener noreferrer" title="In your pending review on GitHub since ${esc(fmtAbs(c.github.posted_at))}; change or submit it there">GitHub ↗</a>`;
+      const link = `<a class="tag tag-github is-posted" href="${esc(c.github.url)}" target="_blank" rel="noopener noreferrer" title="In your pending review on GitHub since ${esc(fmtAbs(c.github.posted_at))}; edit it here, or change or submit it there">GitHub ↗</a>`;
+      return c.github.edited ? link + '<span class="tag tag-github" title="Edited here since it was posted: once you submit, Claude checks the new text and updates the comment in your pending review">edit not posted</span>' : link;
     }
     return '<span class="tag tag-github" title="A GitHub comment: once you submit, Claude checks it and posts it verbatim to your pending review on GitHub">GitHub · not posted</span>';
   }
@@ -1844,7 +1845,7 @@
     return `<div class="comment" data-id="${esc(c.id)}" data-author="${esc(c.author)}"${channelAttr(c.github)}>
       <div class="comment-meta">${avatarHtml(c.author, isMirrored(c) ? c.github.login : name)}<span class="author">${esc(name)}</span>${timeHtml(c.created_at)}${commentTags(c, root)}
         <div class="comment-actions" role="group" aria-label="Comment actions">
-          ${isPosted(c) || isMirrored(c) ? '' : '<button type="button" class="act-edit" aria-label="Edit comment">Edit</button>'}
+          ${isMirrored(c) || (isPosted(c) && c.github.github_state === 'SUBMITTED') ? '' : '<button type="button" class="act-edit" aria-label="Edit comment">Edit</button>'}
           ${fromGitHub ? '' : '<button type="button" class="act-delete" aria-label="Delete comment">Delete</button>'}
           ${replyButtonsHtml(root ? c : rootOf(c), 'act-reply', 'Reply to thread')}
           ${root ? `<button type="button" class="act-resolve" aria-label="${c.resolved ? 'Unresolve' : 'Resolve'} thread">${c.resolved ? 'Unresolve' : 'Resolve'}</button>` : ''}

@@ -724,7 +724,9 @@ export async function runPrScenario(page, url) {
     const link = `#main .thread[data-thread-id="${githubId}"] a.tag-github.is-posted`;
     await page.waitFor(`document.querySelector(${JSON.stringify(link)})`, { label: 'GitHub link tag' });
     const tag = await page.evaluate(`(() => { const a = document.querySelector(${JSON.stringify(link)}); return { href: a.href, target: a.target, edit: Boolean(a.closest('.comment').querySelector('.act-edit')), del: Boolean(a.closest('.comment').querySelector('.act-delete')) }; })()`);
-    if (tag.href !== PR_URL + '#discussion_r42' || tag.target !== '_blank' || tag.edit || !tag.del) throw new Error('posted tag: ' + JSON.stringify(tag));
+    if (tag.href !== PR_URL + '#discussion_r42' || tag.target !== '_blank' || !tag.edit || !tag.del) throw new Error('posted tag: ' + JSON.stringify(tag));
+    await page.api(`/api/comments/${githubId}`, { method: 'PATCH', body: JSON.stringify({ body: 'Why 500, not 50?' }) });
+    await page.waitFor(`[...document.querySelectorAll(${JSON.stringify(`#main .thread[data-thread-id="${githubId}"] .tag-github`)})].some((t) => t.textContent === 'edit not posted')`, { label: 'an edited posted comment says its edit is not posted', timeout: 15000 });
     const submitTitle = await page.evaluate(`document.querySelector('#btn-submit').title`);
     if (!submitTitle.startsWith('Send 5 pending comments to Claude')) throw new Error('submit title: ' + submitTitle);
     await page.shot('pr-03-posted');

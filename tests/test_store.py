@@ -1217,14 +1217,29 @@ def test_github_comments_switch_and_freeze_once_posted(fixture_repo, pr_store):
                                 "subject_type": "LINE", "line": 6, "side": "RIGHT", "start_line": None,
                                 "start_side": None, "commit": fixture_repo.feature}
     assert posted["updated_at"] == moved["updated_at"], "posting is not an edit"
-    for change in (dict(body="Reworded"), dict(anchor=line_anchor(sha, "src/app.py", 5)), dict(github=False)):
-        with pytest.raises(StoreError, match="posted to your pending GitHub review .*discussion_r9.*; change it there") as info:
+    for change in (dict(anchor=line_anchor(sha, "src/app.py", 5)), dict(github=False)):
+        with pytest.raises(StoreError, match="posted to your pending GitHub review .*discussion_r9.*; its place stays") as info:
             pr_store.edit_comment(root["id"], **change)
         assert info.value.status == 409
     with pytest.raises(StoreError, match="posted to your pending GitHub review") as info:
         pr_store.record_github_post(root["id"], {"url": PR_URL + "#discussion_r10"})
     assert info.value.status == 409
-    assert pr_store.edit_comment(root["id"], body="Why 500 here?")["body"] == "Why 500 here?", "an identical body is no edit"
+    assert pr_store.edit_comment(root["id"], body="Why 500 here?")["github"].get("edited") is None, "an identical body is no edit"
+    with pytest.raises(StoreError, match="no edit waiting") as info:
+        pr_store.record_github_update(root["id"], {})
+    assert info.value.status == 409
+    pr_store.submit("comment", "")
+    reworded = pr_store.edit_comment(root["id"], body="Why 500, not 50?")
+    assert reworded["github"]["edited"] is True and reworded["github"]["status"] == "posted"
+    assert (reworded["state"], reworded["round"]) == ("pending", None), "the new text is a draft until submitted again"
+    assert pr_store.github_target(root["id"])["github"]["edited"] is True
+    updated = pr_store.record_github_update(root["id"], {"url": PR_URL + "#discussion_r9"})
+    assert "edited" not in updated["github"] and updated["github"]["updated_at"] and updated["body"] == "Why 500, not 50?"
+    pr_store.sync_github(discussion(fixture_repo.feature, [gh_thread("T9", [gh_comment(
+        "C9", "reviewer", "Why 500, not 50?", database_id=9, state="SUBMITTED")], line=6)]))
+    with pytest.raises(StoreError, match="published on GitHub with your submitted review .*; change it there") as info:
+        pr_store.edit_comment(root["id"], body="Why 5000?")
+    assert info.value.status == 409
     assert pr_store.edit_comment(root["id"], resolved=True)["resolved"] is True
     assert pr_store.github_target(root["id"])["github"]["status"] == "posted"
     pr_store.delete_comment(root["id"])

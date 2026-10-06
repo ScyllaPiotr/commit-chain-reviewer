@@ -625,8 +625,25 @@ def test_pr_mode_questions_and_github_comments(cli, fixture_repo, tmp_path, ccr_
                             "1 unanswered)"), "a posted GitHub comment waits for no answer"
     waiting = cli.run("comments", "--unanswered", check=0).stdout
     assert "[id: %s]" % question in waiting and "[id: %s]" % remark not in waiting
-    frozen = cli.run("edit", remark, "Reworded")
-    assert frozen.returncode == 1 and "change it there" in frozen.stderr
+    moved = cli.run("move", remark, "--commit", three, "--path", "src/app.py", "--line", "6")
+    assert moved.returncode == 1 and "its place stays" in moved.stderr
+
+    # -- a posted comment edited in ccr: checked again, then updated in place in the pending review
+    assert cli.run("edit", remark, "Why 500, not 50 or 5000?", check=0).returncode == 0
+    assert "GitHub comment (posted: %s; edited since, the update not posted yet)" % url in cli.run("comments", check=0).stdout
+    held = cli.run("gh-post", remark, env=env)
+    assert held.returncode == 1 and "still pending in ccr" in held.stdout, "an edit is a draft until submitted"
+    api(record, "POST", "/api/submit", {"verdict": "comment", "summary": ""})
+    header = cli.run("wait", "--since-round", str(len(api(record, "GET", "/api/review")["rounds"]) - 1), "--timeout", "5",
+                     check=0).stdout.splitlines()[0]
+    assert header.endswith("— 1 GitHub comment to check and post"), header
+    assert cli.run("gh-post", "--dry-run", remark, env=env, check=0).stdout == (
+        "%s: would update %s in your pending review on o/r#7; new body:\n    Why 500, not 50 or 5000?\n" % (remark, url))
+    assert github_state()["reviews"][0]["comments"][0]["body"] == "Why 500, not 50?", "a dry run changes nothing"
+    assert cli.run("gh-post", remark, env=env, check=0).stdout.splitlines()[0] == "%s: updated → %s" % (remark, url)
+    pending = github_state()["reviews"][0]
+    assert [c["body"] for c in pending["comments"]] == ["Why 500, not 50 or 5000?"], "updated, not added"
+    assert cli.run("gh-post", remark, env=env, check=0).stdout == "%s: already posted → %s\n" % (remark, url)
 
     # -- the discussion on GitHub: nyh's thread comes into ccr, and a GitHub reply goes back into it
     state = github_state()
@@ -649,8 +666,8 @@ def test_pr_mode_questions_and_github_comments(cli, fixture_repo, tmp_path, ccr_
     answer = api(record, "POST", "/api/comments", {"body": "Because of the spec.", "parent_id": thread["id"], "github": True})
     api(record, "POST", "/api/submit", {"verdict": "comment", "summary": ""})
     api(record, "POST", "/api/comments", {"body": "And a draft.", "parent_id": thread["id"], "github": True})
-    header = cli.run("wait", "--since-round", "2", "--timeout", "5", check=0).stdout.splitlines()[0]
-    assert header == "ccr: round 3 — 1 new comments in 1 threads — 1 GitHub comment to check and post", \
+    header = cli.run("wait", "--since-round", "3", "--timeout", "5", check=0).stdout.splitlines()[0]
+    assert header == "ccr: round 4 — 1 new comments in 1 threads — 1 GitHub comment to check and post", \
         "the GitHub reply counts, the draft after it does not"
     plan = cli.run("gh-post", "--dry-run", answer["id"], env=env, check=0).stdout
     assert plan.startswith("%s: would post to o/r#7 reply to @nyh on src/app.py, commit %s\n  thread: "

@@ -169,17 +169,18 @@ def test_browser_pr_mode_flow(live_pr, tmp_path):
     #    comments mirrored from GitHub
     everything = live_pr.store.list_comments()
     comments = {c["body"]: c for c in everything if c["author"] == "user"}
-    assert set(comments) == {"Why does the series need two commits?", "Why 500?", "What is value 6 for?",
+    assert set(comments) == {"Why does the series need two commits?", "Why 500, not 50?", "What is value 6 for?",
                              "Unrelated to the change", "Please split this file.", "Agreed, see the design.",
                              "Which spec does radek mean?", "Should value 6 be named?"}, pretty
     assert all(c["state"] == "pending" for c in comments.values())
     mirrored = [c for c in everything if c["author"] == "github"]
     assert len(mirrored) == 5 and comments["Agreed, see the design."]["github"] == {"status": "local"}
-    assert next(c for c in mirrored if c["github"]["node_id"] == "C4")["parent_id"] == comments["Why 500?"]["id"]
+    assert next(c for c in mirrored if c["github"]["node_id"] == "C4")["parent_id"] == comments["Why 500, not 50?"]["id"]
     assert comments["Agreed, see the design."]["parent_id"] == next(c["id"] for c in mirrored if c["github"]["node_id"] == "C1")
     assert comments["Which spec does radek mean?"]["github"] is None, "a question in a GitHub thread stays in ccr"
     assert comments["Which spec does radek mean?"]["parent_id"] == comments["Agreed, see the design."]["parent_id"]
-    assert comments["Why 500?"]["github"]["status"] == "posted" and comments["Why 500?"]["anchor"]["line"] == 5
+    assert comments["Why 500, not 50?"]["github"]["status"] == "posted" and comments["Why 500, not 50?"]["anchor"]["line"] == 5
+    assert comments["Why 500, not 50?"]["github"]["edited"] is True, "edited after posting: the update waits for gh-post"
     assert comments["Please split this file."]["github"] == {"status": "local"}
     assert comments["Please split this file."]["anchor"]["kind"] == "file"
     for question in ("Why does the series need two commits?", "What is value 6 for?", "Unrelated to the change"):

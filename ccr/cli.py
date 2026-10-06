@@ -621,7 +621,7 @@ def report_round(client: Client, number: int, as_json: bool) -> int:
     verdict = round_info.get("verdict")
     label = "" if verdict in (None, "", "comment") else " — %s" % verdict  # "comment" = no verdict
     to_post = sum(1 for t in selected for c in [t["root"]] + t["replies"]
-                  if (c.get("github") or {}).get("status") == "local" and c.get("state") != "pending")
+                  if render.awaits_github(c) and c.get("state") != "pending")
     todo = " — %d GitHub comment%s to check and post" % (to_post, "" if to_post == 1 else "s") if to_post else ""
     out("ccr: round %d%s — %d new comments in %d threads%s" % (number, label, len(round_info["comment_ids"]),
                                                                len(selected), todo))
@@ -923,11 +923,14 @@ def print_github_plan(comment_id: str, target: dict, say) -> None:
 def post_one(client: Client, remote, review: dict, comment_id: str, dry_run: bool, say) -> dict:
     """Check one GitHub comment, then post it (or show where it would go); returns its ``--json`` entry."""
     target = client.get("/api/comments/%s/github" % quote(comment_id, safe=""))
-    if target["github"]["status"] == "posted":
+    edited = target["github"]["status"] == "posted" and target["github"].get("edited")
+    if target["github"]["status"] == "posted" and not edited:
         say("%s: already posted → %s" % (comment_id, target["github"]["url"]))
         return {"id": comment_id, "ok": True, "already": True, "github": target["github"]}
     if target["state"] != "submitted":
         raise CliError("comment %s is still pending in ccr; it can be posted once the user submits it" % comment_id)
+    if edited:
+        return update_one(client, remote, comment_id, target, dry_run, say)
     if dry_run:
         print_github_plan(comment_id, target, say)
         return {"id": comment_id, "ok": True, "target": target}
@@ -956,6 +959,28 @@ def print_github_news(news: list, say) -> None:
         excerpt = render.clean(item["body"], True)
         say("  %-7s %s @%s on %s: %s" % (item["change"], item["id"], render.clean(item["login"], True), where,
                                         excerpt if len(excerpt) <= 72 else excerpt[:71] + "…"))
+
+
+def update_one(client: Client, remote, comment_id: str, target: dict, dry_run: bool, say) -> dict:
+    """Put the new text of a posted GitHub comment, edited in ccr since, into the pending review (10.3)."""
+    url = target["github"]["url"]
+    if dry_run:
+        say("%s: would update %s in your pending review on %s; new body:" % (comment_id, url, github.pr_label(target["pr"])))
+        for line in target["body"].split("\n"):
+            say("    " + render.clean(line))
+        return {"id": comment_id, "ok": True, "target": target}
+    result = github.update_comment(remote, target["github"]["node_id"], target["body"])
+    try:
+        updated = client.post("/api/comments/%s/github" % quote(comment_id, safe=""), {"updated": {"url": result["url"]}})
+    except (ApiError, URLError) as exc:
+        raise CliError("updated in your pending review (%s) but ccr could not record it (%s); run ccr gh-post %s "
+                       "again to record it" % (url, exc, comment_id)) from None
+    say("%s: %s → %s" % (comment_id, "found updated already in your pending review" if result["already"] else "updated",
+                         result["url"]))
+    for problem in result["problems"]:
+        say("  warning: %s" % problem)
+    return {"id": comment_id, "ok": not result["problems"], "posted": True, "updated": True, "comment": updated,
+            "problems": result["problems"]}
 
 
 def cmd_gh_sync(args) -> int:

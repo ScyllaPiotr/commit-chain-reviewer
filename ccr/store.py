@@ -348,7 +348,12 @@ def _moved_from(anchor: dict) -> str:
 
 
 def _posted_message(comment: dict) -> str:
-    return "comment %s is posted to your pending GitHub review (%s); change it there" % (
+    return "comment %s is posted to your pending GitHub review (%s); its place stays, only its text can change" % (
+        comment["id"], comment["github"].get("url") or "no url")
+
+
+def _published_message(comment: dict) -> str:
+    return "comment %s is published on GitHub with your submitted review (%s); change it there" % (
         comment["id"], comment["github"].get("url") or "no url")
 
 
@@ -1173,7 +1178,8 @@ class ReviewStore:
 
     def edit_comment(self, comment_id, body=None, resolved=None, anchor=None, github=None) -> dict:
         """Change the body, the resolved flag (roots only), the anchor (roots only; sets ``moved_from``) and/or
-        whether a root is a GitHub comment; a GitHub comment that is posted only changes its resolved flag."""
+        whether a root is a GitHub comment. A GitHub comment that is posted keeps its place and kind: a new body
+        marks it ``edited``, for ``ccr gh-post`` to update in the pending review, until its review is submitted."""
         if body is None and resolved is None and anchor is None and github is None:
             raise StoreError("nothing to edit: pass body, resolved, anchor or github")
         if github is not None and not isinstance(github, bool):
@@ -1187,10 +1193,13 @@ class ReviewStore:
             if body is not None:
                 text = _validate_body(body)
                 if text != current["body"]:
-                    if posted:
-                        raise StoreError(_posted_message(current), 409)
+                    if posted and current["github"].get("github_state") == "SUBMITTED":
+                        raise StoreError(_published_message(current), 409)
                     assignments.append("body = ?")
                     params.append(text)
+                    if posted:  # the pending review still has the old text until gh-post updates it (10.1)
+                        assignments.append("github = ?")
+                        params.append(json.dumps(dict(current["github"], edited=True)))
                     edited = True
             if resolved is not None:
                 if not isinstance(resolved, bool):
@@ -1222,7 +1231,7 @@ class ReviewStore:
             if to_github and not posted and (github or new_anchor is not None):
                 self._check_github(current["author"], current["parent_id"], new_anchor or current["anchor"],
                                    current["snippet"] if new_anchor is None else snippet, comment_id)
-            if to_github and not posted and edited and current["state"] == "submitted":
+            if to_github and edited and current["state"] == "submitted":
                 # what the agent checked is not what would be posted any more: it is a draft again (10.1)
                 assignments += ["state = 'pending'", "round = NULL"]
             if edited:
@@ -1362,6 +1371,23 @@ class ReviewStore:
                         subject_type="REPLY", line=None, side=None, start_line=None, start_side=None, lines=[],
                         thread_id=thread["thread_id"], reply_to=thread["reply_to"], thread_url=thread["url"],
                         thread_author=thread["login"])
+
+    def record_github_update(self, comment_id, updated) -> dict:
+        """Remember that a posted GitHub comment's new text is in the pending review now (``updated``: its URL)."""
+        if not isinstance(updated, dict):
+            raise StoreError("updated must be an object")
+        with self._lock:
+            comment = self._github_comment(comment_id)
+            github = comment["github"]
+            if github.get("status") != "posted" or not github.get("edited"):
+                raise StoreError("comment %s has no edit waiting for your pending GitHub review" % comment_id, 409)
+            record = {key: value for key, value in github.items() if key != "edited"}
+            record["updated_at"] = utcnow()
+            if isinstance(updated.get("url"), str) and updated["url"].startswith("https://"):
+                record["url"] = updated["url"]
+            with self._mutate():
+                self._conn.execute("UPDATE comments SET github = ? WHERE id = ?", (json.dumps(record), comment_id))
+            return self._fetch(comment_id)
 
     def record_github_post(self, comment_id, posted) -> dict:
         """Remember that a GitHub comment now lives in the user's pending review (``posted``: where and as what)."""

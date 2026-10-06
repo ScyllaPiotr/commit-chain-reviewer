@@ -141,9 +141,10 @@ def build_threads(comments: list) -> list:
     for root in roots:
         replies = sorted(by_root.get(root["id"], []), key=lambda c: c.get("created_at") or "")
         last = replies[-1] if replies else root
-        # a GitHub comment or reply posted from ccr waits for nobody in ccr
+        # a GitHub comment or reply posted from ccr waits for nobody in ccr, unless it was edited since
         threads.append({"root": root, "replies": replies, "last_author": last.get("author"),
-                        "answered": last.get("author") != "user" or (last.get("github") or {}).get("status") == "posted"})
+                        "answered": last.get("author") != "user" or ((last.get("github") or {}).get("status") == "posted"
+                                                                       and not awaits_github(last))})
     return threads
 
 
@@ -316,6 +317,17 @@ def _mirrored(comment: dict, thread_level: bool) -> list:
     return [label + (" (%s)" % ", ".join(flags) if flags else "")] if thread_level or flags else []
 
 
+def awaits_github(comment: dict) -> bool:
+    """A GitHub comment or reply with something for ``ccr gh-post`` to do: not posted yet, or edited since."""
+    github = comment.get("github") or {}
+    return github.get("status") == "local" or (github.get("status") == "posted" and bool(github.get("edited")))
+
+
+def _posted_label(kind: str, github: dict) -> str:
+    edited = "; edited since, the update not posted yet" if github.get("edited") else ""
+    return "%s (posted: %s%s)" % (kind, clean(github.get("url"), True), edited)
+
+
 def _intent(root: dict, pr_mode: bool) -> list:
     """What a PR-mode root is for: a question for Claude, a GitHub comment (posted or not) or a mirrored thread."""
     github = root.get("github")
@@ -323,7 +335,7 @@ def _intent(root: dict, pr_mode: bool) -> list:
         return _mirrored(root, True)
     if github:
         if github.get("status") == "posted":
-            return ["GitHub comment (posted: %s)" % clean(github.get("url"), True)]
+            return [_posted_label("GitHub comment", github)]
         return ["GitHub comment (not posted)"]
     return ["question"] if pr_mode and root.get("author") == "user" else []
 
@@ -335,7 +347,7 @@ def _reply_intent(reply: dict) -> list:
         return _mirrored(reply, False)
     if github:
         if github.get("status") == "posted":
-            return ["GitHub reply (posted: %s)" % clean(github.get("url"), True)]
+            return [_posted_label("GitHub reply", github)]
         return ["GitHub reply (not posted)"]
     return []
 
