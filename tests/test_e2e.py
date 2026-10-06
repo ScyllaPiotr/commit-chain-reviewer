@@ -161,7 +161,7 @@ def test_browser_pr_mode_flow(live_pr, tmp_path):
         "GitHub comment on a line", "question with the editor switch", "a draft keeps its kind",
         "a line outside the pull request diff stays a question",
         "file header forks too", "posted comment links to GitHub", "GitHub threads come into ccr",
-        "GH reply in a question thread"], pretty
+        "GH reply in a question thread", "Bold and Italic on the selected text"], pretty
     assert len(report["screenshots"]) == 4, pretty
 
     # -- what the browser left: eight pending user comments, four of them for GitHub (one recorded as posted, one a

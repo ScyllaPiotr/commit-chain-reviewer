@@ -441,6 +441,11 @@ table.diff.has-gutter[data-view="split"] tr.line:has(> .new:hover) > .new { back
 .comment-editor .intent-btn.is-active { background: var(--accent-bg); color: var(--accent); font-weight: 600; }
 .comment-editor .intent-btn.is-active[data-intent="github"] { background: var(--github); color: var(--github-fg); }
 .comment-editor[data-intent="github"] { border-color: var(--github); }
+/* Bold / Italic: only while the textarea has a selection (visibility, so the head does not jump) */
+.comment-editor .editor-format { display: inline-flex; gap: 2px; margin: 0 auto 4px 8px; visibility: hidden; }
+.comment-editor.has-selection:not([data-tab="preview"]) .editor-format { visibility: visible; }
+.comment-editor .fmt-btn { border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--fg); font-size: 11px; line-height: 16px; padding: 1px 7px; }
+.comment-editor .fmt-btn:hover { background: var(--bg-3); }
 .comment-editor .editor-tab { background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 2px 8px 4px; font-size: 12px; color: var(--fg-muted); }
 .comment-editor .editor-tab:hover { color: var(--fg); }
 .comment-editor .editor-tab.is-active { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }

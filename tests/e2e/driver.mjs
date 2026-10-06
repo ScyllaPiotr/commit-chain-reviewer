@@ -783,6 +783,41 @@ export async function runPrScenario(page, url) {
     if (tags !== 'claude:Question | github:GitHub · not posted') throw new Error('question thread: ' + tags);
     return tags;
   });
+
+  await runner.step('Bold and Italic on the selected text', async () => {
+    await page.hover(row(8) + ' td.code');
+    await page.click(row(8) + ' .btn-add-comment[data-intent="question"]');
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor textarea')`, { label: 'editor on line 8' });
+    const ta = `document.querySelector('tr.editor textarea')`;
+    const bar = `getComputedStyle(document.querySelector('tr.editor .editor-format')).visibility === 'visible'`;
+    await page.type('make it bold');
+    if (await page.evaluate(bar)) throw new Error('format buttons shown with nothing selected');
+    await page.key('i', 'KeyI', 73, 2);
+    if ((await page.evaluate(`${ta}.value`)) !== 'make it bold') throw new Error('Ctrl+I changed text with nothing selected');
+    await page.evaluate(`(() => { const t = ${ta}; t.focus(); t.setSelectionRange(8, 12); })()`);
+    await page.waitFor(bar, { label: 'format buttons on a selection' });
+    const states = [];
+    for (const press of [() => page.key('b', 'KeyB', 66, 2), () => page.key('b', 'KeyB', 66, 2), () => page.click('tr.editor .fmt-btn[data-fmt="italic"]')]) {
+      await press();
+      states.push(await page.evaluate(`(() => { const t = ${ta}; return t.value + ' [' + t.value.slice(t.selectionStart, t.selectionEnd) + ']'; })()`));
+    }
+    if (states.join(' / ') !== 'make it **bold** [bold] / make it bold [bold] / make it _bold_ [bold]') throw new Error('formatting: ' + states.join(' / '));
+    await page.evaluate(`(() => { const t = ${ta}; t.focus(); t.setSelectionRange(8, 14); })()`);
+    await page.key('b', 'KeyB', 66, 2);
+    if ((await page.evaluate(`${ta}.value`)) !== 'make it **_bold_**') throw new Error('bold over italic: ' + (await page.evaluate(`${ta}.value`)));
+    await page.click('tr.editor .editor-tab[data-tab="preview"]');
+    await page.waitFor(`document.querySelector('tr.editor .md-preview strong > em') && document.querySelector('tr.editor .md-preview em').textContent === 'bold' && !(${bar})`, { label: 'bold italic in the preview, no buttons there' });
+    await page.click('tr.editor .editor-tab[data-tab="write"]');
+    await page.evaluate(`(() => { const t = ${ta}; t.focus(); t.setSelectionRange(3, 3); })()`);
+    await page.waitFor(`!(${bar})`, { label: 'buttons gone with the selection' });
+    await page.evaluate(`(() => { const t = ${ta}; t.value = 'call snake_case_name'; t.focus(); t.setSelectionRange(11, 15); })()`);
+    await page.key('i', 'KeyI', 73, 2);
+    if ((await page.evaluate(`${ta}.value`)) !== 'call snake__case__name') throw new Error('an identifier lost its underscores: ' + (await page.evaluate(`${ta}.value`)));
+    await page.evaluate(`(() => { const t = ${ta}; t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    await page.click('tr.editor .btn-cancel-comment');
+    await page.waitFor(`!document.querySelector('tr.editor')`, { label: 'editor closed' });
+    return states.join(' / ');
+  });
 }
 
 /** Entry point: launch, run, always kill the browser, print the report. */

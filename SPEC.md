@@ -908,7 +908,12 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
   tab pair (`.editor-tabs > .editor-tab[data-tab]`) showing one of the two at a time: the textarea, which is sized to its
   content on every input and on every render that creates it (`max-height: 60vh` then scrolls), or `div.md-preview.md`
   (the same `renderMarkdown` as comment bodies, rendered when the tab is opened; empty text → *Nothing to preview*).
-  The open tab lives in `state.openEditors` so re-renders keep it. Markdown hint, **Add comment** (Ctrl/⌘+Enter), **Cancel** (Esc; keeps the draft — an
+  The open tab lives in `state.openEditors` so re-renders keep it. Beside the tabs, `.editor-format` holds **Bold**
+  and *Italic* (`.fmt-btn[data-fmt="bold|italic"]`), visible only while the Write textarea has the focus and a
+  non-empty selection (`form.has-selection`); they and Ctrl/⌘+B / Ctrl/⌘+I (which do nothing without a selection,
+  and never reach the browser) wrap each selected non-blank line in `**…**` / `_…_`, or unwrap it when every
+  selected line, or the text right around the selection, is wrapped already, through `execCommand('insertText')` so
+  Ctrl+Z undoes it; the text keeps its selection. Markdown hint, **Add comment** (Ctrl/⌘+Enter), **Cancel** (Esc; keeps the draft — an
   emptied editor drops it). While a
   request is in flight the buttons are disabled; on 201/200 insert the returned Comment into state, remove the draft,
   close the editor, patch only that thread; on error keep the editor open and toast the server message. No temporary ids.
@@ -1101,7 +1106,8 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
   re-posting through a fake `gh` on PATH, `start --pr` on reuse) and `test_e2e.py` (the driver's second
   scenario, `pr`: the PR link, the forked gutter in its column (by the hovered side in split view, no horizontal
   overflow at 1280x720 or 1920x1080) and file buttons, the editor switch, a GitHub comment refused outside the pull
-  request diff and kept as a question, the posted link and toast).
+  request diff and kept as a question, the posted link and toast, a GH reply in a question thread, and Bold /
+  Italic on a selection).
 * `test_e2e.py` (skipped without `chromium-browser`/`chromium`/`google-chrome`): starts a server, runs
   `node tests/e2e/driver.mjs <url>` (CDP over Node's `WebSocket`) which: loads the page (token in `?t=`), waits for
   `body[data-ready]`, asserts every lang id from the section-3 table satisfies `hljs.getLanguage`, clicks the 2nd

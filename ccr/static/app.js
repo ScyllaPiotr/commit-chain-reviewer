@@ -1909,7 +1909,7 @@
     const tabHtml = (name, label) => `<button type="button" class="editor-tab${tab === name ? ' is-active' : ''}" data-tab="${name}" role="tab" aria-selected="${tab === name}">${label}</button>`;
     const hint = github ? 'Markdown · posted verbatim to your pending GitHub review once Claude has checked it' : 'Markdown · Ctrl+Enter to post · Esc to cancel';
     return `<form class="comment-editor" data-key="${esc(key)}" data-mode="${esc(entry.mode)}" data-tab="${tab}"${github ? ' data-intent="github"' : ''}${channelAttr(github)} novalidate>
-      <div class="editor-head"><div class="editor-tabs" role="tablist">${tabHtml('write', 'Write')}${tabHtml('preview', 'Preview')}</div>${intentSwitch}</div>
+      <div class="editor-head"><div class="editor-tabs" role="tablist">${tabHtml('write', 'Write')}${tabHtml('preview', 'Preview')}</div>${FORMAT_BAR}${intentSwitch}</div>
       <textarea rows="3" placeholder="${placeholder}" aria-label="Comment text"${tab === 'preview' ? ' hidden' : ''}>${esc(initial)}</textarea>
       <div class="md-preview md"${tab === 'preview' ? '' : ' hidden'}>${tab === 'preview' ? previewHtml(initial) : ''}</div>
       <div class="editor-foot"><span class="md-hint">${hint}</span>${info ? `<span class="anchor-info">${esc(info)}</span>` : ''}
@@ -1977,6 +1977,53 @@
   }
 
   /** Switch an editor between Write and Preview (GitHub's pair: only one of the two is on screen). */
+  /** Bold and Italic for the selected text, shown only while the textarea has a selection (Ctrl/⌘+B and +I too). */
+  const FORMAT_BAR = '<div class="editor-format" role="group" aria-label="Format the selected text">'
+    + '<button type="button" class="fmt-btn" data-fmt="bold" aria-label="Bold (Ctrl+B)" title="Bold (Ctrl+B)"><b>Bold</b></button>'
+    + '<button type="button" class="fmt-btn" data-fmt="italic" aria-label="Italic (Ctrl+I)" title="Italic (Ctrl+I)"><i>Italic</i></button></div>';
+  const FORMAT_MARKS = { bold: '**', italic: '_' };
+
+  function updateFormatBar(ta) {
+    const form = ta && ta.closest('form.comment-editor');
+    if (form) form.classList.toggle('has-selection', document.activeElement === ta && ta.selectionStart < ta.selectionEnd);
+  }
+
+  /** Wrap the selected text in a Markdown mark, line by line, or unwrap it when every selected line (or the
+   *  selection as a whole) is wrapped already; the edit goes through the textarea's undo history. */
+  function applyFormat(ta, fmt) {
+    const mark = FORMAT_MARKS[fmt];
+    let start = ta.selectionStart; let end = ta.selectionEnd;
+    if (!mark || start >= end) return;
+    const value = ta.value;
+    const wrapped = (t) => t.length > 2 * mark.length && t.startsWith(mark) && t.endsWith(mark);
+    const selected = value.slice(start, end);
+    let text; let inner = null;
+    const edge = (i) => i < 0 || i >= value.length || !/\w/.test(value[i]); // not inside a word such as snake_case_name
+    if (!selected.includes('\n') && value.slice(start - mark.length, start) === mark && value.slice(end, end + mark.length) === mark
+        && edge(start - mark.length - 1) && edge(end + mark.length) && !wrapped(selected)) {
+      start -= mark.length; end += mark.length; text = selected; inner = [start, start + selected.length];
+    } else {
+      const lines = selected.split('\n').map((line) => /^(\s*)(.*?)(\s*)$/.exec(line));
+      const filled = lines.filter((m) => m[2]);
+      const off = filled.length > 0 && filled.every((m) => wrapped(m[2]));
+      text = lines.map((m) => !m[2] ? m[0] : m[1] + (off ? m[2].slice(mark.length, -mark.length) : mark + m[2] + mark) + m[3]).join('\n');
+      if (lines.length === 1 && filled.length === 1) {
+        const lead = lines[0][1].length; const body = off ? lines[0][2].length - 2 * mark.length : lines[0][2].length;
+        const at = start + lead + (off ? 0 : mark.length);
+        inner = [at, at + body];
+      }
+    }
+    ta.focus();
+    ta.setSelectionRange(start, end);
+    if (!document.execCommand || !document.execCommand('insertText', false, text)) {
+      ta.setRangeText(text, start, end, 'end');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    const [from, to] = inner || [start, start + text.length];
+    ta.setSelectionRange(from, to);
+    updateFormatBar(ta);
+  }
+
   function showEditorTab(form, tab) {
     const entry = state.openEditors.get(form.dataset.key);
     if (entry) entry.tab = tab;
@@ -2126,8 +2173,8 @@
       return /^https?:\/\//i.test(clean) ? park(`<a href="${clean}" target="_blank" rel="noopener noreferrer">${label}</a>`) : `${label} (${url})`;
     });
     s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
-    s = s.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>');
-    s = s.replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>');
+    s = s.replace(/(^|[\s(>])\*([^*\n]+)\*(?=[\s).,;:!?<]|$)/g, '$1<em>$2</em>'); // > and <: inside <strong>
+    s = s.replace(/(^|[\s(>])_([^_\n]+)_(?=[\s).,;:!?<]|$)/g, '$1<em>$2</em>');
     s = s.replace(/(^|[^\w/&#;])([0-9a-f]{7,40})(?![\w;])/g, (m, pre, hex) => {
       const c = findCommit(hex);
       return c ? `${pre}<a href="#${esc(c.sha)}" class="sha-link" data-sha="${esc(c.sha)}" title="${esc(c.subject)}">${hex}</a>` : m;
@@ -2782,6 +2829,12 @@
       if (form) { e.preventDefault(); submitEditor(form); }
       return;
     }
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && t.tagName === 'TEXTAREA' && ['b', 'i'].includes(e.key.toLowerCase())
+        && t.closest('form.comment-editor')) {
+      e.preventDefault(); // also with nothing selected: Ctrl+I would open the browser's page info
+      applyFormat(t, e.key.toLowerCase() === 'b' ? 'bold' : 'italic');
+      return;
+    }
     if (e.key === 'Escape' && inInput) {
       const form = t.closest('form.comment-editor');
       if (form) { closeEditor(form.dataset.key); return; }
@@ -2811,6 +2864,7 @@
     let b;
     if ((b = hit('.editor-tab'))) { showEditorTab(b.closest('form.comment-editor'), b.dataset.tab); return; }
     if ((b = hit('.intent-btn'))) { setEditorIntent(b.closest('form.comment-editor'), b.dataset.intent); return; }
+    if ((b = hit('.fmt-btn'))) { applyFormat(b.closest('form.comment-editor').querySelector('textarea'), b.dataset.fmt); return; }
     if ((b = hit('.btn-add-comment'))) { e.preventDefault(); const a = anchorForGutter(b); openEditor(anchorKey(a), { mode: 'new', anchor: a, intent: b.dataset.intent }); return; }
     if ((b = hit('.btn-collapse'))) { toggleCollapseCard(b.closest('.file-card')); return; }
     if ((b = hit('.btn-comment-file'))) {
@@ -2950,6 +3004,12 @@
     main.addEventListener('pointerup', onPointerUp);
     main.addEventListener('pointerover', onMainPointerOver);
     main.addEventListener('input', onMainInput);
+    // the format bar follows the textarea's selection; pressing its buttons must not take the focus (and the selection)
+    main.addEventListener('mousedown', (e) => { if (e.target.closest('.fmt-btn')) e.preventDefault(); });
+    for (const type of ['select', 'keyup', 'mouseup', 'focusin', 'focusout']) {
+      main.addEventListener(type, (e) => { if (e.target.tagName === 'TEXTAREA') setTimeout(() => updateFormatBar(e.target)); });
+    }
+    document.addEventListener('selectionchange', () => { const a = document.activeElement; if (a && a.tagName === 'TEXTAREA') updateFormatBar(a); });
     let scrollPending = false;
     main.addEventListener('scroll', () => {
       if (scrollPending) return;
