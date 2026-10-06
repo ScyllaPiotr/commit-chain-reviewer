@@ -305,14 +305,14 @@ def test_agent_loop_end_to_end(cli, fixture_repo, ccr_session_dir):
     logs = cli.run("logs", "-n", "3", check=0).stdout
     assert "ccr: url http://127.0.0.1:%d/?t=<redacted>" % record["port"] in logs
 
-    # -- stop: export written, files gone, process gone
+    # -- stop: export written, session file gone, the database kept (for a week), process gone
     stopped = cli.run("stop", check=0).stdout.splitlines()
     assert re.fullmatch(r"ccr: exported to %s/%s-\d{8}-\d{6}\.md" % (re.escape(str(ccr_session_dir)), re.escape(os.path.basename(session_file)[:-5])), stopped[0])
     export_path = stopped[0][len("ccr: exported to "):]
     assert os.path.isfile(export_path) and mode_of(export_path) == 0o600
     assert open(export_path).read().startswith("# Review — repo (main..feature, base ")
     assert stopped[1] == "ccr: stopped %s (pid %d)" % (repo.path, record["pid"])
-    assert not os.path.exists(session_file) and not os.path.exists(record["db"])
+    assert not os.path.exists(session_file) and os.path.exists(record["db"]), "a stop keeps the review database"
     assert os.path.exists(record["log"])
     assert wait_for(lambda: not pid_alive(record["pid"]), timeout=10)
     after = cli.run("status")
@@ -724,3 +724,53 @@ def test_pr_mode_questions_and_github_comments(cli, fixture_repo, tmp_path, ccr_
     assert relinked.startswith("ccr: reusing running session (pid %d)" % record["pid"])
     assert api(record, "GET", "/api/review")["pr"]["number"] == 8
     cli.run("stop", check=0)
+
+
+def test_stopped_sessions_keep_their_database_for_a_week(tmp_path):
+    """``prune_stale_dbs`` removes only databases of sessions that are not running and unchanged for a week."""
+    import fcntl
+    from ccr import session
+    now = time.time()
+    week = session.STALE_DB_SECONDS
+    tmp_path = tmp_path / "sessions"
+    tmp_path.mkdir()
+
+    def db(key, age, wal_age=None):
+        path = tmp_path / ("%s.sqlite" % key)
+        path.write_bytes(b"x")
+        os.utime(path, (now - age, now - age))
+        if wal_age is not None:
+            wal = tmp_path / ("%s.sqlite-wal" % key)
+            wal.write_bytes(b"x")
+            os.utime(wal, (now - wal_age, now - wal_age))
+        return str(path)
+
+    old, young, walled, running, locked, kept = (db("old", week + 60), db("young", week - 60),
+                                                  db("walled", week + 60, wal_age=60), db("running", week + 60),
+                                                  db("locked", week + 60), db("kept", week + 60))
+    (tmp_path / "running.json").write_text(json.dumps({"pid": os.getpid(), "url": "http://127.0.0.1:1/", "token": "t"}))
+    holder = os.open(locked + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)  # a server without its record still holds its lock
+    try:
+        removed = session.prune_stale_dbs(str(tmp_path), now=now, keep=(kept,))
+    finally:
+        os.close(holder)
+    assert removed == [old] and not os.path.exists(old) and not os.path.exists(old + ".lock")
+    assert all(os.path.exists(path) for path in (young, walled, running, locked, kept)), \
+        "younger than a week (the WAL counts), running, locked or being resumed"
+
+
+
+def test_stop_removes_the_database_only_with_purge(tmp_path):
+    from ccr import session
+    tmp_path = tmp_path / "sessions"
+    tmp_path.mkdir()
+    paths = session.SessionPaths("k", str(tmp_path))
+    for name in ("k.json", "k.sqlite", "k.sqlite-wal", "k.log", "k-20261006-000000.md"):
+        (tmp_path / name).write_text("x")
+    record = {"db": paths.db, "log": paths.log}
+    session.remove_session_files(paths, record)
+    assert sorted(os.listdir(tmp_path)) == ["k-20261006-000000.md", "k.log", "k.sqlite", "k.sqlite-wal"]
+    (tmp_path / "k.json").write_text("x")
+    session.remove_session_files(paths, record, purge=True)
+    assert os.listdir(tmp_path) == []

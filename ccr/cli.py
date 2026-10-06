@@ -170,8 +170,9 @@ def build_parser() -> Parser:
 
     stop = add("stop", "export the review, shut the server down and remove the session files")
     stop.add_argument("--all", action="store_true", help="stop every live session")
-    stop.add_argument("--keep-db", action="store_true", dest="keep_db")
-    stop.add_argument("--purge", action="store_true", help="also remove exports and logs")
+    stop.add_argument("--keep-db", action="store_true", dest="keep_db",
+                      help="keep the review database (the default: it goes a week after its last change)")
+    stop.add_argument("--purge", action="store_true", help="remove the review database, exports and logs now")
 
     add("status", "show the running session")
     add("sessions", "list every live session")
@@ -418,6 +419,8 @@ def cmd_start(args) -> int:
                 webbrowser.open(record["url"])
             return EXIT_OK
         gitx.resolve_range(repo, args.range, args.n)
+        # never the database this start resumes, however old
+        prune_stale_dbs(say=(lambda line: None) if args.json else None, keep=(paths.db,))
         record, _ = session.start_background(
             repo, paths, spec=args.range, n=args.n, worktree=bool(args.worktree), first_parent=bool(args.first_parent),
             port=args.port, db=args.db, log=args.log, idle_timeout=args.idle_timeout, cover=args.cover, pr=args.pr)
@@ -468,8 +471,14 @@ def stop_one(record: dict, state: dict, args) -> None:
         session.write_private(path, text.encode("utf-8"))
         out("ccr: exported to %s" % path)
     session.shutdown_server(record, client)
-    session.remove_session_files(paths, record, keep_db=args.keep_db, purge=args.purge)
+    session.remove_session_files(paths, record, purge=args.purge and not args.keep_db)
     out("ccr: stopped %s (pid %d)" % (record["repo"], record["pid"]))
+
+
+def prune_stale_dbs(say=None, keep=()) -> None:
+    """Remove the databases of sessions stopped more than a week ago (``session.STALE_DB_SECONDS``)."""
+    for path in session.prune_stale_dbs(keep=keep):
+        (say or out)("ccr: removed %s, the database of a session stopped and unchanged for 7 days" % path)
 
 
 def cmd_stop(args) -> int:
@@ -481,6 +490,7 @@ def cmd_stop(args) -> int:
         targets = [session.find_session(resolve_repo(args))]
     for record, state in targets:
         stop_one(record, state, args)
+    prune_stale_dbs()
     return EXIT_OK
 
 

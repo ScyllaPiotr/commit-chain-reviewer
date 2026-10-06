@@ -17,9 +17,10 @@ Design constraints:
   no build step, on the client side. `highlight.js` is vendored under `ccr/static/vendor/`.
 * **Simplest possible database**: comments and rounds live in **SQLite** via the stdlib `sqlite3` module
   (part of the default `python3` package on Fedora and Ubuntu — nothing to install). The database file lives
-  in the private session directory (mode 0600), so a crashed or killed background server loses nothing; it is
-  deleted by `ccr stop` (after an automatic Markdown export), which makes the data **session-limited**
-  (start → stop). `--db :memory:` gives a pure in-memory store; `--db FILE` an explicit file.
+  in the private session directory (mode 0600), so a crashed or killed background server loses nothing, and so
+  does `ccr stop` (which writes a Markdown export too): the next `ccr start` on the repository resumes the review. A
+  stopped session's database goes a week after its last change (`ccr start` and `ccr stop` prune them, never a
+  running server's, 6.2), or at once with `ccr stop --purge`. `--db :memory:` gives a pure in-memory store; `--db FILE` an explicit file.
 * **Local only**: bind `127.0.0.1`; every `/api/*` call requires a per-process random token sent in a header.
 * Works on any git repository (git ≥ 2.24), on any commit range, including uncommitted work-tree changes.
 * ccr never modifies the working tree, refs, or index *contents*; git itself may refresh the stat cache in
@@ -478,7 +479,7 @@ request (`rev_parse("HEAD")`). Errors → `{"path": null, "line": null, "status"
 ### 4.6 Reviews
 
 A database belongs to a repository (`<key>.sqlite` is keyed by its realpath) but a repository is reviewed many
-times, and a server that is killed, times out or is stopped with `--keep-db` leaves its database behind. Every
+times, and a server that is killed, times out or is stopped leaves its database behind. Every
 comment and round therefore carries a `review`, and everything the store reads — comments, counts, `outdated`,
 rounds and the round *numbering* — is scoped to the one review it serves, which it picks when it opens the
 database: walking the reviews newest first, the first whose remembered chain (`reviews.chain`) shares a sha or a
@@ -620,8 +621,12 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
 * `ccr stop [--all] [--keep-db] [--purge]` — 1) `GET /api/state`, require `server.pid == session.pid` (else stale, never
   signal); 2) `ccr export --md` → `<session dir>/<key>-<YYYYmmdd-HHMMSS>.md`, print `ccr: exported to <path>`;
   3) `POST /api/shutdown`; 4) wait ≤ 5 s for the pid to vanish; 5) only then SIGTERM, and only if `/proc/<pid>/cmdline`
-  contains `ccr` and `serve`; 6) delete the session file and the default sqlite file (`--keep-db` keeps it; `--purge` also
-  removes exports and logs). `--all` does this for every live session.
+  contains `ccr` and `serve`; 6) delete the session file; the default sqlite file stays (`--purge` removes it, the
+  exports and the logs now; `--keep-db`, the old opt-in, overrides `--purge` for the database). `--all` does this for
+  every live session. Then, as `ccr start` does before it spawns a server, it removes the default sqlite file (with
+  its `-wal`, `-shm` and `.lock`) of every session that is not running — no live record, and its `.lock` not held —
+  and whose database and WAL have not changed for 7 days (`STALE_DB_SECONDS`), printing `ccr: removed <path>, the
+  database of a session stopped and unchanged for 7 days`; `ccr start` never removes the database it resumes.
 * `ccr status [--json]` — url, range (+note), `ccr: pr <url>` in PR mode, commits, counts, rounds (last verdict), ui connected/last seen, log path, db path.
 * `ccr sessions [--json]` — every session file (repo, url, range, alive?, started_at), deleting stale ones; exit 3 if none.
 * `ccr logs [-n N] [-f]` — tail of the server log.

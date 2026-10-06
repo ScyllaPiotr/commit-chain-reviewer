@@ -193,8 +193,9 @@ whether to stop the server.
 ccr stop --repo "$REPO"
 ```
 
-`ccr stop` exports the whole review to Markdown first (`ccr: exported to <path>`, in the session
-directory) and then deletes the database, so the comments are otherwise gone. If the user wants the
+`ccr stop` exports the whole review to Markdown (`ccr: exported to <path>`, in the session directory)
+and keeps its database for a week after its last change: a `ccr start` on the repository within that
+time resumes the review, after that only the export is left. If the user wants the
 export in a specific place, run `ccr export --repo "$REPO" --md -o <file>` before stopping. If the
 conversation ends without a decision, leave the server running and say so:
 "ccr is still serving `<url>`; run `ccr stop` when you are finished."
@@ -284,10 +285,13 @@ When the user is done, ask whether to stop the server (step 6) and offer to remo
 - Fixup/new commits during the review; no amend, no rebase, no force-push until the user declares the review done.
 - `ccr reload` after every batch of commits, never with a narrower range.
 - Use `--json` when acting on ids programmatically.
-- Never `ccr stop` unless told to; when stopping, remember it exports first and then deletes the data.
-- After changing ccr's own Python code, restart the server with `ccr stop --keep-db && ccr start …` (a running
-  server keeps the code it started with; `--keep-db` preserves comments, rounds and the cover letter) and hand
-  over the new URL.
+- Never `ccr stop` unless told to, and never stop or restart a session that is not yours. A stop exports the review
+  and keeps its database for a week (the next `ccr start` resumes it); never pass `--purge` unless the user asks to
+  delete the review.
+- GUI changes need no restart: the server reads its static files on every request, so a browser reload shows
+  them. After changing ccr's own Python code, a running server keeps the code it started with; say so, and restart
+  it (`ccr stop && ccr start …`, which keeps comments, rounds and the cover letter) only when the user asks, then
+  hand over the new URL (a restart issues a new token).
 - Do not paste the token/URL into commit messages, issues or files.
 - PR mode: no code changes; post only with `ccr gh-post`, only the user's submitted GitHub comments that passed your
   check, and verbatim; never write GitHub comments yourself (`ccr comment --github` is not for you) and never submit

@@ -12,6 +12,7 @@ dependency on the store or the server so both the CLI and the server can import 
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import http.client
 import json
@@ -75,6 +76,7 @@ LOCK_WAIT_SECONDS = 35.0
 START_DEADLINE = 10.0
 LOAD_DEADLINE = 120.0
 POLL_INTERVAL = 0.1
+STALE_DB_SECONDS = 7 * 24 * 3600  # a stopped session's database is kept this long after its last change
 STOP_WAIT = 5.0
 LOG_TAIL_LINES = 20
 
@@ -562,13 +564,56 @@ def shutdown_server(record: dict, client: Client) -> None:
     raise SessionError("server pid %d did not exit; session files were kept" % pid)
 
 
-def remove_session_files(paths: SessionPaths, record: dict, keep_db: bool = False, purge: bool = False) -> None:
-    """Step 6 of ``ccr stop``: drop the record, the default database (unless kept) and, with ``purge``, logs and exports."""
+def _remove_db(path: str) -> None:
+    for suffix in ("", "-wal", "-shm", ".lock"):
+        _unlink(path + suffix)
+
+
+def remove_session_files(paths: SessionPaths, record: dict, purge: bool = False) -> None:
+    """Step 6 of ``ccr stop``: drop the record; the default database stays (``prune_stale_dbs`` removes it a week
+    after its last change), unless ``purge`` removes it now, with the logs and the exports."""
     _unlink(paths.record)
-    if not keep_db and record.get("db") == paths.db:
-        for suffix in ("", "-wal", "-shm", ".lock"):
-            _unlink(paths.db + suffix)
     if purge:
+        if record.get("db") == paths.db:
+            _remove_db(paths.db)
         for path in [paths.log, record.get("log")] + paths.exports():
             if path:
                 _unlink(path)
+
+
+def prune_stale_dbs(directory=None, max_age: float = STALE_DB_SECONDS, now=None, keep=()) -> list:
+    """Remove the default databases of sessions that are not running and have not changed for ``max_age`` seconds;
+    returns their paths. A database with a live server's record or lock is never touched, nor one in ``keep``."""
+    directory = directory or session_dir()
+    now = time.time() if now is None else now
+    removed = []
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith(".sqlite"):
+            continue
+        db = os.path.join(directory, name)
+        if db in keep:
+            continue
+        record = read_record(os.path.join(directory, name[:-len(".sqlite")] + ".json"))
+        if record is not None and pid_alive(record.get("pid")):
+            continue
+        try:
+            changed = max(os.path.getmtime(db + suffix) for suffix in ("", "-wal") if os.path.exists(db + suffix))
+        except (OSError, ValueError):
+            continue
+        if now - changed < max_age:
+            continue
+        try:  # a server holds this lock for its lifetime (4.x): never prune under one, even without its record
+            fd = os.open(db + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            continue
+        try:
+            _remove_db(db)
+        finally:
+            os.close(fd)
+        removed.append(db)
+    return removed
