@@ -684,6 +684,25 @@ def test_pr_mode_questions_and_github_comments(cli, fixture_repo, tmp_path, ccr_
     resynced = cli.run("gh-sync", env=env, check=0).stdout
     assert "; 0 comments added, 1 updated," in resynced, "the posted reply is not mirrored back, it learns its state"
 
+    # -- GitHub replies in a question thread: the first starts a thread on GitHub at the question's line
+    starter = api(record, "POST", "/api/comments", {"body": "Is 6 right?", "parent_id": question, "github": True})
+    follow = api(record, "POST", "/api/comments", {"body": "And 7?", "parent_id": question, "github": True})
+    api(record, "POST", "/api/submit", {"verdict": "comment", "summary": ""})
+    out_of_order = cli.run("gh-post", follow["id"], env=env)
+    assert out_of_order.returncode == 1 and "comment %s starts this thread on GitHub, so it is posted first" \
+        % starter["id"] in out_of_order.stdout
+    assert cli.run("gh-post", "--dry-run", starter["id"], env=env, check=0).stdout.startswith(
+        "%s: would post to o/r#7 src/app.py:6 (RIGHT)" % starter["id"])
+    both = cli.run("gh-post", starter["id"], follow["id"], env=env, check=0).stdout.splitlines()
+    pending = next(r for r in github_state()["reviews"] if r["state"] == "PENDING")
+    new_thread, reply = pending["comments"][-2:]
+    assert (new_thread["path"], new_thread["line"], new_thread["body"], new_thread["reply_to"]) == (
+        "src/app.py", 6, "Is 6 right?", None)
+    assert (reply["body"], reply["reply_to"]) == ("And 7?", new_thread["id"])
+    assert both[:2] == ["%s: posted src/app.py:6 (RIGHT) → %s" % (starter["id"], new_thread["url"]),
+                        "%s: posted reply to @you on src/app.py → %s" % (follow["id"], reply["url"])]
+    assert "0 comments added" in cli.run("gh-sync", env=env, check=0).stdout, "neither comes back as a mirrored one"
+
     relinked = cli.run("start", "--range", "main..feature", "--pr", "o/r#8", check=0).stdout
     assert relinked.startswith("ccr: reusing running session (pid %d)" % record["pid"])
     assert api(record, "GET", "/api/review")["pr"]["number"] == 8

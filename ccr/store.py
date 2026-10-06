@@ -1095,24 +1095,50 @@ class ReviewStore:
              anchor["commit"], anchor["path"], anchor["side"], anchor["line"], anchor["start_line"], snippet,
              json.dumps(github_state) if github_state else None))
 
-    def _check_github(self, author: str, parent_id, anchor: dict, snippet: str) -> None:
-        """A GitHub comment is the user's: a root GitHub can anchor (10.2), or a reply in a review thread (10.5)."""
+    def _check_github(self, author: str, parent_id, anchor: dict, snippet: str, comment_id=None) -> None:
+        """A GitHub comment is the user's: a root GitHub can anchor (10.2), or a reply in a thread that is or can
+        become a review thread on GitHub (10.5)."""
         if author != "user":
             raise StoreError("GitHub comments are the user's to write")
-        if parent_id is not None:
-            self._github_thread(self._fetch(parent_id))
-        else:
+        if parent_id is None:
             self._github_target({"anchor": anchor, "outdated": False, "snippet": snippet})
+            return
+        root = self._fetch(parent_id)
+        if self._github_thread(root) is not None:
+            return
+        if self._github_starter(root, comment_id) is None:  # this reply starts the thread on GitHub
+            self._github_target(root)
 
-    def _github_thread(self, root: dict) -> dict:
-        """The review thread a root is on GitHub - ``{"thread_id", "reply_to", "url", "login"}`` - or StoreError."""
+    @staticmethod
+    def _thread_info(comment: dict, login=None) -> dict:
+        github = comment["github"]
+        return {"thread_id": github["thread_id"], "reply_to": github.get("node_id"), "url": github.get("url"),
+                "login": login or github.get("login") or "you"}
+
+    def _github_thread(self, root: dict):
+        """The review thread a root is on GitHub - ``{"thread_id", "reply_to", "url", "login"}`` - or None when the
+        thread is to start there (a question or the user's GitHub comment, on a line or a file); StoreError for a
+        thread that cannot have one."""
         if self.pr is None:
             raise StoreError(NO_PR, 409)
         github = root.get("github") or {}
-        if github.get("status") not in ("remote", "posted") or not github.get("thread_id") or github.get("deleted"):
+        if github.get("status") in ("remote", "posted") and github.get("thread_id") and not github.get("deleted"):
+            return self._thread_info(root)
+        if github.get("status") == "remote":
             raise StoreError("this thread is not a review thread on GitHub, so a reply to it stays in ccr")
-        return {"thread_id": github["thread_id"], "reply_to": github.get("node_id"), "url": github.get("url"),
-                "login": github.get("login") or "you"}
+        if root["anchor"]["kind"] not in ("line", "file"):
+            raise StoreError("a GitHub reply goes into a thread on a line or a file; on a commit or the whole pull "
+                             "request a reply stays in ccr")
+        return None
+
+    def _github_starter(self, root: dict, other_than=None):
+        """The first GitHub comment of a thread with no review thread on GitHub yet - its root or a reply - other
+        than ``other_than``: what starts the thread there, which later GitHub replies go into (10.5)."""
+        row = self._conn.execute(
+            "SELECT id FROM comments WHERE (id = ? OR parent_id = ?) AND id IS NOT ? AND author = 'user'"
+            " AND github IS NOT NULL ORDER BY parent_id IS NOT NULL, created_at, rowid LIMIT 1",
+            (root["id"], root["id"], other_than)).fetchone()
+        return None if row is None else self._fetch(row["id"])
 
     def add_comment(self, body, anchor=None, author: str = "user", parent_id=None, github=False) -> dict:
         """Create a root comment (validated anchor) or a reply (anchor copied from the root).
@@ -1195,7 +1221,7 @@ class ReviewStore:
                 edited = True
             if to_github and not posted and (github or new_anchor is not None):
                 self._check_github(current["author"], current["parent_id"], new_anchor or current["anchor"],
-                                   current["snippet"] if new_anchor is None else snippet)
+                                   current["snippet"] if new_anchor is None else snippet, comment_id)
             if to_github and not posted and edited and current["state"] == "submitted":
                 # what the agent checked is not what would be posted any more: it is a draft again (10.1)
                 assignments += ["state = 'pending'", "round = NULL"]
@@ -1320,7 +1346,18 @@ class ReviewStore:
             if comment["parent_id"] is None:
                 return dict(self._github_target(comment), **info)
             data = self._require_data()
-            thread = self._github_thread(self._fetch(comment["parent_id"]))
+            root = self._fetch(comment["parent_id"])
+            thread = self._github_thread(root)
+            if thread is None:
+                starter = self._github_starter(root)
+                if starter["id"] == comment["id"]:  # the thread's first GitHub comment starts it on GitHub
+                    return dict(self._github_target(root), **info)
+                if starter["github"].get("status") != "posted":
+                    raise StoreError("comment %s starts this thread on GitHub, so it is posted first" % starter["id"], 409)
+                if not starter["github"].get("thread_id"):
+                    raise StoreError("comment %s started this thread on GitHub, but ccr does not know the thread yet; "
+                                     "run ccr gh-sync" % starter["id"], 409)
+                thread = self._thread_info(starter, "you")
             return dict(info, commit=data["range"]["head"], base=data["range"]["base"], path=comment["anchor"]["path"],
                         subject_type="REPLY", line=None, side=None, start_line=None, start_side=None, lines=[],
                         thread_id=thread["thread_id"], reply_to=thread["reply_to"], thread_url=thread["url"],
@@ -1425,7 +1462,8 @@ class ReviewStore:
         GitHub comments are matched by node id from one sync to the next: new ones are added, edited ones updated,
         threads placed again as GitHub moves them, and what GitHub no longer has is removed, except a root with
         replies in ccr, which stays marked deleted.  A thread whose first comment is gone from GitHub is a new thread
-        in ccr.  A comment posted from ccr is not mirrored a second time: GitHub's replies to it join its ccr thread.
+        in ccr.  A comment posted from ccr is not mirrored a second time: GitHub's replies to it join its ccr thread,
+        also when it is a reply in ccr that started the thread on GitHub.
         A mirrored thread starts out resolved in ccr if it is resolved on GitHub; from then on that flag is the user's.
         ``news`` lists the comments GitHub added, edited or deleted since the last sync (``_news``).
         """
@@ -1464,9 +1502,14 @@ class ReviewStore:
                              "side": thread.get("side"), "line": thread.get("line"),
                              "original_line": thread.get("original_line")}
                     first = nodes[0]
-                    root = in_place(posted.get(first.get("database_id")), None)
+                    starter = posted.get(first.get("database_id"))
+                    root = in_place(starter, None)
                     if root is not None:
                         self._merge_posted(root, {"thread_id": thread["id"], "github_state": first.get("state")}, stats)
+                    elif starter is not None and self._fetch(starter["parent_id"])["author"] != GITHUB_AUTHOR:
+                        # a GitHub reply that started the thread on GitHub (10.5): the thread's rest joins its ccr thread
+                        self._merge_posted(starter, {"thread_id": thread["id"], "github_state": first.get("state")}, stats)
+                        root = self._fetch(starter["parent_id"])
                     else:
                         root = self._mirror(in_place(mirrored.get(first["id"]), None), None, first, viewer, anchor,
                                             snippet, flags, stats)

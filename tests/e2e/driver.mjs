@@ -559,6 +559,8 @@ export async function runPrScenario(page, url) {
     await page.type('Why does the series need two commits?');
     await page.click('#commit-header form.comment-editor .btn-submit-comment');
     await page.waitFor(`document.querySelector('#commit-header .thread-block[data-key-host="review"] .thread .tag-question')`, { label: 'review question tagged' });
+    const replies = await page.evaluate(`[...document.querySelectorAll('#commit-header .thread-block[data-key-host="review"] .thread-foot .btn-reply')].map((b) => b.textContent).join(',')`);
+    if (replies !== 'Ask AI') throw new Error('a thread on the whole pull request offers ' + replies);
     return 'tagged Question';
   });
 
@@ -740,7 +742,7 @@ export async function runPrScenario(page, url) {
     const offers = await page.evaluate(`[${replies(`#main .thread[data-thread-id="${nyhId}"] .thread-foot .btn-reply`)},
       ${replies(`#main .thread[data-thread-id="${nyhId}"] .comment[data-author="github"] .act-reply`)},
       ${replies(`#main .thread[data-thread-id="${await page.evaluate(`${threadOf('What is value 6 for?')}.dataset.threadId`)}"] .thread-foot .btn-reply`)}]`);
-    if (offers.join(' / ') !== 'question:Ask AI,github:GH reply / question:Ask AI,github:GH reply,question:Ask AI,github:GH reply / question:Ask AI') throw new Error('reply buttons: ' + offers.join(' / '));
+    if (offers.join(' / ') !== 'question:Ask AI,github:GH reply / question:Ask AI,github:GH reply,question:Ask AI,github:GH reply / question:Ask AI,github:GH reply') throw new Error('reply buttons: ' + offers.join(' / '));
     const oldId = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(card + ' .thread-block[data-key-host="file"] .thread')})].find((t) => /GitHub thread by @nyh · outdated/.test(t.textContent)).dataset.threadId`);
     await page.click(`#main .thread[data-thread-id="${oldId}"] .resolved-line .btn-reply[data-intent="question"]`);
     await page.waitFor(`(() => { const t = document.querySelector('#main .thread[data-thread-id="${oldId}"]'); return t && t.textContent.includes('An old remark') && t.querySelector('form.comment-editor[data-mode="reply"][data-channel="claude"] textarea'); })()`, { label: 'Ask AI on a collapsed thread opens it with a question editor' });
@@ -767,6 +769,19 @@ export async function runPrScenario(page, url) {
     if (colours[0] !== colours[1] || colours[0] === colours[2] || colours.some((c) => /^(transparent|rgba\(0, 0, 0, 0\))$/.test(c))) throw new Error('channel colours: ' + colours.join(' / '));
     await page.shot('pr-04-github-thread');
     return view.row;
+  });
+
+  await runner.step('GH reply in a question thread', async () => {
+    const q = threadOf('What is value 6 for?');
+    await page.click(`#main .thread[data-thread-id="${await page.evaluate(`${q}.dataset.threadId`)}"] .thread-foot .btn-reply[data-intent="github"]`);
+    await page.waitFor(`${q}.querySelector('form.comment-editor[data-mode="reply"][data-intent="github"] textarea')`, { label: 'GitHub reply editor in a question thread' });
+    if ((await page.evaluate(`${q}.querySelector('.btn-submit-comment').textContent`)) !== 'Add GH reply') throw new Error('submit label');
+    await page.type('Should value 6 be named?');
+    await page.click('.editor-block form.comment-editor[data-mode="reply"] .btn-submit-comment');
+    await page.waitFor(`[...${q}.querySelectorAll('.comment[data-author="user"][data-channel="github"]')].some((c) => c.textContent.includes('Should value 6 be named?') && c.querySelector('.tag-github:not(.is-posted)'))`, { label: 'GitHub reply in the question thread, not posted yet' });
+    const tags = await page.evaluate(`[...${q}.querySelectorAll('.comment')].map((c) => c.dataset.channel + ':' + [...c.querySelectorAll('.tag-question, .tag-github')].map((t) => t.textContent).join('')).join(' | ')`);
+    if (tags !== 'claude:Question | github:GitHub · not posted') throw new Error('question thread: ' + tags);
+    return tags;
   });
 }
 

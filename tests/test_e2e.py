@@ -160,16 +160,18 @@ def test_browser_pr_mode_flow(live_pr, tmp_path):
         "gutter forks into Ask AI and GH comment", "split view: the buttons by the hovered side",
         "GitHub comment on a line", "question with the editor switch", "a draft keeps its kind",
         "a line outside the pull request diff stays a question",
-        "file header forks too", "posted comment links to GitHub", "GitHub threads come into ccr"], pretty
+        "file header forks too", "posted comment links to GitHub", "GitHub threads come into ccr",
+        "GH reply in a question thread"], pretty
     assert len(report["screenshots"]) == 4, pretty
 
-    # -- what the browser left: seven pending user comments, three of them for GitHub (one recorded as posted, one a
-    #    reply in the mirrored thread, which holds a question too), next to the five comments mirrored from GitHub
+    # -- what the browser left: eight pending user comments, four of them for GitHub (one recorded as posted, one a
+    #    reply in the mirrored thread, which holds a question too, one a reply in a question thread), next to the five
+    #    comments mirrored from GitHub
     everything = live_pr.store.list_comments()
     comments = {c["body"]: c for c in everything if c["author"] == "user"}
     assert set(comments) == {"Why does the series need two commits?", "Why 500?", "What is value 6 for?",
                              "Unrelated to the change", "Please split this file.", "Agreed, see the design.",
-                             "Which spec does radek mean?"}, pretty
+                             "Which spec does radek mean?", "Should value 6 be named?"}, pretty
     assert all(c["state"] == "pending" for c in comments.values())
     mirrored = [c for c in everything if c["author"] == "github"]
     assert len(mirrored) == 5 and comments["Agreed, see the design."]["github"] == {"status": "local"}
@@ -183,3 +185,5 @@ def test_browser_pr_mode_flow(live_pr, tmp_path):
     for question in ("Why does the series need two commits?", "What is value 6 for?", "Unrelated to the change"):
         assert comments[question]["github"] is None, question
     assert comments["Unrelated to the change"]["anchor"]["line"] == 10
+    assert comments["Should value 6 be named?"]["github"] == {"status": "local"}
+    assert comments["Should value 6 be named?"]["parent_id"] == comments["What is value 6 for?"]["id"]

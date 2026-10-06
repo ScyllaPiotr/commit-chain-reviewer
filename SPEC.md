@@ -1125,8 +1125,9 @@ worktree of its own, `--range <merge base>..HEAD`, so "All changes" is the diff 
 A user's comment is then one of two things:
 
 * a **question** for Claude: every comment by default, and the only kind on a commit, on the whole pull request
-  and in a reply outside a review thread (10.5). The agent answers it in the thread; nothing reaches GitHub.
-* a **GitHub comment**: a root on a line, a range or a file, written with a *GH comment* button (10.4). Once it is
+  and in a reply in their threads (10.5). The agent answers it in the thread; nothing reaches GitHub.
+* a **GitHub comment**: a root on a line, a range or a file, written with a *GH comment* button, or a reply written
+  with *GH reply* in a thread on one (10.4, 10.5). Once it is
   submitted in a round, the agent checks it — its claims against the code, whether it fits its line and asks
   something of this pull request — and, when it holds, posts it **verbatim** with `ccr gh-post` (10.3) into the
   user's **pending** review, starting that review when there is none. When the check finds a problem nothing is
@@ -1140,7 +1141,7 @@ they choose.
 
 `Review.pr` = `{"url": "https://<host>/<owner>/<repo>/pull/<n>", "host", "owner", "repo", "number"}` or null, kept
 per review (`reviews.pr`, schema 3) and set by `set_pr` (`--pr`, `POST /api/pr`); `owner` and `repo` match
-`[A-Za-z0-9_.-]+`. `Comment.github` is null for every question and reply, `{"status": "local"}` for a GitHub comment
+`[A-Za-z0-9_.-]+`. `Comment.github` is null for every question, `{"status": "local"}` for a GitHub comment or reply
 not on GitHub yet, and once posted `{"status": "posted", "posted_at", "url", "comment_id", "node_id", "thread_id",
 "review_id", "path", "subject_type", "line", "side", "start_line", "start_side", "commit"}` (`comments.github`). A
 posted comment is frozen in ccr: changing its body or anchor, or turning it back into a question, is 409 *"comment X
@@ -1171,7 +1172,7 @@ lines and their context), so `github_target` puts a GitHub comment there:
 The rules run when a GitHub comment is created, switched from a question or moved (400 with the message, so the
 editor stays open), and again for `GET /api/comments/{id}/github`, which returns the place plus `commit`
 (`range.head`), `base`, `lines` (`[{"line", "text"}]`, the anchored rows), `body`, `github` and `pr`. Only the
-user's roots can be GitHub comments; replies are always local.
+user's comments can be GitHub comments; a reply goes to GitHub as 10.5 says.
 
 ### 10.3 Posting (`ccr gh-post`)
 
@@ -1223,7 +1224,8 @@ beside its tabs, which keeps the text; writing a GitHub comment it carries `data
 GH comment** and the hint *posted verbatim to your pending review once Claude has checked it*, and a question editor
 is labelled **Ask AI**. A draft remembers which of the two it was written as (`ccr:draft-intent:<key>`), so its dot
 shows on the matching button. A thread's Reply, in its foot and among a comment's actions, reads **Ask AI**, with
-**GH reply** beside it on a review thread on GitHub (10.5); each opens the reply editor as that kind (or switches
+**GH reply** beside it on every thread that takes GitHub replies (10.5: not on a commit, the whole pull request or a
+review body); each opens the reply editor as that kind (or switches
 the open one), and a collapsed thread's line has **Ask AI** too, which expands the thread for the question. Roots
 are tagged *Question* or *GitHub · not posted*; a posted one carries `a.tag-github.is-posted` (*GitHub ↗*, also on
 its collapsed resolved line) linking to the comment, and has no Edit action (Delete says it removes the comment from
@@ -1262,19 +1264,28 @@ as `updated_at`) and author, and carries `github` = `{"status": "remote", "node_
   reviews, added, updated, removed, synced_at, news}`; `news` holds `{id, change, login, url, parent_id, anchor,
   body}` for each mirrored comment GitHub added (`added`), changed the body of (`edited`) or no longer has
   (`deleted`) since the last sync — a thread that only moved or changed state is no news.
-* **GitHub replies.** In a review thread on GitHub — a mirrored one, or a comment posted from ccr once a sync has
-  told it its thread — the user's reply can be a GitHub reply (`github: true` on a reply). It is checked and posted
+* **GitHub replies.** The user's reply can be a GitHub reply (`github: true` on a reply) in a review thread on
+  GitHub — a mirrored one, or a comment posted from ccr once ccr knows its thread (the post or a sync tells it) — and
+  in a thread that can start one: a question or the user's GitHub comment on a line or a file. In a thread with no
+  review thread on GitHub yet, its first GitHub comment, the root or a later reply (even after questions and
+  Claude's answers), starts one: a reply that does gets the root's place as its `github_target` (10.2, checked when
+  the reply is written) and `ccr gh-post` adds it as a new thread; a later GitHub reply waits for it (409 *"comment X
+  starts this thread on GitHub, so it is posted first"*, or *"… run ccr gh-sync"* while ccr does not know the thread)
+  and then goes into that thread. A sync recognises such a reply as the first comment of its GitHub thread, which
+  then joins the reply's ccr thread. It is checked and posted
   like a GitHub comment: `github_target` gives `{"subject_type": "REPLY", "thread_id", "reply_to" (the thread's
   first comment), "thread_url", "thread_author"}`, and `ccr gh-post` adds it with `CcrAddReply`
   (`addPullRequestReviewThreadReply` with `pullRequestReviewId` and `pullRequestReviewThreadId`) into the pending
   review, which may be on another commit (a reply is placed by its thread); a reply already in the pending review
-  with the same body under the same first comment counts as posted. Elsewhere replies stay in ccr (400 *"this
-  thread is not a review thread on GitHub, so a reply to it stays in ccr"*).
+  with the same body under the same first comment counts as posted. Elsewhere replies stay in ccr: on a
+  commit or the whole pull request (400 *"a GitHub reply goes into a thread on a line or a file; …"*), and under a
+  review body or a deleted thread (400 *"this thread is not a review thread on GitHub, so a reply to it stays in
+  ccr"*).
 * **UI.** A mirrored comment shows `@login` (*(you)* for the viewer's), a *GitHub ↗* link and the tags *outdated*,
   *resolved there*, *pending there* or *deleted there* (a review body: *review · changes requested* and the like),
   and has no Edit or Delete; nor has a root whose thread holds a mirrored reply, since deleting it would take the
   replies along (the store refuses either with 409). Outdated threads, review bodies and deleted threads start
-  collapsed (*GitHub thread by @nyh · outdated · N comments — Show · Ask AI*). A review thread offers **Ask AI**
+  collapsed (*GitHub thread by @nyh · outdated · N comments — Show · Ask AI*). A thread that takes GitHub replies offers **Ask AI**
   and **GH reply** (10.4), its reply editor has an *Ask AI | GH reply* switch, and the user's replies there are
   tagged *Question* or *GitHub · not posted* / *GitHub ↗*. Comments a
   later sync brings get *New* and a toast *"N new comments from GitHub"*; comments older than the first sync

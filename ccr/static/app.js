@@ -100,6 +100,10 @@
   /** The GitHub review thread a root is (mirrored, or posted from ccr), so a reply to it can go to GitHub too. */
   const githubThreadOf = (root) => (root && root.github && ['remote', 'posted'].includes(root.github.status)
     && root.github.thread_id && !root.github.deleted ? root.github.thread_id : null);
+  /** A thread takes GitHub replies when it is a review thread on GitHub or can start one there: a question or the
+   *  user's GitHub comment on a line or a file (10.5); not on a commit, the whole pull request or a review body. */
+  const takesGitHubReply = (root) => Boolean(prMode() && root && (githubThreadOf(root)
+    || (!isMirrored(root) && root.anchor && ['line', 'file'].includes(root.anchor.kind))));
   /** A mirrored root that starts collapsed, as GitHub shows it: an outdated thread, a review body, a deleted one. */
   const isQuiet = (root) => isMirrored(root) && Boolean(root.github.outdated || root.github.kind === 'review' || root.github.deleted);
   /** In PR mode a comment is part of the discussion on GitHub (mirrored, or the user's GitHub comment or reply) or of
@@ -1791,7 +1795,7 @@
     const tags = [];
     if (isMirrored(c)) tags.push(mirroredTagsHtml(c, root));
     else if (c.github) tags.push(githubTagHtml(c));
-    else if (prMode() && c.author === 'user' && (root || githubThreadOf(rootOf(c)))) {
+    else if (prMode() && c.author === 'user' && (root || takesGitHubReply(rootOf(c)))) {
       tags.push('<span class="tag tag-question" title="A question for Claude: it is answered here, nothing goes to GitHub">Question</span>');
     }
     if (c.state === 'pending') tags.push(`<span class="tag tag-pending" title="${esc(NEW_DOT_TITLE)}">Pending</span>`);
@@ -1807,11 +1811,11 @@
     return tags.join('');
   }
 
-  /** A thread's reply buttons: [Reply], or in PR mode [Ask AI] and, on a review thread on GitHub, [GH reply]. */
+  /** A thread's reply buttons: [Reply], or in PR mode [Ask AI] and, where a thread takes them, [GH reply]. */
   function replyButtonsHtml(root, cls, plainLabel) {
     const key = `reply:${root.id}`;
     const buttons = !prMode() ? [[null, 'Reply', plainLabel]] : [['question', 'Ask AI', 'Ask AI about this thread']]
-      .concat(githubThreadOf(root) ? [['github', 'GH reply', 'GH reply in this thread, for your pending review']] : []);
+      .concat(takesGitHubReply(root) ? [['github', 'GH reply', 'GH reply in this thread, for your pending review']] : []);
     return buttons.map(([intent, text, label]) => `<button type="button" class="${cls}${cls === 'btn-reply' && hasDraftFor(key, intent) ? ' has-draft' : ''}"${intent ? ` data-intent="${intent}"` : ''} aria-label="${label}">${text}</button>`).join('');
   }
 
@@ -1866,11 +1870,11 @@
 
   /* ---- editors */
 
-  /** What a new comment or reply is in PR mode: 'github' (a root on a line or file, or a reply in a GitHub review
-   *  thread) or 'question'; null outside PR mode, for edits and for replies in threads that are not on GitHub. */
+  /** What a new comment or reply is in PR mode: 'github' (a root on a line or file, or a reply in a thread that
+   *  takes GitHub replies) or 'question'; null outside PR mode, for edits and for replies in other threads. */
   function editorIntent(entry) {
     if (!prMode()) return null;
-    if (entry.mode === 'reply') return githubThreadOf(state.comments.get(entry.rootId)) ? (entry.intent === 'github' ? 'github' : 'question') : null;
+    if (entry.mode === 'reply') return takesGitHubReply(state.comments.get(entry.rootId)) ? (entry.intent === 'github' ? 'github' : 'question') : null;
     if (entry.mode !== 'new') return null;
     const kind = entry.anchor && entry.anchor.kind;
     return (kind === 'line' || kind === 'file') && entry.intent === 'github' ? 'github' : 'question';

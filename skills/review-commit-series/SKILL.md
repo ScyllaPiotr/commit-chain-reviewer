@@ -232,8 +232,11 @@ comment** you check and, when it holds, post verbatim into the user's pending Gi
 Run `ccr gh-sync --repo "$REPO"` first, so the round meets GitHub's discussion as it is now. The `ccr wait` header
 ends with `— <g> GitHub comments to check and post` when the round has some (roots and replies), and every root
 says what it is right after its author: `question`, `GitHub comment (not posted)`, `GitHub comment (posted: <url>)`,
-or, by `@login (GitHub)`, a mirrored `GitHub thread (…)` / `GitHub review (…)`. A user reply in a GitHub thread is
-a question unless it reads `GitHub reply (not posted)`.
+or, by `@login (GitHub)`, a mirrored `GitHub thread (…)` / `GitHub review (…)`. A user reply is a question
+unless it reads `GitHub reply (not posted)`; that can stand in any thread on a line or a file, a question thread
+too. There the first GitHub comment of a thread with none on GitHub yet starts a thread on GitHub at the root's
+place (`--dry-run` shows the line, not `reply to …`), and later GitHub replies go into it: post a thread's GitHub
+comments in the order they were written (`gh-post` refuses a reply whose thread starter is not posted yet).
 
 - **Questions and replies**: answer from the code, citing `path:line`, and change no file. A question in a mirrored
   thread is about that GitHub discussion: read the whole thread first. Reply without `[resolve]`; the user resolves.

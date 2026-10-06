@@ -1126,8 +1126,9 @@ def test_github_comments_need_pr_mode_a_user_root_and_a_line_or_file(fixture_rep
     assert root["github"] == {"status": "local"} and root["state"] == "pending" and root["author"] == "user"
     question = store.add_comment("What does this do?", line_anchor(sha, "src/app.py", 5))
     assert question["github"] is None
+    on_commit = store.add_comment("Why this commit?", {"kind": "commit", "commit": sha})
     rejects = {
-        "not a review thread on GitHub, so a reply to it stays in ccr": dict(anchor=None, parent_id=root["id"]),
+        "a GitHub reply goes into a thread on a line or a file": dict(anchor=None, parent_id=on_commit["id"]),
         "the user's to write": dict(anchor=line_anchor(sha, "src/app.py", 5), author="claude"),
         "goes on a line or a file": dict(anchor={"kind": "commit", "commit": sha}),
         "goes on a line or a file ": dict(anchor={"kind": "review"}),
@@ -1139,8 +1140,10 @@ def test_github_comments_need_pr_mode_a_user_root_and_a_line_or_file(fixture_rep
         with pytest.raises(StoreError, match=message.strip()):
             store.add_comment("x", github=github, **kwargs)
     reply = store.add_comment("A reply", None, parent_id=root["id"])
-    assert reply["github"] is None, "replies are always local"
-    assert [c["id"] for c in store.list_comments()] == [root["id"], question["id"], reply["id"]]
+    assert reply["github"] is None, "a reply is a question unless it says otherwise"
+    assert store.add_comment("Also", None, parent_id=root["id"], github=True)["github"] == {"status": "local"}, \
+        "a GitHub reply under a GitHub comment that is not posted yet goes after it"
+    assert [c["id"] for c in store.list_comments()][:4] == [root["id"], question["id"], on_commit["id"], reply["id"]]
 
 
 def test_github_targets_are_lines_of_the_pull_request_diff(fixture_repo, pr_store):
@@ -1449,8 +1452,10 @@ def test_sync_mirrors_the_pull_request_discussion(fixture_repo, pr_store):
 
 def test_github_replies_and_what_ccr_cannot_change_about_github(fixture_repo, pr_store):
     head = fixture_repo.feature
-    pr_store.sync_github(discussion(head, [gh_thread("T1", [gh_comment("C1", "nyh", "Why 500?")])]))
-    root = next(c for c in pr_store.list_comments() if c["author"] == "github")
+    pr_store.sync_github(discussion(head, [gh_thread("T1", [gh_comment("C1", "nyh", "Why 500?")])], [
+        {"id": "R1", "database_id": 1, "body": "Please fix.", "url": PR_URL + "#pullrequestreview-1",
+         "state": "CHANGES_REQUESTED", "submitted_at": "2026-09-01T12:00:00Z", "login": "nyh"}]))
+    root = next(c for c in pr_store.list_comments() if c["author"] == "github" and c["anchor"]["kind"] == "line")
     for change in (dict(body="Rewritten"), dict(github=True), dict(anchor=line_anchor(COMBINED, "src/app.py", 6))):
         with pytest.raises(StoreError, match="comes from the pull request's discussion on GitHub") as info:
             pr_store.edit_comment(root["id"], **change)
@@ -1469,20 +1474,49 @@ def test_github_replies_and_what_ccr_cannot_change_about_github(fixture_repo, pr
         pr_store.add_comment("From Claude", None, parent_id=root["id"], author="claude", github=True)
 
     sha = fixture_repo.sha(THREE_HUNKS)
+    # a question thread on a line: its first GitHub reply starts a thread on GitHub there, later ones go into it
     question = pr_store.add_comment("Is this right?", line_anchor(sha, "src/app.py", 6))
+    pr_store.add_comment("Yes, see the spec.", None, parent_id=question["id"], author="claude")
+    starter = pr_store.add_comment("Is 6 right?", None, parent_id=question["id"], github=True)
+    second = pr_store.add_comment("And 7?", None, parent_id=question["id"], github=True)
+    target = pr_store.github_target(starter["id"])
+    assert {k: target[k] for k in ("subject_type", "path", "line", "side", "body")} == {
+        "subject_type": "LINE", "path": "src/app.py", "line": 6, "side": "RIGHT", "body": "Is 6 right?"}
+    with pytest.raises(StoreError, match="comment %s starts this thread on GitHub, so it is posted first" % starter["id"]) as info:
+        pr_store.github_target(second["id"])
+    assert info.value.status == 409
+    pr_store.record_github_post(starter["id"], {"url": PR_URL + "#discussion_r60", "comment_id": 60, "node_id": "C60",
+                                                "thread_id": "T6", "subject_type": "LINE"})
+    target = pr_store.github_target(second["id"])
+    assert {k: target[k] for k in ("subject_type", "thread_id", "reply_to", "thread_author")} == {
+        "subject_type": "REPLY", "thread_id": "T6", "reply_to": "C60", "thread_author": "you"}
+    on_commit = pr_store.add_comment("Why this commit?", {"kind": "commit", "commit": sha})
+    with pytest.raises(StoreError, match="a GitHub reply goes into a thread on a line or a file"):
+        pr_store.add_comment("x", None, parent_id=on_commit["id"], github=True)
+    outside = pr_store.add_comment("And here?", line_anchor(sha, "src/app.py", 10))
+    with pytest.raises(StoreError, match="is not in the pull request diff"):
+        pr_store.add_comment("x", None, parent_id=outside["id"], github=True)
+    review_body = next(c for c in pr_store.list_comments() if c["body"] == "Please fix.")
     with pytest.raises(StoreError, match="not a review thread on GitHub"):
-        pr_store.add_comment("x", None, parent_id=question["id"], github=True)
+        pr_store.add_comment("x", None, parent_id=review_body["id"], github=True)
     remark = pr_store.add_comment("Why 500 here?", line_anchor(sha, "src/app.py", 5), github=True)
     pr_store.record_github_post(remark["id"], {"url": PR_URL + "#discussion_r9", "comment_id": 9, "node_id": "C9",
                                                "thread_id": None})
-    with pytest.raises(StoreError, match="not a review thread on GitHub"):
-        pr_store.add_comment("x", None, parent_id=remark["id"], github=True)
+    early = pr_store.add_comment("x", None, parent_id=remark["id"], github=True)
+    with pytest.raises(StoreError, match="ccr does not know the thread yet; run ccr gh-sync"):
+        pr_store.github_target(early["id"])
+    pr_store.delete_comment(early["id"])
 
     linked = pr_store.sync_github(discussion(head, [
         gh_thread("T1", [gh_comment("C1", "nyh", "Why 500?")]),
         gh_thread("T9", [gh_comment("C9", "reviewer", "Why 500 here?", database_id=9, state="PENDING"),
-                         gh_comment("C10", "nyh", "Good question.", reply_to="C9")])]))
-    assert linked["added"] == 1, "the posted comment is not mirrored again; nyh's reply joins its thread"
+                         gh_comment("C10", "nyh", "Good question.", reply_to="C9")]),
+        gh_thread("T6", [gh_comment("C60", "reviewer", "Is 6 right?", database_id=60, state="PENDING"),
+                         gh_comment("C61", "nyh", "It is.", reply_to="C60")], line=6)]))
+    assert linked["added"] == 2, "the posted comments are not mirrored again; nyh's replies join their threads"
+    by_body = {c["body"]: c for c in pr_store.list_comments()}
+    assert by_body["It is."]["parent_id"] == question["id"] and by_body["Is 6 right?"]["github"]["thread_id"] == "T6", \
+        "a reply that started a thread on GitHub keeps GitHub's answers in its ccr thread"
     mine = next(c for c in pr_store.list_comments() if c["id"] == remark["id"])
     assert (mine["github"]["thread_id"], mine["github"]["github_state"]) == ("T9", "PENDING")
     joined = next(c for c in pr_store.list_comments() if c["body"] == "Good question.")
