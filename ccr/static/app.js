@@ -917,7 +917,7 @@
     const g = gapInfo(f, gapIndex, state.fileText.get(`${state.viewSha}|${f.path}`));
     if (gapIndex === 0 && g.size === 0) return '';
     const head = lower ? `<span class="hunk-head">${esc(hunkHeader(lower))}${lower.section ? `<span class="section">${esc(lower.section)}</span>` : ''}</span>` : '<span class="hunk-head"></span>';
-    return `<tr class="hunk" data-gap="${gapIndex}"><td colspan="4"><div class="hunk-inner">${buttons}${head}</div></td></tr>`;
+    return `<tr class="hunk" data-gap="${gapIndex}"><td colspan="${diffColspan()}"><div class="hunk-inner">${buttons}${head}</div></td></tr>`;
   }
 
   /* ---- highlighting */
@@ -1048,9 +1048,19 @@
   function threadRowHtml(key) {
     const ids = state.threadsByKey.get(key);
     let html = '';
-    if (ids && ids.length) html += `<tr class="threads" data-key="${esc(key)}"><td colspan="4">${ids.map(threadHtml).join('')}</td></tr>`;
-    if (state.openEditors.has(key)) html += `<tr class="editor" data-key="${esc(key)}"><td colspan="4">${editorHtml(key)}</td></tr>`;
+    if (ids && ids.length) html += `<tr class="threads" data-key="${esc(key)}"><td colspan="${diffColspan()}">${ids.map(threadHtml).join('')}</td></tr>`;
+    if (state.openEditors.has(key)) html += `<tr class="editor" data-key="${esc(key)}"><td colspan="${diffColspan()}">${editorHtml(key)}</td></tr>`;
     return html;
+  }
+
+  /** PR mode gives the gutter buttons a column of their own left of the line numbers (one per side in split view),
+   *  so they never cover the code being marked. */
+  const gutterColumn = () => prMode() && !commentsDisabled();
+  const diffColspan = () => 4 + (gutterColumn() ? (state.viewMode === 'split' ? 2 : 1) : 0);
+  /** The gutter cell left of a side's line number; `side` null for unified rows, whose buttons go by the row's kind. */
+  function gutterCell(side, line) {
+    if (!gutterColumn()) return '';
+    return `<td class="gutter ${side == null ? '' : line == null ? 'empty' : side}"></td>`;
   }
 
   function numCell(side, line, extraCls = '') {
@@ -1064,7 +1074,7 @@
 
   function unifiedRow(line, tokens, ranges) {
     const marker = line.t === 'add' ? '+' : line.t === 'del' ? '−' : '';
-    return `<tr class="line ${line.t}" ${rowAttrs(line)}>${numCell('old', line.o)}${numCell('new', line.n)}<td class="marker">${marker}</td><td class="code">${renderCode(tokens, ranges, line)}</td></tr>`;
+    return `<tr class="line ${line.t}" ${rowAttrs(line)}>${gutterCell(null)}${numCell('old', line.o)}${numCell('new', line.n)}<td class="marker">${marker}</td><td class="code">${renderCode(tokens, ranges, line)}</td></tr>`;
   }
 
   function splitRow(left, right, tl, tr, rl, rr) {
@@ -1074,7 +1084,8 @@
     const rcls = right && right.t === 'add' ? 'add' : '';
     const lcode = left ? `<td class="code old ${lcls}">${renderCode(tl, rl, left)}</td>` : '<td class="code empty"></td>';
     const rcode = right ? `<td class="code new ${rcls}">${renderCode(tr, rr, right)}</td>` : '<td class="code empty"></td>';
-    return `<tr class="line ${cls}" ${attrs}>${numCell('old', left ? left.o : null, lcls)}${lcode}${numCell('new', right ? right.n : null, rcls)}${rcode}</tr>`;
+    const lo = left ? left.o : null; const rn = right ? right.n : null;
+    return `<tr class="line ${cls}" ${attrs}>${gutterCell('old', lo)}${numCell('old', lo, lcls)}${lcode}${gutterCell('new', rn)}${numCell('new', rn, rcls)}${rcode}</tr>`;
   }
 
   /** Build the whole diff table for a file as one HTML string. */
@@ -1083,8 +1094,9 @@
     const tok = tokensFor(sha, f);
     const source = expansionSource(f);
     let oi = 0; let ni = 0;
-    const cols = view === 'split' ? '<col class="c-num"><col class="c-code"><col class="c-num"><col class="c-code">' : '<col class="c-num"><col class="c-num"><col class="c-marker"><col class="c-code">';
-    const parts = [`<table class="diff" data-view="${view}"><colgroup>${cols}</colgroup><tbody>`];
+    const g = gutterColumn() ? '<col class="c-gutter">' : '';
+    const cols = view === 'split' ? `${g}<col class="c-num"><col class="c-code">${g}<col class="c-num"><col class="c-code">` : `${g}<col class="c-num"><col class="c-num"><col class="c-marker"><col class="c-code">`;
+    const parts = [`<table class="diff${g ? ' has-gutter' : ''}" data-view="${view}"><colgroup>${cols}</colgroup><tbody>`];
     for (let hi = 0; hi <= f.hunks.length; hi++) {
       parts.push(hunkRowHtml(f, hi, source));
       if (hi === f.hunks.length) break;
@@ -1259,12 +1271,13 @@
     }
   }
 
-  /** Move a card's shared gutter button(s) into the number cell for (row, side). */
+  /** Move a card's shared gutter button(s) into the number cell for (row, side), or in PR mode into its gutter cell. */
   function placeGutterButton(row, side, show) {
     const card = row.closest('.file-card');
     const buttons = card ? card.querySelectorAll('.btn-add-comment') : [];
     const cell = row.querySelector(`td.num.${side}[data-line]`);
     if (!buttons.length || !cell) return;
+    const host = row.querySelector(`td.gutter.${side}`) || row.querySelector('td.gutter:not(.empty)') || cell;
     const line = cell.dataset.line;
     const key = lineKey(state.viewSha, card.dataset.path, side, +line);
     for (const btn of buttons) {
@@ -1273,7 +1286,7 @@
       btn.classList.remove('is-parked');
       btn.classList.toggle('is-visible', Boolean(show));
       btn.classList.toggle('has-draft', hasDraftFor(key, btn.dataset.intent || null));
-      if (btn.parentElement !== cell) cell.appendChild(btn);
+      if (btn.parentElement !== host) host.appendChild(btn);
     }
   }
 

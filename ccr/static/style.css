@@ -8,6 +8,9 @@
   --file-header-h: 40px;
   --top-h: 48px;
   --sidebar-w: 280px;
+  --gutter-ask-w: 48px;
+  --gutter-gh-w: 84px;
+  --gutter-gap: 3px;
   --radius: 6px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
@@ -36,6 +39,7 @@
   --diff-num: #6e7781;
   --diff-empty: #f6f8fa;
   --line-selected: #fff8c5;
+  --line-hover: rgba(31, 35, 40, .07);
   --line-flash: #ffdf5d;
   --pending: #9a6700;
   --pending-bg: #fff8c5;
@@ -80,6 +84,7 @@
   --diff-num: #636e7b;
   --diff-empty: #2d333b;
   --line-selected: rgba(174, 124, 20, .25);
+  --line-hover: rgba(205, 217, 229, .08);
   --line-flash: rgba(210, 153, 34, .5);
   --pending: #c69026;
   --pending-bg: rgba(174, 124, 20, .15);
@@ -412,9 +417,16 @@ table.diff tr.threads .thread + .thread, table.diff tr.threads .thread + .editor
 .btn-add-comment.is-visible, tr.line:hover .btn-add-comment, tr.line:focus-within .btn-add-comment, tr.line.is-selected .btn-add-comment { display: inline-flex; }
 .btn-add-comment:hover { transform: scale(1.1); }
 .btn-add-comment.is-parked { display: none !important; }
-/* PR mode forks [+] into a question [Ask AI] at the code edge and a GitHub comment [GH comment] right of it */
-.btn-add-comment[data-intent] { right: auto; left: calc(100% - 11px); width: 54px; font-size: 11px; white-space: nowrap; overflow: hidden; }
-.btn-add-comment[data-intent="github"] { left: calc(100% + 45px); width: 84px; background: var(--github); color: var(--github-fg); }
+/* PR mode forks [+] into a question [Ask AI] and a GitHub comment [GH comment], side by side in a column of their own
+   left of the line numbers (one per side in split view); the row under the pointer, on that side, turns grey */
+table.diff col.c-gutter { width: calc(var(--gutter-ask-w) + var(--gutter-gh-w) + 3 * var(--gutter-gap)); }
+table.diff td.gutter { position: relative; }
+table.diff td.gutter:not(.empty) { background: var(--bg); }
+.btn-add-comment[data-intent] { right: auto; left: var(--gutter-gap); top: 1px; width: var(--gutter-ask-w); height: 18px; line-height: 16px; font-size: 11px; white-space: nowrap; overflow: hidden; }
+.btn-add-comment[data-intent="github"] { left: calc(var(--gutter-ask-w) + 2 * var(--gutter-gap)); width: var(--gutter-gh-w); background: var(--github); color: var(--github-fg); }
+table.diff.has-gutter[data-view="unified"] tr.line:hover > td,
+table.diff.has-gutter[data-view="split"] tr.line:has(> .old:hover) > .old,
+table.diff.has-gutter[data-view="split"] tr.line:has(> .new:hover) > .new { background-image: linear-gradient(var(--line-hover), var(--line-hover)); }
 .file-header .hdr-btn.btn-comment-file[data-intent] { width: auto; padding: 0 6px; font-weight: 600; font-size: 11px; white-space: nowrap; }
 
 /* ------------------------------------------------------------------ editor */

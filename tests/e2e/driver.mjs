@@ -570,14 +570,45 @@ export async function runPrScenario(page, url) {
 
   await runner.step('gutter forks into Ask AI and GH comment', async () => {
     await page.hover(row(5) + ' td.code');
-    const q = row(5) + ' td.num.new .btn-add-comment[data-intent="question"]';
-    const g = row(5) + ' td.num.new .btn-add-comment[data-intent="github"]';
+    const q = row(5) + ' td.gutter .btn-add-comment[data-intent="question"]';
+    const g = row(5) + ' td.gutter .btn-add-comment[data-intent="github"]';
     await page.waitFor(`${isShown(q)} && ${isShown(g)}`, { label: 'both gutter buttons in the hovered row' });
     const boxes = await page.evaluate(`[${JSON.stringify(q)}, ${JSON.stringify(g)}].map((s) => { const el = document.querySelector(s); const r = el.getBoundingClientRect(); return { text: el.textContent, left: r.left, right: r.right, label: el.getAttribute('aria-label'), clipped: el.scrollWidth > el.clientWidth }; })`);
     if (boxes[0].text !== 'Ask AI' || boxes[1].text !== 'GH comment' || boxes[0].right > boxes[1].left || boxes.some((b) => b.clipped)) throw new Error('gutter buttons: ' + JSON.stringify(boxes));
+    const numLeft = await page.evaluate(`document.querySelector(${JSON.stringify(row(5) + ' td.num')}).getBoundingClientRect().left`);
+    if (boxes[1].right > numLeft) throw new Error(`gutter buttons reach into the line numbers: ${boxes[1].right} > ${numLeft}`);
+    const tint = (sel) => `getComputedStyle(document.querySelector(${JSON.stringify(sel)})).backgroundImage !== 'none'`;
+    if (!(await page.evaluate(`${tint(row(5) + ' td.code')} && !${tint(row(6) + ' td.code')}`))) throw new Error('the hovered row alone is not grey');
     if (await page.evaluate(`Boolean(document.querySelector('#main .btn-add-comment:not([data-intent])'))`)) throw new Error('a plain [+] is left in PR mode');
     await page.shot('pr-01-gutter');
     return boxes.map((b) => b.label).join(' | ');
+  });
+
+  await runner.step('split view: the buttons by the hovered side', async () => {
+    await page.click('#btn-viewmode');
+    await page.waitFor(`document.querySelector(${JSON.stringify(card + '[data-rendered="1"] table.diff[data-view="split"]')})`, { label: 'split view' });
+    const sides = {};
+    for (const side of ['old', 'new']) {
+      await page.hover(`${row(6)} td.code.${side}`);
+      await page.waitFor(`${isShown(`${row(6)} td.gutter.${side} .btn-add-comment[data-intent="github"]`)}`, { label: `buttons in the ${side} gutter` });
+      sides[side] = await page.evaluate(`(() => { const r = document.querySelector(${JSON.stringify(row(6))});
+        const grey = [...r.children].filter((td) => getComputedStyle(td).backgroundImage !== 'none').map((td) => td.className.trim()).join(',');
+        return { buttons: [...r.querySelectorAll('.btn-add-comment')].map((b) => b.closest('td').className + ':' + b.dataset.side).join(','), grey }; })()`);
+    }
+    if (sides.old.buttons !== 'gutter old:old,gutter old:old' || sides.new.buttons !== 'gutter new:new,gutter new:new'
+        || sides.old.grey !== 'gutter old,num old,code old' || sides.new.grey !== 'gutter new,num new,code new') throw new Error('split gutter: ' + JSON.stringify(sides));
+    // the whole interface fits a 1080p screen in either view, and the 1280x720 one this scenario runs at
+    const overflow = `[document.documentElement, document.querySelector('#main')].map((e) => e.scrollWidth - e.clientWidth).join(',')`;
+    const fits = [await page.evaluate(overflow)];
+    await page.cdp.send('Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
+    fits.push(await page.evaluate(overflow));
+    await page.click('#btn-viewmode');
+    await page.waitFor(`document.querySelector(${JSON.stringify(card + '[data-rendered="1"] table.diff[data-view="unified"]')})`, { label: 'unified view again' });
+    fits.push(await page.evaluate(overflow));
+    await page.cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
+    if (fits.some((f) => f !== '0,0')) throw new Error('horizontal overflow (split 1280, split 1920, unified 1920): ' + fits.join(' / '));
+    await page.hover(row(5) + ' td.code');
+    return `old: ${sides.old.grey} · new: ${sides.new.grey}`;
   });
 
   await runner.step('GitHub comment on a line', async () => {
