@@ -1019,9 +1019,12 @@ def cmd_gh_post(args) -> int:
     # GitHub's discussion as it is now, before anything goes into it: what came since the last sync is read first
     label = github.pr_label(pr)
     try:
-        news = client.post("/api/github/sync", github.fetch_discussion(remote))["news"]
+        news = client.post("/api/github/sync", github.fetch_discussion(remote)).get("news")
     except (ApiError, GitHubError) as exc:
         raise CliError("could not re-read the discussion on %s, so nothing is posted: %s" % (label, exc)) from None
+    if news is None:
+        raise CliError("the running ccr server is older than this ccr and does not report what changed on GitHub, so "
+                       "nothing is posted; it needs a restart first (ccr stop && ccr start keeps the review)")
     if news:
         say("ccr: %s: %d comments added, edited or deleted on GitHub since the last sync:" % (label, len(news)))
         print_github_news(news, say)
