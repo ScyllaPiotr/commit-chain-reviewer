@@ -475,6 +475,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             "reload": lambda: self._reload(body),
             "cover": lambda: self._send_json(200, {"cover": store.set_cover(body.get("text")), "version": store.version}),
             "pr": lambda: self._send_json(200, {"pr": store.set_pr(body.get("url")), "version": store.version}),
+            "restore": lambda: self._send_json(200, store.restore(body.get("payload"), bool(body.get("dry_run")))),
             "shutdown": self._shutdown,
         }
         if method == "GET":

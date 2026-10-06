@@ -636,6 +636,20 @@ def test_cover_route(live):
     assert live.post("/api/cover", {"text": 42}).status == 400
 
 
+def test_restore_route(live):
+    payload = {"source": "json", "pr": None, "cover": "Restored.", "rounds": [], "comments": [
+        {"id": "abc123", "parent_id": None, "author": "user", "body": "Back.", "created_at": "2026-10-01T10:00:00Z",
+         "updated_at": "2026-10-01T10:00:00Z", "state": "pending", "round": None, "resolved": False,
+         "anchor": {"kind": "review"}, "snippet": "", "github": None}]}
+    assert live.post("/api/restore", {"payload": {"source": "zip"}}).status == 400
+    dry = live.post("/api/restore", {"payload": payload, "dry_run": True})
+    assert dry.status == 200 and dry.json["dry_run"] is True and live.get("/api/comments").json["comments"] == []
+    done = live.post("/api/restore", {"payload": payload})
+    assert done.status == 200 and done.json["comments"] == 1 and done.json["cover"] == "restored"
+    assert [c["id"] for c in live.get("/api/comments").json["comments"]] == ["abc123"]
+    assert live.post("/api/restore", {"payload": payload}).status == 409
+
+
 def test_comments_route_projects_into_a_view(live):
     created = add_comment(live)
     plain = live.get("/api/comments").json["comments"][0]

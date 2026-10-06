@@ -18,9 +18,10 @@ Design constraints:
 * **Simplest possible database**: comments and rounds live in **SQLite** via the stdlib `sqlite3` module
   (part of the default `python3` package on Fedora and Ubuntu — nothing to install). The database file lives
   in the private session directory (mode 0600), so a crashed or killed background server loses nothing, and so
-  does `ccr stop` (which writes a Markdown export too): the next `ccr start` on the repository resumes the review. A
-  stopped session's database goes a week after its last change (`ccr start` and `ccr stop` prune them, never a
-  running server's, 6.2), or at once with `ccr stop --purge`. `--db :memory:` gives a pure in-memory store; `--db FILE` an explicit file.
+  does `ccr stop` (which writes a Markdown and a JSON export too): the next `ccr start` on the repository resumes the
+  review. A stopped session's database goes a week after its last change (`ccr start` and `ccr stop` prune them, never
+  a running server's, 6.2), or at once with `ccr stop --purge`; `ccr restore` brings a dropped review back from one of
+  its exports (6.4). `--db :memory:` gives a pure in-memory store; `--db FILE` an explicit file.
 * **Local only**: bind `127.0.0.1`; every `/api/*` call requires a per-process random token sent in a header.
 * Works on any git repository (git ≥ 2.24), on any commit range, including uncommitted work-tree changes.
 * ccr never modifies the working tree, refs, or index *contents*; git itself may refresh the stat cache in
@@ -48,6 +49,7 @@ commit-chain-reviewer/
     store.py                ReviewStore: review data cache, comments, rounds, version + Condition (section 4)
     session.py              session-file discovery, background start/stop, port pick, token gen (section 6.1)
     render.py               Markdown/JSON rendering of comments for `ccr comments|wait|export` (section 6.3)
+    restore.py              reading an export back into a restore payload for `ccr restore` (section 6.4)
     static/
       index.html            single page app shell (no inline scripts, no inline styles)
       theme.js              tiny pre-paint theme bootstrap (loaded synchronously in <head>)
@@ -559,6 +561,7 @@ paths → 404 JSON. Log line (only with `--verbose`): `"%s %s %d %dms"` with the
 | POST | `/api/cover` | `{text}` → `{"cover", "version"}`; sets the cover letter (≤ 64 KiB Markdown, stored in `meta`; bumps `version` **and** `generation` so open pages re-render) |
 | POST | `/api/pr` | `{url}` → `{"pr", "version"}`; links the review to a pull request (section 10; bumps `version` and `generation`) |
 | POST | `/api/github/sync` | `{viewer, head, threads, reviews}` → `{"threads", "reviews", "added", "updated", "removed", "synced_at"}`; mirrors the pull request's discussion (10.5); 409 outside PR mode |
+| POST | `/api/restore` | `{payload, dry_run?}` → `{"source", "dry_run", "comments", "threads", "rounds", "outdated", "cover", "mirrored": {"matched", "restored", "left_to_sync", "unmatched"}, "dropped_copies", "renamed"}`; fills an empty review from an export (6.4); 409 when the review has comments or rounds of its own, the export is of another pull request or names a commit the repository lacks |
 | POST | `/api/shutdown` | 202; sets `stopping`, `cond.notify_all()`, then `threading.Thread(target=httpd.shutdown, daemon=True).start()` |
 
 Errors are always JSON `{"error": "…"}`. Unknown `/api/*` → 404.
@@ -619,7 +622,8 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
   `--db-force`. Token source order: `--token`, `CCR_SERVE_TOKEN`, generate. Prints the two lines above (token redacted
   as `<redacted>` when it came from the environment, so logs never contain it).
 * `ccr stop [--all] [--keep-db] [--purge]` — 1) `GET /api/state`, require `server.pid == session.pid` (else stale, never
-  signal); 2) `ccr export --md` → `<session dir>/<key>-<YYYYmmdd-HHMMSS>.md`, print `ccr: exported to <path>`;
+  signal); 2) `ccr export --md` → `<session dir>/<key>-<YYYYmmdd-HHMMSS>.md` and `ccr export --json` → the same name
+  with `.json` (for `ccr restore`, 6.4), printing `ccr: exported to <path>` for each;
   3) `POST /api/shutdown`; 4) wait ≤ 5 s for the pid to vanish; 5) only then SIGTERM, and only if `/proc/<pid>/cmdline`
   contains `ccr` and `serve`; 6) delete the session file; the default sqlite file stays (`--purge` removes it, the
   exports and the logs now; `--keep-db`, the old opt-in, overrides `--purge` for the database). `--all` does this for
@@ -665,6 +669,8 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
   the `## Rounds` block, then the 6.3 Markdown for `--all --outdated --context 3`; `--json` =
   `{"review": Review-without-files, "rounds", "comments", "threads": [{"root","replies","last_author","answered"}]}`.
   `-o FILE` is created with mode 0600. In PR mode the title carries ` — PR <owner/repo#N>` after the range.
+* `ccr restore FILE [--dry-run] [--json]` — fills the running review, which has no comments or rounds of its own yet,
+  from an export (6.4).
 * `ccr gh-sync [--json]` — PR mode (10.5): reads the pull request's review threads and review bodies through `gh api`
   and mirrors them into the review; prints `ccr: <owner/repo#N>: T review threads, R review bodies; a comments
   added, u updated, r removed`.
@@ -744,6 +750,41 @@ Snippet block: `--context N` (default 3) rows before/after from the cached diff,
 `→ HEAD <path>:<line>` with `(moved)`/`(changed near)`/`(deleted)`/`(file deleted)`/`(live)` as applicable. `--json` prints
 `{"review": {...meta w/o files}, "rounds": [...], "comments": [...], "threads": [{"root": id, "replies": [ids], "last_author", "answered"}]}`
 (threads reference comments by id; the full objects are in `comments`).
+
+### 6.4 Restoring a review from its export (`ccr restore`, `ccr/restore.py`)
+
+A review lives in its database, which `ccr stop --purge`, the prune of week-old databases (6.2) or a lost file can
+drop. `ccr stop` first writes two exports, kept until `--purge`: the Markdown one, and `ccr export --json`, which holds
+every stored field. `ccr restore FILE` (`-` = stdin) loads either into the running review (`POST /api/restore`,
+`ReviewStore.restore`); `ccr/restore.py` turns the file into the payload, parsing what 6.3 writes for Markdown.
+
+* The review must have no comments or rounds of its own (409); comments mirrored from GitHub may be there. An export of
+  a pull request needs the review linked to that one (409: start ccr with `--pr`), and every anchor's commit must be in
+  the repository (409: fetch it first); a commit outside the range makes an outdated thread (4.3).
+* Comments keep their ids (a new one when the database has the id already, reported), parents, authors, bodies,
+  anchors, states, rounds, times, resolved flags and GitHub records, in the export's order; rounds keep their number,
+  time, verdict and summary; an empty cover letter takes the export's. Bumps `version` and `generation`.
+* A Markdown export loses: a root's creation time (set a minute before the earliest of its first reply, its edit and,
+  for the user's, its round's submission; Claude's root of round N stays after round N), snippets (captured again as
+  in 4.2, else read from git), a round's base, head and commits (the review's current ones), a posted comment's GitHub
+  record beyond `{status: posted, url, comment_id}` and `edited`, what `clean()` strips, and the node ids of mirrored
+  comments. A round summary keeps its newlines when its summary comment (`[id: …]` on the round line) is in the export.
+* Mirrored comments (PR mode): a JSON export's keep their node ids (a row a sync already brought with the same node id
+  is that comment), so the next sync updates or removes them as usual. A Markdown export's have none: each mirrored
+  root of the export is the mirrored root with the same login and text (and place, when that is not unique), and its
+  mirrored replies come from the sync. One that matches nothing is restored, marked `deleted`, when the user or Claude
+  replied in it, else left to the sync. A mirrored copy of one of the user's posted comments (the same `comment_id`),
+  which a sync before the restore makes, is dropped with its replies; the next sync joins them to the restored comment.
+* `ccr restore` asks for a dry run first, so a refusal changes nothing. In PR mode it then syncs (10.5) before
+  restoring a Markdown export with mirrored comments, and after every restore, so posted comments learn their threads
+  and GitHub's state of them again.
+* Output: `ccr: restored C comments (T threads) and R rounds from FILE (json|markdown export)` with `; cover letter
+  restored` or `; the review's own cover letter kept`; in PR mode `ccr: GitHub: m mirrored comments matched, i restored,
+  s left to the sync; d mirrored copies of your posted comments dropped`; `ccr: GitHub thread <id> matches nothing on
+  GitHub any more; restored, marked deleted there, for its replies`; `ccr: N threads anchored to commits outside the
+  range (outdated)`; `ccr: comment <id> restored as <id> (its id is taken in this database)`; and the sync lines
+  `ccr: <owner/repo#N>: synced before|after the restore: a comments added, u updated, r removed`. `--dry-run` says
+  `would restore`, syncs nothing and changes nothing; `--json` prints the report of `POST /api/restore`.
 
 ---
 
@@ -1053,7 +1094,8 @@ review") teaches Claude Code to:
    commit sha; use `[resolve]` only when the fix is committed; reply without resolving to push back or ask.
 5. **Reload**: `ccr reload --repo <abs>` (never with a narrower range); read the remapped/outdated list; tell the user
    what changed and that the UI is refreshed. Repeat 3–5 until the user says the review is done (rounds carry no verdict).
-6. **Stop**: only when the user explicitly asks (`ccr stop` exports to Markdown first; comments are otherwise gone).
+6. **Stop**: only when the user explicitly asks (`ccr stop` exports to Markdown and JSON first and keeps the database
+   for a week; `ccr restore` brings a dropped review back from an export).
    If the conversation ends without a decision, leave the server running and say so.
 
 Rules: always pass `--repo <absolute path>`; use `--json` when acting on ids programmatically; if working in a
@@ -1100,6 +1142,13 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
   Also: `start` with a bad range exits 1 immediately with the git message; `start` when the child crashes prints log tail.
 * `test_render.py`: golden Markdown for a fixed comment set incl. `clean()` escapes (`#` bodies, control chars in subjects);
   the PR-mode header and the question / GitHub comment labels.
+* `test_restore.py` (6.4): a JSON export restores every stored field; a Markdown export restores a review that exports
+  the same; the refusals (comments of its own, another pull request, an unknown commit, an orphan reply) and the dry
+  run; ids taken by another review in the database; PR mode — a Markdown export's mirrored threads found after a sync,
+  the copy of a posted comment dropped, a thread gone from GitHub kept for its replies, a JSON export needing no sync;
+  the parser on what `render` writes (outdated paths with spaces, `\#`, posted-and-edited labels). `test_cli.py`:
+  `stop` writes both exports; `restore` of each after `stop --purge`, its refusal on a filled review, and of a PR-mode
+  Markdown export through the fake `gh` (sync before and after).
 * `test_github.py` (section 10): pull request references; the posting protocol against `fake_gh.py`, an in-memory
   GitHub behind ccr's named operations that keeps one pending review per user and threads on diff lines only —
   starting the review without body or event, adding to the user's own review and keeping their comments, file

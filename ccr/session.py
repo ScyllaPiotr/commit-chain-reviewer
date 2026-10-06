@@ -3,7 +3,7 @@
 One review session exists per repository realpath.  It is keyed by ``sha1(realpath)[:16]`` and
 described by ``<key>.json`` in the private session directory
 (``${CCR_SESSION_DIR:-~/.cache/ccr/sessions}``, mode 0700) next to ``<key>.log``, ``<key>.sqlite``,
-``<key>.lock`` (the ``ccr start`` serialisation lock) and Markdown exports ``<key>-<timestamp>.md``.
+``<key>.lock`` (the ``ccr start`` serialisation lock) and the exports ``<key>-<timestamp>.md`` and ``.json``.
 
 This module knows how to find, validate and clean up those records, how to spawn and stop the
 background ``ccr serve`` process, and how to talk to a running server (:class:`Client`).  It has no
@@ -198,15 +198,15 @@ class SessionPaths:
         self.db = os.path.join(directory, key + ".sqlite")
         self.lock = os.path.join(directory, key + ".lock")
 
-    def export(self, stamp=None) -> str:
-        """Path of a Markdown export: ``<dir>/<key>-<YYYYmmdd-HHMMSS>.md`` (UTC)."""
+    def export(self, stamp=None, extension: str = "md") -> str:
+        """Path of an export, Markdown or JSON: ``<dir>/<key>-<YYYYmmdd-HHMMSS>.<extension>`` (UTC)."""
         stamp = stamp or time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-        return os.path.join(self.dir, "%s-%s.md" % (self.key, stamp))
+        return os.path.join(self.dir, "%s-%s.%s" % (self.key, stamp, extension))
 
     def exports(self) -> list:
         prefix = self.key + "-"
         return sorted(os.path.join(self.dir, name) for name in os.listdir(self.dir)
-                      if name.startswith(prefix) and name.endswith(".md"))
+                      if name.startswith(prefix) and name.endswith((".md", ".json")))
 
 
 def paths_for(repo) -> SessionPaths:

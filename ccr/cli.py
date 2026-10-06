@@ -20,7 +20,7 @@ import webbrowser
 from urllib.error import URLError
 from urllib.parse import quote
 
-from . import __version__, github, gitx, render, server, session
+from . import __version__, github, gitx, render, restore, server, session
 from .github import GitHubError
 from .gitx import GitError
 from .session import ApiError, Client, NoSessionError, SessionError
@@ -68,9 +68,17 @@ def err(line: str) -> None:
     sys.stderr.flush()
 
 
+def json_text(payload) -> str:
+    return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+
 def print_json(payload) -> None:
-    sys.stdout.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    sys.stdout.write(json_text(payload))
     sys.stdout.flush()
+
+
+def plural(count: int, noun: str) -> str:
+    return "%d %s%s" % (count, noun, "" if count == 1 else "s")
 
 
 def short_spec(spec) -> str:
@@ -245,6 +253,13 @@ def build_parser() -> Parser:
     gh_post.add_argument("ids", nargs="+", metavar="ID")
     gh_post.add_argument("--dry-run", action="store_true", dest="dry_run",
                          help="re-read the discussion, show where each comment would go and what it says; post nothing")
+
+    restore_cmd = add("restore", "fill the running review, which has no comments or rounds of its own yet, from an "
+                      "export: the .json or .md `ccr stop` writes, or `ccr export`; in PR mode it syncs with GitHub "
+                      "around the restore")
+    restore_cmd.add_argument("file", metavar="FILE", help="the export ('-' = stdin)")
+    restore_cmd.add_argument("--dry-run", action="store_true", dest="dry_run",
+                             help="check the export and show what it would restore; change nothing")
 
     export = add("export", "dump rounds and every thread as Markdown (default) or JSON")
     export.add_argument("--md", action="store_true", help="Markdown (default)")
@@ -451,11 +466,6 @@ def cmd_serve(args) -> int:
                         open_browser=args.open, cover=args.cover, pr=args.pr)
 
 
-def export_markdown(client: Client) -> str:
-    review, comments = load_review(client)
-    return render.render_export(review, comments, fetch_file_diff(client))
-
-
 def stop_one(record: dict, state: dict, args) -> None:
     paths = session.paths_for(record["repo"])
     if (state.get("server") or {}).get("pid") != record["pid"]:
@@ -463,12 +473,18 @@ def stop_one(record: dict, state: dict, args) -> None:
         raise NoSessionError("session record for %s is stale (server pid mismatch); removed" % record["repo"])
     client = Client(record["url"], record["token"])
     try:
-        text = export_markdown(client)
+        review, comments = load_review(client)
+        text = render.render_export(review, comments, fetch_file_diff(client))
     except ApiError as exc:
         err("ccr: export skipped: %s" % exc)
     else:
-        path = paths.export()
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        path = paths.export(stamp)
         session.write_private(path, text.encode("utf-8"))
+        out("ccr: exported to %s" % path)
+        # the lossless one, for `ccr restore`
+        path = paths.export(stamp, "json")
+        session.write_private(path, json_text(render.to_json(review, comments)).encode("utf-8"))
         out("ccr: exported to %s" % path)
     session.shutdown_server(record, client)
     session.remove_session_files(paths, record, purge=args.purge and not args.keep_db)
@@ -1056,7 +1072,7 @@ def cmd_export(args) -> int:
     client, _, _ = connect(args)
     review, comments = load_review(client)
     if args.json and not args.md:
-        text = json.dumps(render.to_json(review, comments), indent=2, ensure_ascii=False) + "\n"
+        text = json_text(render.to_json(review, comments))
     else:
         text = render.render_export(review, comments, fetch_file_diff(client))
     if args.output:
@@ -1068,12 +1084,66 @@ def cmd_export(args) -> int:
     return EXIT_OK
 
 
+def sync_github(client: Client, pr: dict, why: str, say=out) -> None:
+    result = client.post("/api/github/sync", github.fetch_discussion(github.PullRequest(pr)))
+    say("ccr: %s: synced %s: %d comments added, %d updated, %d removed" % (
+        github.pr_label(pr), why, result["added"], result["updated"], result["removed"]))
+
+
+def print_restore(result: dict, name: str) -> None:
+    would = "would restore" if result["dry_run"] else "restored"
+    out("ccr: %s %s (%s) and %s from %s (%s export)%s" % (
+        would, plural(result["comments"], "comment"), plural(result["threads"], "thread"),
+        plural(result["rounds"], "round"), name, result["source"],
+        {"restored": "; cover letter " + ("to restore" if result["dry_run"] else "restored"),
+         "kept": "; the review's own cover letter kept"}.get(result["cover"], "")))
+    mirrored = result["mirrored"]
+    if mirrored["matched"] or mirrored["restored"] or mirrored["left_to_sync"] or result["dropped_copies"]:
+        out("ccr: GitHub: %d mirrored comments matched, %d restored, %d left to the sync; %d mirrored copies of your "
+            "posted comments dropped" % (mirrored["matched"], mirrored["restored"], mirrored["left_to_sync"],
+                                         result["dropped_copies"]))
+    for comment_id in mirrored["unmatched"]:
+        out("ccr: GitHub thread %s matches nothing on GitHub any more; restored, marked deleted there, for its "
+            "replies" % comment_id)
+    if result["outdated"]:
+        out("ccr: %s anchored to commits outside the range (outdated)" % plural(result["outdated"], "thread"))
+    for old, new in sorted(result["renamed"].items()):
+        out("ccr: comment %s restored as %s (its id is taken in this database)" % (old, new))
+
+
+def cmd_restore(args) -> int:
+    name = "stdin" if args.file == "-" else args.file
+    text = sys.stdin.read() if args.file == "-" else open(args.file, "r", encoding="utf-8").read()
+    try:
+        payload = restore.parse(text)
+    except restore.RestoreError as exc:
+        raise CliError("%s: %s" % (name, exc)) from None
+    client, _, _ = connect(args)
+    pr = client.get("/api/review").get("pr")
+    # refuses (a review with comments of its own, another pull request, unknown commits) before anything changes
+    result = client.post("/api/restore", {"payload": payload, "dry_run": True})
+    markdown_mirrors = payload["source"] == "markdown" and any(c["author"] == "github" for c in payload["comments"])
+    if not args.dry_run:
+        if pr and markdown_mirrors:  # a Markdown export's mirrored threads are found by their text among the sync's
+            sync_github(client, pr, "before the restore", err if args.json else out)
+        result = client.post("/api/restore", {"payload": payload})
+    if args.json:
+        print_json(result)
+    else:
+        print_restore(result, name)
+        if args.dry_run and pr and markdown_mirrors:
+            out("ccr: a restore syncs with GitHub first and matches the export's mirrored threads to what it brings")
+    if pr and not args.dry_run:  # posted comments learn their threads and GitHub's state of them again
+        sync_github(client, pr, "after the restore", err if args.json else out)
+    return EXIT_OK
+
+
 COMMANDS = {
     "start": cmd_start, "serve": cmd_serve, "stop": cmd_stop, "status": cmd_status, "sessions": cmd_sessions,
     "logs": cmd_logs, "open": cmd_open, "reload": cmd_reload, "comments": cmd_comments, "wait": cmd_wait,
     "cover": cmd_cover, "gh-post": cmd_gh_post, "gh-sync": cmd_gh_sync,
     "reply": cmd_reply, "comment": cmd_comment, "resolve": cmd_resolve, "unresolve": cmd_unresolve,
-    "edit": cmd_edit, "delete": cmd_delete, "move": cmd_move, "export": cmd_export,
+    "edit": cmd_edit, "delete": cmd_delete, "move": cmd_move, "export": cmd_export, "restore": cmd_restore,
 }
 
 

@@ -29,7 +29,7 @@ snippet and a `→ HEAD path:line` location.
   `WAYLAND_DISPLAY` is set and `SSH_CONNECTION` is not. Then run `ccr open --repo "$REPO"` right after
   `ccr start` (or pass `--open` to `ccr start`). Otherwise never try: you cannot see the browser and the user
   may be on another machine. In both cases hand over the URL as well (step 1.4).
-- Never run `ccr stop` on your own initiative (it deletes the review data).
+- Never run `ccr stop` on your own initiative (it ends the session the user's page talks to).
 
 ## The loop
 
@@ -111,7 +111,7 @@ you are woken up instead of blocking. Then act on the exit code:
 |---|---|---|
 | 0 | a new round exists | stdout starts with `ccr: round <n> — <k> new comments in <j> threads`, then the round's threads in the Markdown format below (new comments marked `★ new in round n`). Go to step 4. |
 | 2 | timeout, no new round | stderr: `ccr: no new round after 590 s (rounds: R, pending unsubmitted: P, version: V)`. Re-run the same command. If it printed `ccr: UI not opened yet` (or `ccr status --repo "$REPO"` shows the UI not connected), remind the user of the URL and the SSH forward once — do not nag. |
-| 3 | `ccr: server gone` / no running session | `ccr sessions`, then `ccr logs --repo "$REPO"` for the reason. If the server crashed, `ccr start` again with the same options — the database survived, comments come back — and hand over the **new** URL (the token changed). If the user ran `ccr stop`, the review was exported to Markdown in the session directory; ask before starting a fresh one. |
+| 3 | `ccr: server gone` / no running session | `ccr sessions`, then `ccr logs --repo "$REPO"` for the reason. If the server crashed, `ccr start` again with the same options — the database survived, comments come back — and hand over the **new** URL (the token changed). If the user ran `ccr stop`, a `ccr start` with the same options within a week resumes the review; ask before starting it. |
 
 **Wait for Submit. Pending comments are drafts, not instructions.** They are visible to you long
 before the user is finished with them, and a comment can still be reworded or deleted before the round
@@ -193,10 +193,17 @@ whether to stop the server.
 ccr stop --repo "$REPO"
 ```
 
-`ccr stop` exports the whole review to Markdown (`ccr: exported to <path>`, in the session directory)
-and keeps its database for a week after its last change: a `ccr start` on the repository within that
-time resumes the review, after that only the export is left. If the user wants the
-export in a specific place, run `ccr export --repo "$REPO" --md -o <file>` before stopping. If the
+`ccr stop` exports the whole review to Markdown and to JSON (`ccr: exported to <path>`, twice, in the
+session directory) and keeps its database for a week after its last change: a `ccr start` on the
+repository within that time resumes the review, after that only the exports are left. If the user wants the
+export in a specific place, run `ccr export --repo "$REPO" --md -o <file>` before stopping.
+
+When a review's database is gone (`ccr stop --purge`, the week passed, a lost file) and the user wants the
+review back, start ccr with the same options (`--pr` too) and run
+`ccr restore --repo "$REPO" --dry-run <export>`, then without `--dry-run`. Prefer the `.json` export, which
+holds everything; a `.md` one (older ccr wrote only that) loses the snippets, which come from git again, and a
+thread's first creation time. The restore fills only a review with no comments or rounds of its own, and in PR
+mode it syncs with GitHub around itself. If the
 conversation ends without a decision, leave the server running and say so:
 "ccr is still serving `<url>`; run `ccr stop` when you are finished."
 
@@ -408,4 +415,5 @@ with an unresolved, non-outdated root that is exactly what `--unanswered` select
 | Server log | `ccr logs --repo "$REPO" -n 100` |
 | All sessions on this machine | `ccr sessions` |
 | Save the review | `ccr export --repo "$REPO" --md -o review.md` |
-| Stop (user asked; exports first, then deletes) | `ccr stop --repo "$REPO"` |
+| Stop (user asked; exports first, keeps the database a week) | `ccr stop --repo "$REPO"` |
+| Bring back a dropped review (user asked) | `ccr start …` as before, then `ccr restore --repo "$REPO" <export .json or .md>` |

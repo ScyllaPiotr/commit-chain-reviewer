@@ -41,6 +41,7 @@ from functools import partial
 
 from . import __version__, github, gitx
 from .gitx import GitError
+from .render import clean
 
 __all__ = [
     "StoreError",
@@ -1572,6 +1573,246 @@ class ReviewStore:
                 self.pr = dict(self.pr, synced_at=now, first_synced_at=self.pr.get("first_synced_at") or now)
                 self._conn.execute("UPDATE reviews SET pr = ? WHERE id = ?", (json.dumps(self.pr), self.review_id))
             return dict(stats, synced_at=now)
+
+    # ------------------------------------------------------------------ restoring a review from its export (6.4)
+
+    def _restore_commit(self, ref, resolved: dict):
+        """The full sha of an export's anchor commit (a view name, a full sha, or an abbreviated one)."""
+        if ref is None or ref in (COMBINED, WORKTREE) or _is_full_sha(ref):
+            return ref
+        if ref not in resolved:
+            try:
+                resolved[ref] = gitx.rev_parse(self.repo, ref) if _is_hex_prefix(ref) else None
+            except GitError:
+                resolved[ref] = None
+        if resolved[ref] is None:
+            raise StoreError("commit %s of the export is not in this repository (fetch it first)" % ref, 409)
+        return resolved[ref]
+
+    def _restore_snippet(self, anchor: dict) -> str:
+        """The snippet a Markdown export does not keep: from the view's diff as on creation, else the file at git."""
+        if anchor["kind"] != "line":
+            return ""
+        commit, side, start, end = anchor["commit"], anchor["side"], anchor["start_line"] or anchor["line"], anchor["line"]
+        if commit in self._listed():
+            try:
+                file_diff = _find_file(self._view_diff(commit, False), anchor["path"])
+            except StoreError:
+                file_diff = None
+            snippet = _capture_snippet(file_diff, side, start, end) if file_diff else None
+            if snippet is not None:
+                return snippet
+        data = self._require_data()
+        try:
+            if commit == WORKTREE:
+                rev = WORKTREE if side == "new" else data["range"]["head"]
+            elif commit == COMBINED:
+                rev = data["range"]["head"] if side == "new" else data["range"]["base"]
+            else:
+                rev = commit if side == "new" else gitx.rev_parse(self.repo, commit + "^")
+            rows = gitx.show_file(self.repo, rev, anchor["path"])["content"].split("\n") if rev else []
+        except GitError:
+            return ""
+        return _cap_snippet(rows[start - 1:end])
+
+    @staticmethod
+    def _restore_row(comment, index: int) -> dict:
+        """One comment of a restore payload, checked for the fields every row needs."""
+        where = "comment %d of the export" % index
+        if not isinstance(comment, dict) or not isinstance(comment.get("id"), str) \
+                or not re.match(r"^[0-9a-z]+$", comment["id"]):
+            raise StoreError("%s has no valid id" % where)
+        where = "comment %s" % comment["id"]
+        if comment.get("author") not in AUTHORS + (GITHUB_AUTHOR,) or not isinstance(comment.get("body"), str):
+            raise StoreError("%s has no valid author and body" % where)
+        if comment.get("parent_id") is not None and not isinstance(comment["parent_id"], str):
+            raise StoreError("%s has an invalid parent_id" % where)
+        anchor = comment.get("anchor")
+        if not isinstance(anchor, dict) or anchor.get("kind") not in ANCHOR_KINDS:
+            raise StoreError("%s has no valid anchor" % where)
+        if comment.get("round") is not None and not isinstance(comment["round"], int):
+            raise StoreError("%s has an invalid round" % where)
+        if comment.get("github") is not None and not isinstance(comment["github"], dict):
+            raise StoreError("%s has an invalid GitHub record" % where)
+        return comment
+
+    def _match_mirrored(self, comment: dict, candidates: list):
+        """The mirrored root a Markdown export's mirrored root is now: same login and text, else also same place."""
+        login, body = (comment["github"] or {}).get("login"), clean(comment["body"]).rstrip()
+        found = [c for c in candidates if c["github"].get("login") == login and clean(c["body"]).rstrip() == body]
+        if len(found) > 1:
+            place = {key: comment["anchor"].get(key) for key in ("kind", "path", "side", "line")}
+            found = [c for c in found if {key: c["anchor"][key] for key in place} == place]
+        return found[0] if len(found) == 1 else None
+
+    def _insert_restored(self, row: dict) -> None:
+        a = row["anchor"]
+        self._conn.execute(
+            "INSERT INTO comments (id, parent_id, review, author, body, created_at, updated_at, state, round,"
+            " resolved, kind, commit_sha, path, side, line, start_line, snippet, moved_from, github)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (row["id"], row["parent_id"], self.review_id, row["author"], row["body"], row["created_at"],
+             row["updated_at"], row["state"], row["round"], row["resolved"], a["kind"], a["commit"], a["path"],
+             a["side"], a["line"], a["start_line"], row["snippet"] or "",
+             json.dumps(row["moved_from"]) if row["moved_from"] else None,
+             json.dumps(row["github"]) if row["github"] else None))
+
+    def restore(self, payload, dry_run: bool = False) -> dict:
+        """Fill this review, which must have no comments and rounds of its own yet, from an export (section 6.4).
+
+        ``payload`` is what :func:`ccr.restore.parse` makes of ``ccr export --json`` or ``--md``.  Comments keep their
+        ids, authors, anchors, rounds, states, times, resolved flags and GitHub records; a Markdown export's snippets
+        come from git again and its rounds take this review's base, head and commits.  In PR mode the pull request's
+        discussion may already be mirrored (``gh-sync``): a mirrored comment of the export is that row when it has the
+        same node id (JSON) or login and text (Markdown), and a mirrored copy of one of the user's posted comments is
+        dropped, so the next sync joins its GitHub replies to the restored comment.  A Markdown export's mirrored
+        comment that matches nothing is left to the sync unless a comment of the user or Claude replies to it; then it
+        is restored, marked deleted on GitHub.  ``dry_run`` reports the same and changes nothing.
+        """
+        if not isinstance(payload, dict) or payload.get("source") not in ("json", "markdown") \
+                or not isinstance(payload.get("comments"), list) or not isinstance(payload.get("rounds"), list):
+            raise StoreError("restore takes {source: json|markdown, pr, cover, rounds: [...], comments: [...]}")
+        incoming = [self._restore_row(c, index) for index, c in enumerate(payload["comments"])]
+        markdown = payload["source"] == "markdown"
+        with self._lock:
+            data = self._require_data()
+            existing = self._all_comments()
+            own = sum(1 for c in existing if c["author"] != GITHUB_AUTHOR)
+            if own or self._round_count():
+                raise StoreError("review #%d already has %d comments and %d rounds of its own; a restore fills a review"
+                                 " that has none" % (self.review_id, own, self._round_count()), 409)
+            if payload.get("pr") and (self.pr is None or github.pr_label(self.pr) != payload["pr"]):
+                raise StoreError("the export is of pull request %s; start ccr with --pr for it" % payload["pr"], 409)
+            ids = {c["id"] for c in incoming}
+            if len(ids) < len(incoming):
+                raise StoreError("the export has a comment id twice")
+            by_id = {c["id"]: c for c in incoming}
+            for c in incoming:
+                if c["parent_id"] is not None and (c["parent_id"] not in ids or by_id[c["parent_id"]]["parent_id"]):
+                    raise StoreError("comment %s replies to %s, which is not a thread of the export" % (
+                        c["id"], c["parent_id"]), 400)
+            resolved_commits = {}
+            anchors = {}
+            for c in incoming:
+                anchor = {key: c["anchor"].get(key) for key in ("kind",) + _ANCHOR_FIELDS}
+                anchor["commit"] = self._restore_commit(anchor["commit"], resolved_commits)
+                anchors[c["id"]] = anchor
+
+            posted = {c["github"]["comment_id"] for c in incoming if c["author"] != GITHUB_AUTHOR and c["github"]
+                      and c["github"].get("status") == "posted" and c["github"].get("comment_id") is not None}
+            copies = {c["id"] for c in existing if c["author"] == GITHUB_AUTHOR and c["github"].get("comment_id") in posted}
+            mirrored = [c for c in existing if c["author"] == GITHUB_AUTHOR
+                        and c["id"] not in copies and c["parent_id"] not in copies]
+            by_node = {c["github"]["node_id"]: c for c in mirrored if c["github"].get("node_id")}
+            candidates = [c for c in mirrored if c["parent_id"] is None]
+            replied = {c["parent_id"] for c in incoming if c["parent_id"] and c["author"] != GITHUB_AUTHOR}
+            taken = {row["id"] for row in self._conn.execute("SELECT id FROM comments")}  # of every review
+            new_ids, matched, skipped, inserts, resolved_flags, unmatched = {}, {}, set(), [], {}, []
+            for c in sorted(incoming, key=lambda c: c["parent_id"] is not None):
+                if c["author"] == GITHUB_AUTHOR:
+                    if c["parent_id"] is not None and markdown and c["parent_id"] not in unmatched:
+                        skipped.add(c["id"])        # a mirrored reply: the sync brings it
+                        continue
+                    node = (c["github"] or {}).get("node_id")
+                    found = by_node.get(node) if node else \
+                        self._match_mirrored(dict(c, anchor=anchors[c["id"]]), candidates) \
+                        if c["parent_id"] is None else None
+                    if found is not None:
+                        matched[c["id"]] = found
+                        if found in candidates:
+                            candidates.remove(found)
+                        if c["parent_id"] is None:
+                            resolved_flags[found["id"]] = bool(c.get("resolved"))
+                        continue
+                    if markdown and c["parent_id"] is None and c["id"] not in replied:
+                        skipped.add(c["id"])
+                        continue
+                    if markdown and c["parent_id"] is None:
+                        unmatched.append(c["id"])
+                if c["id"] in taken:
+                    new_ids[c["id"]] = self._new_id()
+                taken.add(new_ids.get(c["id"], c["id"]))
+                inserts.append(c)
+
+            def parent_of(c):
+                parent = c["parent_id"]
+                if parent is None:
+                    return None
+                return matched[parent]["id"] if parent in matched else new_ids.get(parent, parent)
+
+            rows, outdated = [], 0
+            listed = self._listed()
+            position = {c["id"]: index for index, c in enumerate(incoming)}
+            for c in sorted(inserts, key=lambda c: position[c["id"]]):
+                parent = parent_of(c)
+                if parent in {row["id"] for row in matched.values()}:
+                    root = next(row for row in matched.values() if row["id"] == parent)
+                    anchor, snippet = root["anchor"], root["snippet"]
+                elif c["parent_id"] is not None:
+                    anchor, snippet = None, None    # the root's, once it is known
+                else:
+                    anchor = anchors[c["id"]]
+                    snippet = self._restore_snippet(anchor) if markdown or not isinstance(c.get("snippet"), str) \
+                        else c["snippet"]
+                    outdated += anchor["commit"] is not None and anchor["commit"] not in listed
+                github_record = dict(c["github"]) if c["github"] else None
+                if markdown and c["author"] == GITHUB_AUTHOR and c["id"] in unmatched:
+                    github_record["deleted"] = True
+                created = c.get("created_at") or self.review_started_at
+                rows.append({"id": new_ids.get(c["id"], c["id"]), "parent_id": parent, "author": c["author"],
+                             "body": c["body"], "created_at": created, "updated_at": c.get("updated_at") or created,
+                             "state": "pending" if c.get("state") == "pending" else "submitted", "round": c.get("round"),
+                             "resolved": int(bool(c.get("resolved")) and c["parent_id"] is None), "anchor": anchor,
+                             "snippet": snippet, "moved_from": c.get("moved_from"), "github": github_record})
+            by_row = {row["id"]: row for row in rows}
+            for row in rows:
+                if row["anchor"] is None:
+                    root = by_row[row["parent_id"]]
+                    row["anchor"], row["snippet"] = root["anchor"], root["snippet"]
+
+            rounds = []
+            for r in payload["rounds"]:
+                if not isinstance(r, dict) or not isinstance(r.get("number"), int) \
+                        or not isinstance(r.get("submitted_at"), str) or r.get("verdict") not in VERDICTS:
+                    raise StoreError("the export has an invalid round: %r" % (r,))
+                commit_shas = r.get("commit_shas") if isinstance(r.get("commit_shas"), list) \
+                    else [c["sha"] for c in data["commits"]]
+                if any(r["number"] == number for number, *_ in rounds):
+                    raise StoreError("the export has round %d twice" % r["number"])
+                rounds.append((r["number"], r["submitted_at"], r["verdict"], r.get("summary") or "",
+                               r.get("base") if "base" in r else data["range"]["base"],
+                               r.get("head") or data["range"]["head"], json.dumps(commit_shas)))
+            cover = payload.get("cover") if isinstance(payload.get("cover"), str) else None
+            report = {
+                "source": payload["source"], "dry_run": bool(dry_run),
+                "comments": len(rows), "threads": sum(1 for row in rows if row["parent_id"] is None),
+                "rounds": len(rounds), "outdated": outdated,
+                "cover": "restored" if cover and not self.cover else ("kept" if cover and cover != self.cover else None),
+                "mirrored": {"matched": len(matched), "restored": sum(1 for r in rows if r["author"] == GITHUB_AUTHOR),
+                             "left_to_sync": len(skipped), "unmatched": unmatched},
+                "dropped_copies": len(copies), "renamed": new_ids,
+            }
+            if dry_run:
+                return report
+            with self._mutate():
+                for comment_id in copies:
+                    self._conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
+                # in the export's order, which keeps the order of comments made in the same second; a GitHub reply
+                # to the user's comment can be older than it
+                self._conn.execute("PRAGMA defer_foreign_keys = ON")
+                for row in rows:
+                    self._insert_restored(row)
+                for comment_id, flag in resolved_flags.items():
+                    self._conn.execute("UPDATE comments SET resolved = ? WHERE id = ?", (int(flag), comment_id))
+                for r in rounds:
+                    self._conn.execute(
+                        "INSERT INTO rounds (review, number, submitted_at, verdict, summary, base, head, commit_shas)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (self.review_id,) + r)
+                if report["cover"] == "restored":
+                    self._conn.execute("UPDATE reviews SET cover = ? WHERE id = ?", (cover, self.review_id))
+                    self.cover = cover
+                self.generation += 1
+            return report
 
     def _locate_one(self, comment: dict, data: dict, head_sha: str) -> dict:
         """Section 4.5: where the anchored line lives at ``HEAD``."""

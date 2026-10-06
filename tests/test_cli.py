@@ -311,7 +311,9 @@ def test_agent_loop_end_to_end(cli, fixture_repo, ccr_session_dir):
     export_path = stopped[0][len("ccr: exported to "):]
     assert os.path.isfile(export_path) and mode_of(export_path) == 0o600
     assert open(export_path).read().startswith("# Review — repo (main..feature, base ")
-    assert stopped[1] == "ccr: stopped %s (pid %d)" % (repo.path, record["pid"])
+    assert stopped[1] == "ccr: exported to %s.json" % export_path[:-len(".md")], "and the lossless one, for ccr restore"
+    assert json.load(open(export_path[:-len(".md")] + ".json"))["comments"] and mode_of(export_path[:-len(".md")] + ".json") == 0o600
+    assert stopped[2] == "ccr: stopped %s (pid %d)" % (repo.path, record["pid"])
     assert not os.path.exists(session_file) and os.path.exists(record["db"]), "a stop keeps the review database"
     assert os.path.exists(record["log"])
     assert wait_for(lambda: not pid_alive(record["pid"]), timeout=10)
@@ -540,6 +542,65 @@ def test_a_new_review_does_not_inherit_the_one_left_in_the_database(cli, fixture
     assert not pid_alive(second["pid"]) and not pid_alive(resumed["pid"])
 
 
+def saved_exports(cli, tmp_path) -> tuple:
+    """Stop the session and keep copies of the two exports it writes: ``(markdown copy, json copy)``."""
+    stopped = cli.run("stop", check=0).stdout.splitlines()
+    copies = []
+    for line in stopped[:2]:
+        source = line[len("ccr: exported to "):]
+        target = tmp_path / ("saved" + os.path.splitext(source)[1])
+        target.write_text(open(source).read())
+        copies.append(str(target))
+    return tuple(copies)
+
+
+def drop_the_database(cli, start_args) -> None:
+    record = cli.start(*start_args)
+    cli.run("stop", "--purge", check=0)
+    assert not os.path.exists(record["db"])
+
+
+def stored_fields(document: dict) -> tuple:
+    keys = ("id", "parent_id", "author", "body", "created_at", "updated_at", "state", "round", "resolved", "anchor",
+            "snippet", "github")
+    return [{k: c[k] for k in keys} for c in document["comments"]], document["rounds"], document["review"]["cover"]
+
+
+def test_a_review_whose_database_was_dropped_comes_back_from_its_export(cli, fixture_repo, tmp_path):
+    """SPEC 6.4: ``ccr stop`` writes a JSON export next to the Markdown one; ``ccr restore`` reads either back."""
+    sha = fixture_repo.sha(FEATURE_SUBJECTS[0])
+    record = cli.start("--range", "main..feature")
+    cli.run("cover", "The change.", check=0)
+    root = comment_id(cli.run("comment", "--commit", sha, "--path", "src/app.py", "--line", "5", "--as", "user",
+                              "Why 500?", check=0).stdout)
+    cli.run("reply", root, "Because.", check=0)
+    api(record, "POST", "/api/submit", {"verdict": "request_changes", "summary": "One question."})
+    before = json.loads(cli.run("export", "--json", check=0).stdout)
+    markdown, lossless = saved_exports(cli, tmp_path)
+    drop_the_database(cli, ("--range", "main..feature"))
+
+    cli.start("--range", "main..feature")
+    assert cli.run("restore", "--dry-run", lossless, check=0).stdout == (
+        "ccr: would restore 3 comments (2 threads) and 1 round from %s (json export); cover letter to restore\n" % lossless)
+    assert cli.run("comments", check=0).stdout == "ccr: no comments match\n", "a dry run changes nothing"
+    assert cli.run("restore", lossless, check=0).stdout == (
+        "ccr: restored 3 comments (2 threads) and 1 round from %s (json export); cover letter restored\n" % lossless)
+    assert stored_fields(json.loads(cli.run("export", "--json", check=0).stdout)) == stored_fields(before)
+    twice = cli.run("restore", markdown)
+    assert twice.returncode == 1 and twice.stderr == (
+        "ccr: review #1 already has 3 comments and 1 rounds of its own; a restore fills a review that has none\n")
+    broken = tmp_path / "broken.md"
+    broken.write_text("# Something else\n")
+    assert cli.run("restore", str(broken)).stderr == (
+        "ccr: %s: not a ccr export (the first line is not '# Review — … — exported …')\n" % broken)
+
+    cli.run("stop", "--purge", check=0)
+    cli.start("--range", "main..feature")
+    assert cli.run("restore", markdown, check=0).stdout.startswith("ccr: restored 3 comments (2 threads) and 1 round")
+    assert cli.run("export", "--md", check=0).stdout.split("\n")[1:] == open(markdown).read().split("\n")[1:]
+    cli.run("stop", check=0)
+
+
 # --------------------------------------------------------------------------- PR mode (section 10)
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -766,11 +827,60 @@ def test_stop_removes_the_database_only_with_purge(tmp_path):
     tmp_path = tmp_path / "sessions"
     tmp_path.mkdir()
     paths = session.SessionPaths("k", str(tmp_path))
-    for name in ("k.json", "k.sqlite", "k.sqlite-wal", "k.log", "k-20261006-000000.md"):
+    for name in ("k.json", "k.sqlite", "k.sqlite-wal", "k.log", "k-20261006-000000.md", "k-20261006-000000.json"):
         (tmp_path / name).write_text("x")
     record = {"db": paths.db, "log": paths.log}
     session.remove_session_files(paths, record)
-    assert sorted(os.listdir(tmp_path)) == ["k-20261006-000000.md", "k.log", "k.sqlite", "k.sqlite-wal"]
+    assert sorted(os.listdir(tmp_path)) == ["k-20261006-000000.json", "k-20261006-000000.md", "k.log", "k.sqlite",
+                                            "k.sqlite-wal"]
     (tmp_path / "k.json").write_text("x")
     session.remove_session_files(paths, record, purge=True)
     assert os.listdir(tmp_path) == []
+
+
+def test_a_pr_mode_review_comes_back_from_its_markdown_export(cli, fixture_repo, tmp_path):
+    """SPEC 6.4: a Markdown export has no node ids, so the restore syncs first and finds the mirrored threads there."""
+    repo = fixture_repo
+    env, state_file = fake_github(tmp_path, repo)
+    start = ("--range", "main..feature", "--pr", "https://github.com/o/r/pull/7")
+    record = cli.start(*start)
+    three = repo.sha(THREE_HUNKS)
+    remark = comment_id(cli.run("comment", "--commit", three, "--path", "src/app.py", "--line", "5", "--as", "user",
+                                "--github", "Why 500?", check=0).stdout)
+    api(record, "POST", "/api/submit", {"verdict": "comment", "summary": ""})
+    cli.run("gh-post", remark, env=env, check=0)
+    state = json.loads(state_file.read_text())
+    state["reviews"].append({
+        "id": "PRR_nyh", "databaseId": 1, "state": "COMMENTED", "author": "nyh", "commit": repo.feature, "body": "",
+        "submitted_at": "2026-09-01T10:00:00Z", "url": "https://github.com/o/r/pull/7#r1",
+        "comments": [{"id": "PRRC_nyh", "databaseId": 2, "thread_id": "PRRT_nyh", "body": "And line 6?",
+                      "path": "src/app.py", "line": 6, "startLine": None, "side": "RIGHT", "startSide": None,
+                      "subjectType": "LINE", "diffHunk": "", "url": "https://github.com/o/r/pull/7#discussion_r2",
+                      "reply_to": None, "created_at": "2026-09-01T09:00:00Z"}]})
+    state_file.write_text(json.dumps(state))
+    cli.run("gh-sync", env=env, check=0)
+    thread = next(c for c in api(record, "GET", "/api/comments")["comments"] if c["body"] == "And line 6?")
+    question = api(record, "POST", "/api/comments", {"body": "What does nyh ask?", "parent_id": thread["id"]})
+    cli.run("reply", thread["id"], "Whether 6 changes too.", check=0)
+    api(record, "POST", "/api/submit", {"verdict": "comment", "summary": ""})
+    mirrored_ids = lambda text: re.sub(r"\[id: [0-9a-z]{6}\] @", "[id: ?] @", text)
+    before = mirrored_ids(cli.run("comments", check=0).stdout)
+    markdown, _ = saved_exports(cli, tmp_path)
+    drop_the_database(cli, start)
+
+    record = cli.start(*start)
+    dry = cli.run("restore", "--dry-run", markdown, env=env, check=0).stdout.splitlines()
+    assert dry[-1] == "ccr: a restore syncs with GitHub first and matches the export's mirrored threads to what it brings"
+    restored = cli.run("restore", markdown, env=env, check=0).stdout.splitlines()
+    assert restored == [
+        "ccr: o/r#7: synced before the restore: 2 comments added, 0 updated, 0 removed",
+        "ccr: restored 3 comments (1 thread) and 2 rounds from %s (markdown export)" % markdown,
+        "ccr: GitHub: 1 mirrored comments matched, 0 restored, 0 left to the sync; 1 mirrored copies of your posted "
+        "comments dropped",
+        "ccr: o/r#7: synced after the restore: 0 comments added, 1 updated, 0 removed"], \
+        "the posted comment learns its thread again"
+    assert mirrored_ids(cli.run("comments", check=0).stdout) == before
+    by_id = {c["id"]: c for c in api(record, "GET", "/api/comments")["comments"]}
+    assert by_id[question["id"]]["parent_id"] != thread["id"] and by_id[by_id[question["id"]]["parent_id"]]["body"] == \
+        "And line 6?", "the question sits in the mirrored thread the sync brought"
+    cli.run("stop", check=0)
