@@ -602,7 +602,7 @@ def test_pr_mode_questions_and_github_comments(cli, fixture_repo, tmp_path, ccr_
     dry = cli.run("gh-post", "--dry-run", remark, env=env, check=0).stdout
     assert dry == ("%s: would post to o/r#7 src/app.py:5 (RIGHT), commit %s\n       5 | value_05 = 500  # changed\n"
                    "  body:\n    Why 500, not 50?\n" % (remark, repo.feature[:10]))
-    assert github_state()["calls"] == [], "a dry run asks GitHub nothing"
+    assert github_state()["calls"] and github_state()["reviews"] == [], "a dry run re-reads the discussion, posts nothing"
 
     posted = cli.run("gh-post", remark, remark, env=env, check=0).stdout.splitlines()
     review = github_state()["reviews"][0]
@@ -639,8 +639,8 @@ def test_pr_mode_questions_and_github_comments(cli, fixture_repo, tmp_path, ccr_
     state["reviews"].append(nyh)
     state_file.write_text(json.dumps(state))
     synced = cli.run("gh-sync", env=env, check=0).stdout
-    assert synced == "ccr: o/r#7: 2 review threads, 1 review bodies; 2 comments added, 1 updated, 0 removed\n", \
-        "nyh's thread and review body are new; the comment posted from ccr only learns its thread"
+    assert synced == "ccr: o/r#7: 2 review threads, 1 review bodies; 2 comments added, 0 updated, 0 removed\n", \
+        "nyh's thread and review body are new; the comment posted from ccr learnt its thread when gh-post re-read"
     listing = cli.run("comments", check=0).stdout
     assert "@nyh (GitHub) · GitHub thread · new:5 → HEAD src/app.py:5 · on GitHub · unresolved" in listing
     assert "Why 500 here?" in listing
@@ -656,6 +656,26 @@ def test_pr_mode_questions_and_github_comments(cli, fixture_repo, tmp_path, ccr_
     assert plan.startswith("%s: would post to o/r#7 reply to @nyh on src/app.py, commit %s\n  thread: "
                            "https://github.com/o/r/pull/7#discussion_r2\n  body:\n    Because of the spec.\n"
                            % (answer["id"], repo.feature[:10]))
+    # nyh answers on GitHub meanwhile: gh-post re-reads the discussion and posts nothing until that has been read
+    state = github_state()
+    state["reviews"].append(dict(nyh, id="PRR_nyh2", databaseId=3, state="COMMENTED", body="", comments=[dict(
+        nyh["comments"][0], id="PRRC_nyh2", databaseId=4, body="Which spec?\nThe old one?", reply_to="PRRC_nyh",
+        url="https://github.com/o/r/pull/7#discussion_r4", created_at="2026-09-01T11:00:00Z")]))
+    state_file.write_text(json.dumps(state))
+    held = cli.run("gh-post", answer["id"], env=env)
+    news_id = next(c["id"] for c in api(record, "GET", "/api/comments")["comments"] if c["body"].startswith("Which spec?"))
+    assert held.returncode == 1 and held.stdout.splitlines() == [
+        "ccr: o/r#7: 1 comments added, edited or deleted on GitHub since the last sync:",
+        "  added   %s @nyh on combined src/app.py new:5, a reply: Which spec?␤The old one?" % news_id,
+        "%s: ERROR not posted: 1 comments changed on GitHub since the last sync; read them (ccr comments), then run "
+        "ccr gh-post again" % answer["id"]]
+    assert not any(r["state"] == "PENDING" and len(r["comments"]) > 1 for r in github_state()["reviews"])
+    state = github_state()
+    state["fail"] = {"CcrThreads": 1}
+    state_file.write_text(json.dumps(state))
+    unreadable = cli.run("gh-post", answer["id"], env=env)
+    assert unreadable.returncode == 1 and unreadable.stdout == "" and unreadable.stderr.startswith(
+        "ccr: could not re-read the discussion on o/r#7, so nothing is posted: ")
     replied = cli.run("gh-post", answer["id"], env=env, check=0).stdout.splitlines()
     pending = next(r for r in github_state()["reviews"] if r["state"] == "PENDING")
     assert pending["comments"][-1]["reply_to"] == "PRRC_nyh" and pending["comments"][-1]["body"] == "Because of the spec."

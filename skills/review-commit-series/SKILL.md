@@ -241,7 +241,12 @@ a question unless it reads `GitHub reply (not posted)`.
   each `file:line`), it asks something of this pull request and fits the line it is on (a reply: the thread it
   answers), and it has no typo or broken Markdown.
   `ccr gh-post --repo "$REPO" --dry-run <id>` shows where GitHub will anchor it (the pull request diff's
-  `path:line`, side, the lines there) and its verbatim body, and asks GitHub nothing.
+  `path:line`, side, the lines there) and its verbatim body, and posts nothing.
+  Every `ccr gh-post`, a dry run too, first re-reads the discussion on GitHub and lists each comment added,
+  edited or deleted there since the last sync (`  added <id> @login on …`). Read each one in full (`ccr comments`)
+  before posting: when someone has raised the same point or answered it meanwhile, post nothing and tell the user
+  in the thread, quoting it. A real run with such news posts nothing (`<id>: ERROR not
+  posted: … changed on GitHub since the last sync`); once you have read them, run it again.
   - Sound → `ccr gh-post --repo "$REPO" <id>`: it posts the body verbatim into the user's pending review (starting
     one when there is none), one comment at a time, re-reads the review after each and records the post. That
     ends your part: no reply and no resolve in ccr (the comment shows as posted, linked to GitHub, and the user is

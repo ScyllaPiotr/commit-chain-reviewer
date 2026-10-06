@@ -1386,6 +1386,10 @@ def test_sync_mirrors_the_pull_request_discussion(fixture_repo, pr_store):
     result = pr_store.sync_github(discussion(head, threads, reviews))
     assert {k: result[k] for k in ("threads", "reviews", "added", "updated", "removed")} == \
         {"threads": 8, "reviews": 1, "added": 10, "updated": 0, "removed": 0}
+    assert [(n["change"], n["login"], n["body"]) for n in result["news"]][:2] == [("added", "nyh", "Why 500?"),
+                                                                              ("added", "radek", "Because.")]
+    assert len(result["news"]) == 10 and result["news"][1]["parent_id"] == result["news"][0]["id"]
+    assert result["news"][0]["anchor"] == line_anchor(COMBINED, "src/app.py", 5) and result["news"][0]["url"] == why["url"]
     assert pr_store.version == version + 1 and pr_store.review()["pr"]["synced_at"] == result["synced_at"]
     assert pr_store.review()["pr"]["first_synced_at"] == result["synced_at"] and pr_store.state()["pr_synced_at"] == result["synced_at"]
     by_body = {c["body"]: c for c in pr_store.list_comments()}
@@ -1416,6 +1420,7 @@ def test_sync_mirrors_the_pull_request_discussion(fixture_repo, pr_store):
 
     again = pr_store.sync_github(discussion(head, threads, reviews))
     assert (again["added"], again["updated"], again["removed"]) == (0, 0, 0), "a second sync of the same discussion is a no-op"
+    assert again["news"] == []
 
     question = pr_store.add_comment("What does Because mean?", None, parent_id=root["id"])
     pr_store.edit_comment(root["id"], resolved=False)
@@ -1423,6 +1428,8 @@ def test_sync_mirrors_the_pull_request_discussion(fixture_repo, pr_store):
                        resolved=False)] + threads[2:]
     third = pr_store.sync_github(discussion(head, moved, reviews))
     assert (third["added"], third["updated"], third["removed"]) == (0, 2, 1), "T1 moved and its reply edited; T2 is gone"
+    assert [(n["change"], n["body"]) for n in third["news"]] == [("edited", "Because of the spec."), ("deleted", "Old remark")], \
+        "a moved thread is no news"
     by_id = {c["id"]: c for c in pr_store.list_comments()}
     assert by_id[root["id"]]["anchor"]["line"] == 6 and by_id[question["id"]]["anchor"]["line"] == 6, "replies follow"
     assert by_id[root["id"]]["resolved"] is False and by_id[root["id"]]["github"]["resolved_on_github"] is False
@@ -1431,6 +1438,8 @@ def test_sync_mirrors_the_pull_request_discussion(fixture_repo, pr_store):
 
     gone = pr_store.sync_github(discussion(head, threads[2:], ()))
     assert (gone["removed"], gone["updated"]) == (2, 1), "T1's reply and the review body go; T1 stays for the question"
+    assert sorted((n["change"], n["body"]) for n in gone["news"]) == [
+        ("deleted", "Because of the spec."), ("deleted", "Please fix."), ("deleted", "Why 500?")]
     kept = {c["id"]: c for c in pr_store.list_comments()}
     assert kept[root["id"]]["github"]["deleted"] is True and question["id"] in kept and reply["id"] not in kept
 

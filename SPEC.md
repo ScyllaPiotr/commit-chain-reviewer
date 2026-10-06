@@ -663,14 +663,20 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
 * `ccr gh-sync [--json]` — PR mode (10.5): reads the pull request's review threads and review bodies through `gh api`
   and mirrors them into the review; prints `ccr: <owner/repo#N>: T review threads, R review bodies; a comments
   added, u updated, r removed`.
-* `ccr gh-post ID [ID…] [--dry-run] [--json]` — PR mode (10.3): posts each submitted, unposted GitHub comment
+* `ccr gh-post ID [ID…] [--dry-run] [--json]` — PR mode (10.3): first re-reads the pull request's discussion as
+  `gh-sync` does and lists what GitHub added, edited or deleted since the last sync (`ccr: <owner/repo#N>: n comments
+  added, edited or deleted on GitHub since the last sync:`, then `  added|edited|deleted <id> @<login> on <anchor>[, a
+  reply]: <first 72 characters>`); with such news nothing is posted (`<id>: ERROR not posted: n comments changed on
+  GitHub since the last sync; read them (ccr comments), then run ccr gh-post again`, each entry carrying `news` in
+  `--json`), and a failed re-read posts nothing either (`could not re-read the discussion …`, exit 1). Otherwise it
+  posts each submitted, unposted GitHub comment
   verbatim into the user's pending review, one at a time (a repeated id once), and records it; every comment's
   state and body are read from the server right before it is posted; prints `ccr: started your pending review
   on <owner/repo#N>` when it had to start one, `<id>: posted <path>:<line> (<side>) → <url>` (or `(file)`), `  note: …`
   and `  warning: …` lines, `<id>: already posted → <url>` for a comment posted earlier, and finally `ccr: your pending
   review is on GitHub, to submit with a verdict there: <pr url>/files`. A question, a comment still pending in ccr,
   an unknown id or a refusal by ccr or GitHub is `<id>: ERROR …`; exit 1 if any item failed or drew a warning.
-  `--dry-run` asks GitHub nothing and prints `<id>: would post to <owner/repo#N> <path>:<line> (<side>), commit
+  `--dry-run` re-reads the discussion and lists its news too, posts nothing, and prints `<id>: would post to <owner/repo#N> <path>:<line> (<side>), commit
   <short>`, the anchored lines (`  <n> | <text>`) and the verbatim body.
 
 Bodies read from `-` take stdin.
@@ -1091,7 +1097,7 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
   targets on both sides, from commits and for files, every refusal, switching, the frozen posted comment, the
   schema-2 migration, mirroring the discussion — placements, updates, removals, a newer pull request head, comments
   posted from ccr — and GitHub replies), `test_server.py` (the PR routes), `test_cli.py` (`start --pr`, `comment --github`, the round
-  header, `gh-post` refusing pending comments and questions, `--dry-run` asking GitHub nothing, posting and
+  header, `gh-post` refusing pending comments and questions, `--dry-run` posting nothing, posting and
   re-posting through a fake `gh` on PATH, `start --pr` on reuse) and `test_e2e.py` (the driver's second
   scenario, `pr`: the PR link, the forked gutter in its column (by the hovered side in split view, no horizontal
   overflow at 1280x720 or 1920x1080) and file buttons, the editor switch, a GitHub comment refused outside the pull
@@ -1169,8 +1175,11 @@ user's roots can be GitHub comments; replies are always local.
 
 ### 10.3 Posting (`ccr gh-post`)
 
-`ccr gh-post` posts only GitHub comments that are submitted in ccr (a pending one is still a draft) and not posted
-yet, one at a time, through `ccr.github.post_comment`. GitHub is reached solely by running `gh api` —
+`ccr gh-post` first mirrors the discussion as `ccr gh-sync` does (10.5), so the agent knows GitHub's latest state
+before anything goes into it: when the sync brings `news` — comments added, edited or deleted on GitHub since the
+last sync — it lists them and posts nothing (6.2); `--dry-run` lists them and goes on. It posts only GitHub comments
+that are submitted in ccr (a pending one is still a draft) and not posted yet, one at a time, through
+`ccr.github.post_comment`. GitHub is reached solely by running `gh api` —
 `gh api graphql --input -` with named operations, plus `--hostname` for a host other than github.com — as the
 account `gh auth` holds:
 
@@ -1249,7 +1258,10 @@ as `updated_at`) and author, and carries `github` = `{"status": "remote", "node_
   resolved in ccr when it is resolved on GitHub; from then on that flag is the user's. A comment posted from ccr
   is recognised by its `comment_id` and not mirrored again: its record learns `thread_id` and `github_state`, and
   GitHub's replies to it join its ccr thread. Mirrored comments cannot be edited, moved or deleted in ccr (409
-  *"… comes from the pull request's discussion on GitHub (<url>); it changes there"*).
+  *"… comes from the pull request's discussion on GitHub (<url>); it changes there"*). A sync answers `{threads,
+  reviews, added, updated, removed, synced_at, news}`; `news` holds `{id, change, login, url, parent_id, anchor,
+  body}` for each mirrored comment GitHub added (`added`), changed the body of (`edited`) or no longer has
+  (`deleted`) since the last sync — a thread that only moved or changed state is no news.
 * **GitHub replies.** In a review thread on GitHub — a mirrored one, or a comment posted from ccr once a sync has
   told it its thread — the user's reply can be a GitHub reply (`github: true` on a reply). It is checked and posted
   like a GitHub comment: `github_target` gives `{"subject_type": "REPLY", "thread_id", "reply_to" (the thread's

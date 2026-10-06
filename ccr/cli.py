@@ -238,11 +238,12 @@ def build_parser() -> Parser:
 
     add("gh-sync", "mirror the linked pull request's review threads and review bodies from GitHub into the review")
 
-    gh_post = add("gh-post", "post GitHub comments and replies verbatim into your pending review on the linked pull "
-                  "request (starting it when there is none; it is never submitted)")
+    gh_post = add("gh-post", "re-read the linked pull request's discussion, then post GitHub comments and replies "
+                  "verbatim into your pending review on it (starting it when there is none; it is never submitted); "
+                  "nothing is posted while the re-read brings comments changed since the last sync")
     gh_post.add_argument("ids", nargs="+", metavar="ID")
     gh_post.add_argument("--dry-run", action="store_true", dest="dry_run",
-                         help="show where each comment would go and what it says; touch nothing")
+                         help="re-read the discussion, show where each comment would go and what it says; post nothing")
 
     export = add("export", "dump rounds and every thread as Markdown (default) or JSON")
     export.add_argument("--md", action="store_true", help="Markdown (default)")
@@ -948,6 +949,15 @@ def post_one(client: Client, remote, review: dict, comment_id: str, dry_run: boo
             "notes": result["notes"], "problems": result["problems"]}
 
 
+def print_github_news(news: list, say) -> None:
+    """What a sync found added, edited or deleted on GitHub, one line per comment."""
+    for item in news:
+        where = describe_anchor(item["anchor"]) + ("" if item["parent_id"] is None else ", a reply")
+        excerpt = render.clean(item["body"], True)
+        say("  %-7s %s @%s on %s: %s" % (item["change"], item["id"], render.clean(item["login"], True), where,
+                                        excerpt if len(excerpt) <= 72 else excerpt[:71] + "…"))
+
+
 def cmd_gh_sync(args) -> int:
     client, _, _ = connect(args)
     pr = client.get("/api/review").get("pr")
@@ -971,8 +981,25 @@ def cmd_gh_post(args) -> int:
         raise CliError("the review is not linked to a GitHub pull request; start ccr with --pr URL")
     remote = github.PullRequest(pr)
     say = (lambda line: None) if args.json else out
+    # GitHub's discussion as it is now, before anything goes into it: what came since the last sync is read first
+    label = github.pr_label(pr)
+    try:
+        news = client.post("/api/github/sync", github.fetch_discussion(remote))["news"]
+    except (ApiError, GitHubError) as exc:
+        raise CliError("could not re-read the discussion on %s, so nothing is posted: %s" % (label, exc)) from None
+    if news:
+        say("ccr: %s: %d comments added, edited or deleted on GitHub since the last sync:" % (label, len(news)))
+        print_github_news(news, say)
+    unread = None
+    if news and not args.dry_run:
+        unread = "%d comments changed on GitHub since the last sync; read them (ccr comments), then run ccr gh-post " \
+                 "again" % len(news)
     results, posted = [], False
     for comment_id in dict.fromkeys(args.ids):
+        if unread:
+            results.append({"id": comment_id, "ok": False, "error": unread, "news": news})
+            say("%s: ERROR not posted: %s" % (comment_id, unread))
+            continue
         try:
             entry = post_one(client, remote, review, comment_id, args.dry_run, say)
             posted = posted or entry.get("posted", False)

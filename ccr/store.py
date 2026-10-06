@@ -370,6 +370,13 @@ def _clip(text) -> str:
     return text
 
 
+def _news(comment: dict, change: str) -> dict:
+    """What a sync tells about a mirrored comment GitHub added, edited or deleted since the last sync."""
+    github = comment["github"]
+    return {"id": comment["id"], "change": change, "login": github.get("login"), "url": github.get("url"),
+            "parent_id": comment["parent_id"], "anchor": comment["anchor"], "body": comment["body"]}
+
+
 def _valid_repo_path(path) -> bool:
     if not isinstance(path, str) or not path or "\0" in path or path.startswith("/"):
         return False
@@ -1386,7 +1393,9 @@ class ReviewStore:
                  int(parent is None and bool(flags.get("resolved_on_github"))), anchor["kind"], anchor["commit"],
                  anchor["path"], anchor["side"], anchor["line"], anchor["start_line"], snippet, json.dumps(info)))
             stats["added"] += 1
-            return self._fetch(comment_id)
+            added = self._fetch(comment_id)
+            stats["news"].append(_news(added, "added"))
+            return added
         moved = parent is None and existing["anchor"] != anchor
         if not moved and (existing["body"], existing["updated_at"], existing["github"]) == (body, updated, info):
             return existing
@@ -1397,7 +1406,10 @@ class ReviewStore:
                                _anchor_params(anchor) + [snippet, existing["id"]])
             self._update_reply_anchors(existing["id"], anchor, snippet)
         stats["updated"] += 1
-        return self._fetch(existing["id"])
+        updated = self._fetch(existing["id"])
+        if existing["body"] != body:
+            stats["news"].append(_news(updated, "edited"))
+        return updated
 
     def _merge_posted(self, comment: dict, extra: dict, stats: dict) -> None:
         """A comment posted from ccr learns its thread and GitHub's state of it from a sync."""
@@ -1415,6 +1427,7 @@ class ReviewStore:
         replies in ccr, which stays marked deleted.  A thread whose first comment is gone from GitHub is a new thread
         in ccr.  A comment posted from ccr is not mirrored a second time: GitHub's replies to it join its ccr thread.
         A mirrored thread starts out resolved in ccr if it is resolved on GitHub; from then on that flag is the user's.
+        ``news`` lists the comments GitHub added, edited or deleted since the last sync (``_news``).
         """
         if not isinstance(payload, dict) or not isinstance(payload.get("viewer"), str) \
                 or not isinstance(payload.get("threads"), list) or not isinstance(payload.get("reviews"), list):
@@ -1436,7 +1449,7 @@ class ReviewStore:
                 return comment if comment is not None and comment["parent_id"] == (parent["id"] if parent else None) \
                     else None
 
-            stats = {"threads": 0, "reviews": 0, "added": 0, "updated": 0, "removed": 0}
+            stats = {"threads": 0, "reviews": 0, "added": 0, "updated": 0, "removed": 0, "news": []}
             review_anchor = {"kind": "review", "commit": None, "path": None, "side": None, "line": None, "start_line": None}
             with self._mutate():
                 for thread in payload["threads"]:
@@ -1482,9 +1495,11 @@ class ReviewStore:
                             self._conn.execute("UPDATE comments SET github = ? WHERE id = ?",
                                                (json.dumps(dict(comment["github"], deleted=True)), comment["id"]))
                             stats["updated"] += 1
+                            stats["news"].append(_news(comment, "deleted"))
                     else:  # a root's mirrored replies may be gone with it already (ON DELETE CASCADE)
                         self._conn.execute("DELETE FROM comments WHERE id = ?", (comment["id"],))
                         stats["removed"] += 1
+                        stats["news"].append(_news(comment, "deleted"))
                 self.pr = dict(self.pr, synced_at=now, first_synced_at=self.pr.get("first_synced_at") or now)
                 self._conn.execute("UPDATE reviews SET pr = ? WHERE id = ?", (json.dumps(self.pr), self.review_id))
             return dict(stats, synced_at=now)
