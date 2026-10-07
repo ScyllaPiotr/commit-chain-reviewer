@@ -1303,3 +1303,15 @@ class TestSince:
             gitx.rebuild_tree(rereview_repo.path, "--output=x", rereview_repo.base2, rereview_repo.reviewed)
         with pytest.raises(GitError):
             gitx.rebuild_tree(rereview_repo.path, rereview_repo.base1, rereview_repo.base2, "0" * 40)
+
+    def test_blame_names_the_commit_that_last_changed_each_line(self, rereview_repo):
+        r = rereview_repo
+        blamed = gitx.blame_lines(r.path, r.v2, "src/calc.py", [30, 24, 25, 29])
+        assert [(b["line"], b["commit"], b["path"], b["orig_line"]) for b in blamed] == [
+            (24, r.base1, "src/calc.py", 24), (25, r.v2, "src/calc.py", 25), (29, r.v2, "src/calc.py", 29),
+            (30, r.v2, "src/calc.py", 30)]
+        assert gitx.blame_lines(r.path, r.v2, "src/calc.py", [1])[0]["commit"] == r.base2
+        with pytest.raises(GitError):
+            gitx.blame_lines(r.path, r.v2, "src/calc.py", [0])
+        with pytest.raises(GitError):
+            gitx.blame_lines(r.path, r.v2, "no/such/file", [1])

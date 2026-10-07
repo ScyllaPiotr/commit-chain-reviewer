@@ -197,6 +197,8 @@ def test_browser_pr_mode_flow(live_pr, tmp_path):
 def live_since(rereview_repo):
     r = rereview_repo
     server = LiveServer(r, pr=PR_URL, spec="%s..%s" % (r.base2, r.v2), worktree=False, since=(r.reviewed, REVIEWED_AT))
+    server.store.add_flag("src/calc.py", 25, "Not asked for: mul now returns 0 when b is 0")  # mirrors MUL_REASON
+    server.store.add_flag("src/calc.py", 25, "As reviewed: mul without the shortcut", side="old")  # REVIEWED_REASON
     yield server
     server.close()
 
@@ -209,7 +211,10 @@ def test_browser_since_your_last_review(live_since, tmp_path):
     assert report["consoleErrors"] == [] and report["ok"] is True and report["exit_code"] == 0, pretty
     assert [s["name"] for s in report["steps"]] == [
         "Since your last review is a group of its own", "open Since your last review",
-        "the reviewed side takes questions only"], pretty
+        "the reviewed side takes questions only", "flagged lines carry a stripe and ⚑ with the reason",
+        "Next ⚑ steps through the flags", "a flag shows in the commit that last changed its line",
+        "flags made on an earlier head are hidden"], pretty
+    assert all(flag["stale"] for flag in live_since.store.flags()["flags"])
     question = live_since.store.list_comments()[0]
     assert (question["anchor"]["commit"], question["anchor"]["side"], question["anchor"]["line"]) == ("since", "old", 25)
     assert question["github"] is None and question["snippet"] == "    return a * b"

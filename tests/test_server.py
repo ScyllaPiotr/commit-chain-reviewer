@@ -747,3 +747,24 @@ def test_since_route_opens_the_view(rereview_repo):
         assert srv.get("/api/commits/since").status == 404
     finally:
         srv.close()
+
+
+def test_flag_routes(rereview_repo):
+    r = rereview_repo
+    store = ReviewStore(r.path, "%s..%s" % (r.base2, r.v2), None, db_path=":memory:")
+    store.set_since(r.reviewed)
+    store.load()
+    srv = Live(r, store, make_server(store, TOKEN, 0))
+    try:
+        assert srv.get("/api/flags").json == {"head": r.v2, "flags": [], "views": {}}
+        refused = srv.post("/api/flags", {"path": "src/calc.py", "line": 10, "reason": "x"})
+        assert refused.status == 400 and "is not a line the diff of Since your last review shows" in refused.json["error"]
+        created = srv.post("/api/flags", {"path": "src/calc.py", "line": 30, "start_line": 29, "reason": "check"})
+        assert created.status == 201 and (created.json["view"], created.json["start_line"]) == ("since", 29)
+        assert srv.post("/api/flags", {"view": "combined", "path": "src/calc.py", "line": 25, "reason": "mul"}).status == 201
+        listed = srv.get("/api/flags").json
+        assert len(listed["flags"]) == 2 and set(listed["views"]) == {"since", "combined", r.v2}
+        cleared = srv.request("DELETE", "/api/flags")
+        assert cleared.status == 200 and cleared.json["removed"] == 2 and srv.get("/api/flags").json["flags"] == []
+    finally:
+        srv.close()

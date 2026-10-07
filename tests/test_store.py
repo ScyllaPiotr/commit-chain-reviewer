@@ -1741,3 +1741,59 @@ def test_schema_3_database_gains_the_since_column(rereview_repo, tmp_path):
     assert store.review()["since"] is None
     assert store.set_since(r.reviewed)["reviewed"] == r.reviewed
     store.close()
+
+
+# --------------------------------------------------------------------------- flags (2.7)
+
+def test_flags_mark_lines_of_a_view_and_show_where_those_lines_are(rereview_repo):
+    r = rereview_repo
+    store = since_store(r, r.base2, r.v2)
+    version = store.version
+    mul = store.add_flag("src/calc.py", 25, "mul now returns 0 for b == 0")
+    assert store.version == version + 1
+    assert {k: mul[k] for k in ("view", "path", "side", "line", "start_line", "head", "stale")} == \
+        {"view": SINCE, "path": "src/calc.py", "side": "new", "line": 25, "start_line": None, "head": r.v2, "stale": False}
+    reviewed = store.add_flag("src/calc.py", REVIEWED_MUL, "as reviewed", side="old")
+    check = store.add_flag("src/calc.py", 30, "two lines", view=COMBINED, start_line=29)
+    flags = store.flags()
+    assert flags["head"] == r.v2 and [f["id"] for f in flags["flags"]] == [mul["id"], reviewed["id"], check["id"]]
+    places = {view: [(f["id"], f["side"], f["lines"]) for f in shown] for view, shown in flags["views"].items()}
+    assert places == {
+        SINCE: [(mul["id"], "new", [25]), (reviewed["id"], "old", [25]), (check["id"], "new", [29, 30])],
+        COMBINED: [(mul["id"], "new", [25]), (check["id"], "new", [29, 30])],
+        r.v2: [(mul["id"], "new", [25]), (check["id"], "new", [29, 30])],
+    }, "the version reviewed shows only in its own view; the head's lines in each view that shows them"
+    assert store.clear_flags() == 3 and store.flags()["flags"] == []
+    store.close()
+
+
+def test_a_flag_on_a_commit_shows_in_the_views_of_the_head(rereview_repo):
+    r = rereview_repo
+    store = ReviewStore(r.path, "%s..%s" % (r.base1, r.v2), None, db_path=":memory:")  # base1..v2: two commits
+    store.set_since(r.reviewed)
+    store.load()
+    flag = store.add_flag("src/upstream.py", 1, "why is the version bumped?", view=r.base2)
+    shown = [{"id": flag["id"], "path": "src/upstream.py", "side": "new", "lines": [1]}]
+    assert store.flags()["views"] == {r.base2: shown, COMBINED: shown, SINCE: shown}, \
+        "a commit's lines are carried to the head; with base1 as the base, base2 came after the review"
+    store.close()
+
+
+def test_flags_are_checked_and_go_stale_when_the_head_moves(rereview_repo):
+    r = rereview_repo
+    store = since_store(r, r.base2, r.v2)
+    with pytest.raises(StoreError, match="src/calc.py:10 \\(new side\\) is not a line the diff of Since your last review shows"):
+        store.add_flag("src/calc.py", 10, "outside")
+    with pytest.raises(StoreError, match="body must not be empty|empty"):
+        store.add_flag("src/calc.py", 25, "  ")
+    with pytest.raises(StoreError, match="anchor.side"):
+        store.add_flag("src/calc.py", 25, "x", side="left")
+    with pytest.raises(NotFoundError):
+        store.add_flag("src/upstream.py", 1, "not in the view")
+    flag = store.add_flag("src/calc.py", 25, "mul")
+    store.load(spec="%s..%s" % (r.base3, r.v3))
+    flags = store.flags()
+    assert flags["head"] == r.v3 and flags["flags"][0]["stale"] and flags["views"] == {}, \
+        "made on another head: its lines may hold other code now"
+    assert flags["flags"][0]["id"] == flag["id"]
+    store.close()

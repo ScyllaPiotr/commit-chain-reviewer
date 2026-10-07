@@ -552,6 +552,9 @@ export async function runScenario(page, url) {
 export const PR_URL = 'https://github.com/o/r/pull/7';
 /** When the review "Since your last review" starts from was submitted (mirrors REVIEWED_AT in tests/conftest.py). */
 export const SINCE_AT = '2023-11-15T09:30:00Z';
+/** The reasons of the two flags tests/test_e2e.py makes before the `since` scenario runs. */
+export const MUL_REASON = 'Not asked for: mul now returns 0 when b is 0';
+export const REVIEWED_REASON = 'As reviewed: mul without the shortcut';
 
 /** PR mode (spec section 10) against the same fixture, linked to PR_URL: questions for Claude and GitHub comments. */
 export async function runPrScenario(page, url) {
@@ -914,6 +917,73 @@ export async function runSinceScenario(page, url) {
     const replies = await page.evaluate(`[...document.querySelector(${JSON.stringify(card)}).querySelectorAll('.thread .thread-foot .btn-reply')].map((b) => b.textContent).join(',')`);
     if (replies !== 'Ask AI') throw new Error('a thread on the version reviewed offers ' + replies);
     return 'question only';
+  });
+
+  const flagColor = `(() => { const p = document.createElement('span'); p.style.color = 'var(--flag)'; document.body.appendChild(p); const c = getComputedStyle(p).color; p.remove(); return c; })()`;
+  const flagged = (rowSel, side) => `(() => { const row = document.querySelector(${JSON.stringify(rowSel)}); if (!row) return null;
+    const split = row.closest('table.diff').dataset.view === 'split';
+    const cell = row.querySelector('td.num.' + ${JSON.stringify(side)});
+    const striped = split ? cell : row.querySelector('td');
+    const mark = cell.querySelector('.flag-mark');
+    return { flagged: row.classList.contains('is-flagged'), stripe: getComputedStyle(striped).boxShadow, mark: mark ? mark.title : null }; })()`;
+  const badges = `Object.fromEntries([...document.querySelectorAll('#commit-list .commit-item')].map((li) => [li.dataset.sha.length > 10 ? 'commit' : li.dataset.sha, (li.querySelector('.badge-flag') || {}).textContent || '']))`;
+
+  await runner.step('flagged lines carry a stripe and ⚑ with the reason', async () => {
+    const orange = await page.evaluate(flagColor);
+    await page.waitFor(`document.querySelector(${JSON.stringify(card + ' tr.line.is-flagged')})`, { label: 'flags applied' });
+    for (const view of ['unified', 'split']) {
+      if (view === 'split') {
+        await page.click('#btn-viewmode');
+        await page.waitFor(`document.querySelector(${JSON.stringify(card + ' table.diff[data-view="split"]')})`, { label: 'split view' });
+      }
+      const added = await page.evaluate(flagged(`${card} tr.line[data-n="25"]`, 'new'));
+      const removed = await page.evaluate(flagged(`${card} tr.line[data-o="25"]`, 'old'));
+      for (const [what, got, reason] of [['new', added, MUL_REASON], ['old', removed, REVIEWED_REASON]]) {
+        if (!got || !got.flagged || !got.stripe.includes(orange) || !got.stripe.includes('4px') || got.mark !== reason) throw new Error(`${view} ${what} side: ${JSON.stringify(got)} (flag colour ${orange})`);
+      }
+      const plain = await page.evaluate(flagged(`${card} tr.line[data-n="29"]`, 'new'));
+      if (plain.flagged || plain.mark) throw new Error('an unflagged line is marked: ' + JSON.stringify(plain));
+    }
+    await page.click('#btn-viewmode');
+    await page.waitFor(`document.querySelector(${JSON.stringify(card + ' table.diff[data-view="unified"]')})`, { label: 'unified again' });
+    const counts = await page.evaluate(`({ badges: ${badges}, tree: [...document.querySelectorAll('#file-tree .tree-file')].map((f) => f.dataset.path + ':' + ((f.querySelector('.fcount') || {}).textContent || '')),
+      nav: document.querySelector('#flag-nav').textContent })`);
+    if (JSON.stringify(counts.badges) !== JSON.stringify({ since: '⚑2', combined: '⚑1', commit: '⚑1' })) throw new Error('commit list counts: ' + JSON.stringify(counts.badges));
+    if (counts.tree.join(',') !== 'src/calc.py:⚑2,tests/test_calc.py:') throw new Error('file tree counts: ' + counts.tree);
+    if (counts.nav !== '⚑ Next (2)') throw new Error('Next ⚑: ' + counts.nav);
+    await page.shot('since-flags');
+    return 'unified and split';
+  });
+
+  await runner.step('Next ⚑ steps through the flags', async () => {
+    const selected = `(() => { const rows = [...document.querySelectorAll(${JSON.stringify(card + ' tr.line.is-selected')})]; return rows.map((r) => (r.classList.contains('del') ? 'old:' + r.dataset.o : 'new:' + r.dataset.n)).join(','); })()`;
+    const seen = [];
+    for (const expected of ['new:25', 'old:25', 'new:25']) {
+      await page.click('#flag-nav');
+      await page.waitFor(`${selected} === ${JSON.stringify(expected)}`, { label: 'selected ' + expected });
+      seen.push(expected);
+    }
+    return seen.join(' → ');
+  });
+
+  await runner.step('a flag shows in the commit that last changed its line', async () => {
+    await page.click('#commit-list .commit-item:last-child');
+    await page.waitFor(`document.querySelector('#commit-list .commit-item:last-child').classList.contains('is-selected') && document.querySelector(${JSON.stringify(card + '[data-rendered="1"] table.diff')})`);
+    const added = await page.evaluate(flagged(`${card} tr.line[data-n="25"]`, 'new'));
+    if (!added || !added.flagged || added.mark !== MUL_REASON) throw new Error('in the commit: ' + JSON.stringify(added));
+    const others = await page.evaluate(`document.querySelectorAll(${JSON.stringify(card + ' tr.line.is-flagged')}).length`);
+    if (others !== 1) throw new Error(`${others} rows flagged in the commit; the version reviewed shows only in its own view`);
+    return 'line 25';
+  });
+
+  await runner.step('flags made on an earlier head are hidden', async () => {
+    const reloaded = await page.api('/api/reload', { method: 'POST', body: JSON.stringify({ range: 'main..v3' }) });
+    if (!reloaded.review || reloaded.review.since.conflicts.join() !== 'src/shared.py') throw new Error('reload: ' + JSON.stringify(reloaded).slice(0, 300));
+    await page.waitFor(`!document.querySelector('#banner-flags').hidden`, { label: 'stale banner' });
+    const after = await page.evaluate(`({ banner: document.querySelector('#banner-flags .banner-text').textContent, marks: document.querySelectorAll('.is-flagged, .flag-mark, .badge-flag, .fcount').length })`);
+    if (after.banner !== '2 flagged changes were marked on an earlier head of the pull request, so they are hidden: run /re-review again') throw new Error('banner: ' + after.banner);
+    if (after.marks) throw new Error(`${after.marks} marks left after the head moved`);
+    return after.banner;
   });
 }
 

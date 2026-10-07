@@ -57,6 +57,7 @@ __all__ = [
     "diff_since",
     "show_file",
     "map_line",
+    "blame_lines",
     "parse_patch",
     "parse_raw_and_patch",
     "guess_lang",
@@ -101,6 +102,7 @@ _KEPT_GIT_ENV = ("GIT_CONFIG_NOSYSTEM", "GIT_SSH", "GIT_TRACE")
 _DEFAULT_BASE_REFS = ("main", "master", "origin/main", "origin/master", "origin/HEAD")
 
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_BLAME_HEADER_RE = re.compile(r"^([0-9a-f]{40}|[0-9a-f]{64}) (\d+) (\d+)(?: \d+)?$")
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: (.*))?$")
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 _C_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, '"': 34}
@@ -1314,6 +1316,48 @@ def map_line(repo, from_rev, to_rev, path, line) -> dict:
         return {"path": None, "line": None, "status": "file-deleted"}
     new_line, status = _map_through_hunks(changed["hunks"], line)
     return {"path": changed["path"], "line": new_line, "status": status}
+
+
+def _line_runs(lines) -> list:
+    """``-L a,b`` arguments covering the sorted distinct ``lines``."""
+    runs = []
+    for line in sorted(set(lines)):
+        if runs and runs[-1][1] == line - 1:
+            runs[-1][1] = line
+        else:
+            runs.append([line, line])
+    return ["-L%d,%d" % (a, b) for a, b in runs]
+
+
+def blame_lines(repo, rev, path, lines) -> list:
+    """Who last changed ``lines`` of ``path`` at ``rev`` (section 3.2): ``[{"line", "commit", "path", "orig_line"}]``.
+
+    ``commit`` is the commit that brought each line in, ``path``/``orig_line`` where the line is in that commit
+    (``git blame --line-porcelain``); every ignore-revs file is cleared, so the answer does not depend on the
+    user's configuration.
+    """
+    _check_rev_arg(rev)
+    if not isinstance(path, str) or not path or "\0" in path:
+        raise GitError("invalid path")
+    if not lines or any(not isinstance(n, int) or n < 1 for n in lines):
+        raise GitError("invalid lines")
+    # blame takes no "--" after --end-of-options: the revision and the path are its two arguments
+    args = ["blame", "--line-porcelain", "--ignore-revs-file="] + _line_runs(lines) + ["--end-of-options", rev, path]
+    result, record = [], None
+    for raw in _git(repo, args).stdout.split(b"\n"):
+        text = _decode(raw)
+        if raw.startswith(b"\t"):
+            if record is not None:
+                result.append(record)
+            record = None
+            continue
+        match = _BLAME_HEADER_RE.match(text) if record is None else None
+        if match:
+            record = {"line": int(match.group(3)), "commit": match.group(1), "path": path, "orig_line": int(match.group(2))}
+        elif record is not None and text.startswith("filename "):
+            name = text[len("filename "):]
+            record["path"] = _unquote_c(name)[0] if name.startswith('"') else name
+    return result
 
 
 # --------------------------------------------------------------------------- trimming

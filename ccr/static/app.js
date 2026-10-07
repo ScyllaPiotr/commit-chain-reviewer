@@ -168,6 +168,7 @@
     knownIds: new Set(), expandedResolved: new Set(), fileFilter: '', submitting: false,
     loadedOnce: false, polling: false, pollSeq: 0, pollAbort: null, pollRole: null, disconnectedSince: null,
     rangeAnchorSha: null, inflight: new Set(), hoverThread: null, projectedFor: null,
+    flags: { head: null, flags: [], views: {} }, flagCursor: { view: null, index: -1 },
   };
   window.ccrState = state;
 
@@ -324,6 +325,7 @@
       const target = parseHash(location.hash);
       const listed = target && !target.compare ? findCommit(target.sha) : null;
       await loadComments(listed ? listed.sha : 'combined', { initial: true });
+      await loadFlags();
       await navigateFromHash();
       document.body.dataset.ready = '1';
       state.loadedOnce = true;
@@ -391,9 +393,11 @@
   /* ==================================================================== sidebar: commit chain */
 
   function commitBadgesHtml(sha) {
+    const flagged = flagsIn(sha).length;
+    const flags = flagged ? `<span class="badge commit-badge badge-flag" title="${flagged} flagged change${flagged === 1 ? '' : 's'} to look at closely">⚑${flagged}</span>` : '';
     const c = state.counts.byCommit.get(sha);
-    if (!c || !c.threads) return '';
-    let html = '';
+    if (!c || !c.threads) return flags;
+    let html = flags;
     if (c.pending) html += `<span class="badge commit-badge badge-pending" title="${esc(c.pending)} pending">${esc(c.pending)}</span>`;
     if (c.unresolved) html += `<span class="badge commit-badge badge-unresolved" title="${esc(c.unresolved)} unresolved">${esc(c.unresolved)}</span>`;
     if (!c.pending && !c.unresolved) html += `<span class="badge commit-badge" title="${esc(c.threads)} threads">${esc(c.threads)}</span>`;
@@ -538,6 +542,7 @@
       <span class="st st-${esc(f.status)}" aria-label="${esc(statusName(f.status))}">${esc(f.status)}</span>
       <span class="name"><bdi>${esc(name)}</bdi></span>
       ${c && c.threads ? `<span class="tcount${c.hasNew ? ' has-new' : ''}" title="${esc(c.threads)} threads">${esc(c.threads)}</span>` : ''}
+      ${flagHtml(flagsIn(state.viewSha).filter((x) => x.path === f.path).length)}
       <span class="nums">${f.binary ? 'bin' : `<span class="stat-add">+${esc(f.additions)}</span> <span class="stat-del">−${esc(f.deletions)}</span>`}</span>
     </div>`;
   }
@@ -656,7 +661,7 @@
       if (diff.shallow_boundary) meta += '<span class="tag tag-outdated">shallow boundary</span>';
     }
     meta += `<span class="stats-wrap">${esc(diff.stats.files)} file${diff.stats.files === 1 ? '' : 's'} ${statsHtml(diff.stats.additions, diff.stats.deletions)}</span>`;
-    meta += '<span class="header-actions">';
+    meta += `<span class="header-actions">${flagNavHtml(diff.sha)}`;
     if (!commentsDisabled()) {
       // "All changes" gets only the whole-series button: a commit-level comment on the combined view would just
       // duplicate a review-level one.
@@ -844,6 +849,7 @@
     attachGutterButton(card);
     observeThreads(card);
     restoreSelectionClasses(card);
+    applyFlags(card);
   }
 
   function rerenderBody(card) {
@@ -854,6 +860,76 @@
     attachGutterButton(card);
     observeThreads(card);
     restoreSelectionClasses(card);
+    applyFlags(card);
+  }
+
+  /* ==================================================================== flags (re-review, spec 2.7) */
+
+  /** The flags the view `sha` shows: `[{id, path, side, lines}]`. */
+  const flagsIn = (sha) => (sha && state.flags.views[sha]) || [];
+  const flagHtml = (n) => (n ? `<span class="fcount" title="${n} flagged change${n === 1 ? '' : 's'} to look at closely">⚑${n}</span>` : '');
+
+  async function loadFlags() {
+    try {
+      state.flags = await api('/api/flags');
+    } catch (e) {
+      return; // still loading, or an older server without flags: no marks
+    }
+    updateCommitBadges();
+    renderFileTree();
+    for (const card of $$('#files .file-card[data-rendered="1"]')) applyFlags(card);
+    const nav = $('#flag-nav');
+    if (nav) nav.outerHTML = flagNavHtml(state.viewSha);
+    const stale = state.flags.flags.filter((f) => f.stale).length;
+    const banner = $('#banner-flags');
+    banner.hidden = !stale;
+    banner.querySelector('.banner-text').textContent = `${stale} flagged change${stale === 1 ? ' was' : 's were'} marked on an earlier head of the pull request, so ${stale === 1 ? 'it is' : 'they are'} hidden: run /re-review again`;
+  }
+
+  /** Mark the rows of a rendered card that the view's flags name: an orange stripe on each, and ⚑ with the reason on
+   *  the first one shown. */
+  function applyFlags(card) {
+    for (const el of card.querySelectorAll('.is-flagged')) el.classList.remove('is-flagged');
+    for (const el of card.querySelectorAll('.flag-mark')) el.remove();
+    const reasons = new Map(state.flags.flags.map((f) => [f.id, f.reason]));
+    for (const flag of flagsIn(state.viewSha).filter((x) => x.path === card.dataset.path)) {
+      let marked = false;
+      for (const n of flag.lines) {
+        const cell = card.querySelector(`td.num.${flag.side}[data-line="${n}"]`);
+        if (!cell) continue;
+        cell.classList.add('is-flagged');
+        cell.closest('tr').classList.add('is-flagged');
+        if (marked) continue;
+        const mark = document.createElement('span');
+        mark.className = 'flag-mark';
+        mark.textContent = '⚑';
+        mark.title = reasons.get(flag.id) || '';
+        mark.dataset.flagId = flag.id;
+        cell.prepend(mark);
+        marked = true;
+      }
+    }
+  }
+
+  function flagNavHtml(sha) {
+    const n = flagsIn(sha).length;
+    return n ? `<button type="button" id="flag-nav" class="sm-btn" title="Go to the next flagged change in this view">⚑ Next (${n})</button>`
+      : '<span id="flag-nav" hidden></span>';
+  }
+
+  /** "Next ⚑": step through the view's flags in file order, wrapping around, selecting each one's lines. */
+  async function nextFlag() {
+    const diff = currentDiff();
+    if (!diff) return;
+    const order = new Map(diff.files.map((f, i) => [f.path, i]));
+    const list = flagsIn(state.viewSha).slice().sort((a, b) => (order.get(a.path) ?? 1e9) - (order.get(b.path) ?? 1e9) || a.lines[0] - b.lines[0]);
+    if (!list.length) return;
+    const cursor = state.flagCursor.view === state.viewSha ? state.flagCursor.index : -1;
+    const index = (cursor + 1) % list.length;
+    state.flagCursor = { view: state.viewSha, index };
+    const flag = list[index];
+    const lo = flag.lines[0]; const hi = flag.lines[flag.lines.length - 1];
+    await navigateTo({ sha: state.viewSha, path: flag.path, side: flag.side, line: hi, startLine: lo, endLine: hi });
   }
 
   async function loadTooLarge(card, btn) {
@@ -2389,6 +2465,7 @@
     const prev = state.review;
     if (genChanged || roundsChanged || syncChanged) applyReview(await api('/api/review'));
     if (await loadComments(projectView())) state.version = Math.max(state.version, st.version || 0);
+    await loadFlags();
     if (genChanged) {
       await reloadCurrentView();
       // `ccr cover` bumps the generation too; say so instead of announcing a chain reload when only the cover moved.
@@ -2919,6 +2996,7 @@
     }
     if (hit('#btn-comment-commit')) { const a = { kind: 'commit', commit: state.viewSha, path: null, side: null, line: null, start_line: null }; openEditor(anchorKey(a), { mode: 'new', anchor: a }); return; }
     if (hit('#btn-comment-review')) { openEditor('review:', { mode: 'new', anchor: { kind: 'review' } }); return; }
+    if (hit('#flag-nav')) { nextFlag(); return; }
     if ((b = hit('.btn-load-anyway'))) { loadTooLarge(b.closest('.file-card'), b); return; }
     if ((b = hit('.expand-btn'))) { expandGap(b.closest('.file-card'), b); return; }
     if ((b = hit('[data-copy]'))) { copyText(b.dataset.copy, 'Copied ' + (b.classList.contains('sha-copy') ? 'sha' : 'path')); return; }

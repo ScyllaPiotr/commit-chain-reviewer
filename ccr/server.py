@@ -466,6 +466,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             "compare": lambda: self._compare(query),
             "file": lambda: self._file(query),
             "comments": lambda: self._list_comments(query),
+            "flags": lambda: self._send_json(200, store.flags()),
         }
         post_routes = {
             "comments": lambda: self._send_json(201, store.add_comment(
@@ -477,6 +478,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             "pr": lambda: self._send_json(200, {"pr": store.set_pr(body.get("url")), "version": store.version}),
             "since": lambda: self._send_json(200, {"since": store.set_since(body.get("reviewed"), body.get("at")),
                                                    "version": store.version}),
+            "flags": lambda: self._send_json(201, store.add_flag(
+                body.get("path"), body.get("line"), body.get("reason"), view=body.get("view"), side=body.get("side"),
+                start_line=body.get("start_line"))),
             "restore": lambda: self._send_json(200, store.restore(body.get("payload"), bool(body.get("dry_run")))),
             "shutdown": self._shutdown,
         }
@@ -484,6 +488,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             return get_routes.get(name)
         if method == "POST":
             return post_routes.get(name)
+        if method == "DELETE" and name == "flags":
+            return lambda: self._send_json(200, {"removed": store.clear_flags(), "version": store.version})
         return None
 
     # ------------------------------------------------------------------ routes

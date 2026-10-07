@@ -99,6 +99,11 @@ _ROUNDS_DDL = """CREATE TABLE IF NOT EXISTS rounds (review INTEGER NOT NULL DEFA
 
 _ROUND_COLUMNS = "number, submitted_at, verdict, summary, base, head, commit_shas"
 
+_FLAGS_DDL = """CREATE TABLE IF NOT EXISTS flags (id INTEGER PRIMARY KEY, review INTEGER NOT NULL, view TEXT NOT NULL,
+  path TEXT NOT NULL, side TEXT NOT NULL, line INTEGER NOT NULL, start_line INTEGER, reason TEXT NOT NULL,
+  head TEXT NOT NULL, created_at TEXT NOT NULL);"""
+BLAME_CACHE_MAX = 256
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY, started_at TEXT NOT NULL,
@@ -111,7 +116,7 @@ CREATE TABLE IF NOT EXISTS comments (
   state TEXT NOT NULL, round INTEGER, resolved INTEGER NOT NULL DEFAULT 0,
   kind TEXT NOT NULL, commit_sha TEXT, path TEXT, side TEXT, line INTEGER, start_line INTEGER,
   snippet TEXT NOT NULL DEFAULT '', moved_from TEXT, github TEXT);
-""" + _ROUNDS_DDL + "\n"
+""" + _ROUNDS_DDL + "\n" + _FLAGS_DDL + "\n"
 
 
 def utcnow() -> str:
@@ -389,6 +394,11 @@ def _news(comment: dict, change: str) -> dict:
             "parent_id": comment["parent_id"], "anchor": comment["anchor"], "body": comment["body"]}
 
 
+def _view_name(view: str) -> str:
+    return {COMBINED: "All changes", WORKTREE: "the uncommitted changes", SINCE: "Since your last review"}.get(
+        view, view[:gitx.SHORT_SHA_LEN])
+
+
 def _valid_repo_path(path) -> bool:
     if not isinstance(path, str) or not path or "\0" in path or path.startswith("/"):
         return False
@@ -422,6 +432,7 @@ class ReviewStore:
         self.stopping = False
         self._data = None
         self._diff_cache = {}
+        self._blame_cache = {}
         self._server = {"pid": os.getpid(), "port": None, "started_at": utcnow(), "version": __version__}
         self._ui_last_seen = None
         self._ui_last_seen_mono = None
@@ -2086,6 +2097,115 @@ class ReviewStore:
         if project is not None:
             self._project(selected, data, project)
         return selected
+
+    # ------------------------------------------------------------------ flags (re-review, 2.7)
+
+    def add_flag(self, path, line, reason, view=None, side=None, start_line=None) -> dict:
+        """Flag lines of a view - "Since your last review" unless ``view`` says otherwise - as a change that needs a
+        closer look (2.7).  Both ends must be rows the view's diff shows on ``side``; the flag belongs to the head."""
+        text = _validate_body(reason)
+        side = "new" if side is None else side
+        with self._lock:
+            data = self._require_data()
+            commit = self._resolve_commit_ref(SINCE if view is None else view)
+            if commit == WORKTREE:
+                raise StoreError("uncommitted changes cannot be flagged")
+            anchor, _ = self._validate_anchor({"kind": "line", "commit": commit, "path": path, "side": side,
+                                               "line": line, "start_line": start_line})
+            shown = {n for n, _ in _side_rows(self._anchor_file(commit, anchor["path"]), side)}
+            for n in (anchor["start_line"] or anchor["line"], anchor["line"]):
+                if n not in shown:
+                    raise StoreError("%s:%d (%s side) is not a line the diff of %s shows; flag the lines it shows"
+                                     % (anchor["path"], n, side, _view_name(commit)))
+            with self._mutate():
+                flag_id = self._conn.execute(
+                    "INSERT INTO flags (review, view, path, side, line, start_line, reason, head, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (self.review_id, commit, anchor["path"], side, anchor["line"], anchor["start_line"], text,
+                     data["range"]["head"], utcnow())).lastrowid
+            return self._flag(self._conn.execute("SELECT * FROM flags WHERE id = ?", (flag_id,)).fetchone(), data)
+
+    def clear_flags(self) -> int:
+        """Remove every flag of the review; returns how many there were."""
+        with self._lock:
+            with self._mutate():
+                return self._conn.execute("DELETE FROM flags WHERE review = ?", (self.review_id,)).rowcount
+
+    @staticmethod
+    def _flag(row, data: dict) -> dict:
+        return {"id": row["id"], "view": row["view"], "path": row["path"], "side": row["side"], "line": row["line"],
+                "start_line": row["start_line"], "reason": row["reason"], "head": row["head"],
+                "created_at": row["created_at"], "stale": row["head"] != data["range"]["head"]}
+
+    def flags(self) -> dict:
+        """The review's flags (2.7): ``{"head", "flags", "views"}``.
+
+        A flag made on another head is ``stale``: its lines may hold other code now, so it shows nowhere.
+        ``views`` maps each view to the flags it shows, as ``{"id", "path", "side", "lines"}``, the rows to mark.
+        """
+        with self._lock:
+            data = self._require_data()
+            listed = self._listed()
+            flags = [self._flag(row, data) for row in self._conn.execute(
+                "SELECT * FROM flags WHERE review = ? ORDER BY id", (self.review_id,))]
+        views = {}
+        for flag in flags:
+            if flag["stale"] or flag["view"] not in listed:
+                continue
+            for view, (path, lines) in self._flag_places(flag, data, listed).items():
+                views.setdefault(view, []).append({"id": flag["id"], "path": path, "side": flag["side"], "lines": lines})
+        return {"head": data["range"]["head"], "flags": flags, "views": views}
+
+    def _flag_places(self, flag: dict, data: dict, listed: set) -> dict:
+        """``{view: (path, lines)}``, where a flag shows: its own view, and for lines of the new side the same lines
+        of the head in "All changes" and "Since your last review", and each line in the listed commit that last
+        changed it (``git blame``), wherever those diffs show them."""
+        native = list(range(flag["start_line"] or flag["line"], flag["line"] + 1))
+        places = {flag["view"]: (flag["path"], native)}
+        if flag["side"] != "new":
+            return places
+        head = data["range"]["head"]
+        path, lines = flag["path"], native
+        if flag["view"] not in (COMBINED, SINCE):  # a commit's lines, carried to the head
+            mapped = [self._map(flag["view"], head, path, n) for n in native]
+            mapped = [m for m in mapped if m and m["status"] in ("same", "moved") and m["line"] is not None]
+            if not mapped:
+                return places
+            path = mapped[0]["path"]
+            lines = [m["line"] for m in mapped if m["path"] == path]
+        for view in (COMBINED, SINCE):
+            if view in listed and view != flag["view"]:
+                self._place(places, view, path, lines)
+        blamed = {}
+        for entry in self._blame(head, path, lines):
+            if entry["commit"] in data["by_sha"] and entry["commit"] != flag["view"]:
+                blamed.setdefault(entry["commit"], []).append(entry)
+        for commit, entries in blamed.items():
+            self._place(places, commit, entries[0]["path"], [e["orig_line"] for e in entries if e["path"] == entries[0]["path"]])
+        return places
+
+    def _place(self, places: dict, view: str, path: str, lines: list) -> None:
+        """Add ``view`` to ``places`` with the ``lines`` its diff shows on the new side, if any."""
+        file_diff = _find_file(self._view_diff(view, False), path)
+        rows = {n for n, _ in _side_rows(file_diff, "new")} if file_diff else set()
+        shown = sorted(n for n in lines if n in rows)
+        if shown:
+            places[view] = (file_diff["path"], shown)
+
+    def _blame(self, head: str, path: str, lines: list) -> list:
+        key = (head, path, tuple(lines))
+        with self._lock:
+            cached = self._blame_cache.get(key)
+        if cached is None:
+            try:
+                cached = gitx.blame_lines(self.repo, head, path, lines)
+            except GitError:
+                cached = []
+            with self._lock:
+                if len(self._blame_cache) >= BLAME_CACHE_MAX:
+                    self._blame_cache.clear()
+                self._blame_cache[key] = cached
+        return cached
 
     # ------------------------------------------------------------------ rounds
 

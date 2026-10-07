@@ -909,3 +909,29 @@ def test_start_since_opens_the_since_your_last_review_view(rereview_repo, ccr_se
         cli.run("stop", check=0)
     finally:
         cli.cleanup()
+
+
+def test_flag_and_flags(rereview_repo, ccr_session_dir):
+    r = rereview_repo
+    cli = Runner(r, str(ccr_session_dir))
+    try:
+        cli.start("--range", "%s..%s" % (r.base2, r.v2), "--since", "reviewed")
+        assert cli.run("flag", "--path", "src/calc.py", "x").stderr == "ccr: a flag needs --path and --line (or --clear)\n"
+        assert "--clear takes no reason" in cli.run("flag", "--clear", "x").stderr
+        flagged = cli.run("flag", "--path", "src/calc.py", "--line", "30", "--start-line", "29", "Unasked: a new check",
+                          check=0).stdout
+        assert flagged == "ccr: flagged since src/calc.py new:29-30 [1]\n"
+        assert cli.run("flag", "--commit", "combined", "--path", "src/calc.py", "--line", "25", "--file", "-",
+                       input="mul now returns 0\n", check=0).stdout == "ccr: flagged combined src/calc.py new:25 [2]\n"
+        assert "is not a line the diff of" in cli.run("flag", "--path", "src/calc.py", "--line", "1", "x").stderr
+        listing = cli.run("flags", check=0).stdout
+        assert listing == ("ccr: 2 flags on %s\n  [1] since src/calc.py new:29-30 — Unasked: a new check\n"
+                           "  [2] combined src/calc.py new:25 — mul now returns 0\n" % r.v2[:10])
+        assert json.loads(cli.run("flags", "--json", check=0).stdout)["views"]["since"][0]["lines"] == [29, 30]
+        cli.run("start", "--range", "%s..%s" % (r.base3, r.v3), check=0)
+        assert cli.run("flags", check=0).stdout == (
+            "ccr: 0 flags on %s\nccr: 2 flags made on an earlier head are hidden; run /re-review again\n" % r.v3[:10])
+        assert cli.run("flag", "--clear", check=0).stdout == "ccr: removed 2 flags\n"
+        cli.run("stop", check=0)
+    finally:
+        cli.cleanup()

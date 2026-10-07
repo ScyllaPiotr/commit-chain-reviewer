@@ -250,6 +250,18 @@ def build_parser() -> Parser:
     cover = add("cover", "set the cover letter (Markdown description of the whole change) of the running review")
     _add_body_options(cover)
 
+    flag = add("flag", "flag lines of a view as a change that needs a closer look (an orange stripe and ⚑ in the UI); "
+               "--clear removes every flag")
+    flag.add_argument("body", nargs="?", metavar="REASON", help="why the lines need a closer look ('-' reads stdin)")
+    flag.add_argument("--file", metavar="F", help="read the reason from a file ('-' = stdin)")
+    flag.add_argument("--commit", metavar="VIEW", help="the view: since (the default), combined or a commit")
+    flag.add_argument("--path", metavar="P")
+    flag.add_argument("--line", type=int, metavar="N")
+    flag.add_argument("--side", choices=("new", "old"), default="new")
+    flag.add_argument("--start-line", type=int, metavar="M", dest="start_line")
+    flag.add_argument("--clear", action="store_true", help="remove every flag of the review")
+    add("flags", "list the review's flags")
+
     add("gh-sync", "mirror the linked pull request's review threads and review bodies from GitHub into the review")
 
     gh_post = add("gh-post", "re-read the linked pull request's discussion, then post GitHub comments and replies "
@@ -899,6 +911,55 @@ def cmd_comment(args) -> int:
     return EXIT_OK
 
 
+def describe_flag(flag: dict) -> str:
+    span = str(flag["line"]) if not flag.get("start_line") else "%d-%d" % (flag["start_line"], flag["line"])
+    return "%s %s %s:%s" % (render.clean(flag["view"], True)[:gitx.SHORT_SHA_LEN], render.clean(flag["path"], True),
+                            flag["side"], span)
+
+
+def cmd_flag(args) -> int:
+    if args.clear:
+        if args.body is not None or args.file is not None or args.path is not None or args.line is not None:
+            raise CliError("--clear takes no reason, path or line")
+        client, _, _ = connect(args)
+        result = client.delete("/api/flags")
+        if args.json:
+            print_json(result)
+        else:
+            out("ccr: removed %s" % plural(result["removed"], "flag"))
+        return EXIT_OK
+    if args.path is None or args.line is None:
+        raise CliError("a flag needs --path and --line (or --clear)")
+    reason = read_body(args)
+    client, _, _ = connect(args)
+    payload = {"path": args.path, "line": args.line, "side": args.side, "start_line": args.start_line, "reason": reason}
+    if args.commit is not None:
+        payload["view"] = args.commit
+    created = client.post("/api/flags", payload)
+    if args.json:
+        print_json(created)
+    else:
+        out("ccr: flagged %s [%d]" % (describe_flag(created), created["id"]))
+    return EXIT_OK
+
+
+def cmd_flags(args) -> int:
+    client, _, _ = connect(args)
+    result = client.get("/api/flags")
+    if args.json:
+        print_json(result)
+        return EXIT_OK
+    current = [f for f in result["flags"] if not f["stale"]]
+    stale = len(result["flags"]) - len(current)
+    out("ccr: %s on %s" % (plural(len(current), "flag"), result["head"][:gitx.SHORT_SHA_LEN]))
+    for flag in current:
+        out("  [%d] %s — %s" % (flag["id"], describe_flag(flag), render.clean(flag["reason"], True)))
+    if stale:
+        out("ccr: %s made on an earlier head %s hidden; run /re-review again" % (
+            plural(stale, "flag"), "is" if stale == 1 else "are"))
+    return EXIT_OK
+
+
 def _for_each_id(args, action, verb: str) -> int:
     """Apply ``action(client, id)`` to every id, printing ``<id>: <verb>`` or ``<id>: ERROR …``; exit 1 if any failed."""
     client, _, _ = connect(args)
@@ -1172,7 +1233,7 @@ def cmd_restore(args) -> int:
 COMMANDS = {
     "start": cmd_start, "serve": cmd_serve, "stop": cmd_stop, "status": cmd_status, "sessions": cmd_sessions,
     "logs": cmd_logs, "open": cmd_open, "reload": cmd_reload, "comments": cmd_comments, "wait": cmd_wait,
-    "cover": cmd_cover, "gh-post": cmd_gh_post, "gh-sync": cmd_gh_sync,
+    "cover": cmd_cover, "gh-post": cmd_gh_post, "gh-sync": cmd_gh_sync, "flag": cmd_flag, "flags": cmd_flags,
     "reply": cmd_reply, "comment": cmd_comment, "resolve": cmd_resolve, "unresolve": cmd_unresolve,
     "edit": cmd_edit, "delete": cmd_delete, "move": cmd_move, "export": cmd_export, "restore": cmd_restore,
 }

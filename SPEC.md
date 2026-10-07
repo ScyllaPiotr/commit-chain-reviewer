@@ -279,6 +279,25 @@ Submitting with zero pending comments **and** empty summary is allowed only when
 10.5, so a page can refetch the review when it changes). `ui.last_seen` is the time of the last
 `/api/events` request whose `User-Agent` does not start with `ccr-cli/`; `connected` = seen within 60 s.
 
+### 2.7 Flag (re-review)
+
+```jsonc
+{"id": 3, "view": "since", "path": "src/calc.py", "side": "new", "line": 25, "start_line": null,
+ "reason": "Not asked for: mul now returns 0 when b is 0", "head": "<range.head when flagged>",
+ "created_at": "…Z", "stale": false}
+```
+
+A flag marks lines of a view as a change that needs a closer look, for a partial review of just those lines in
+context: an agent re-reviewing a pull request puts one on each change it cannot vouch for. It is not a comment: no
+thread, no resolving, no fading, no rounds, no export. `view` is `since` unless given (also `combined` or a listed
+commit, never `worktree`); `reason` is plain text (≤ 64 KiB); both ends of `start_line..line` must be rows the view's
+diff shows on `side`. A flag belongs to the head it was made on: once `range.head` moves, it is `stale`, as its lines
+may hold other code now, and shows nowhere. Where it shows: in its own view; for the new side also on the same lines
+of the head in "All changes" and "Since your last review" (a commit's lines carried there with `map_line`), and on each
+line in the listed commit that last changed it (`blame_lines` at the head) - in every view only on rows its diff
+shows. The old side shows only in its own view (on `since` it is the version reviewed).
+`GET /api/flags` → `{"head", "flags": [Flag], "views": {view: [{"id", "path", "side", "lines": [ascending]}]}}`.
+
 ---
 
 ## 3. Git extraction (`ccr/gitx.py`)
@@ -374,6 +393,9 @@ def parse_raw_and_patch(data: bytes) -> list[FileDiff]     # output of `git diff
   paths (by `path` or `old_path`), plus `git diff reviewed head -- :(literal)<path>…` for them, sorted by path; with
   `tree` null, `git diff reviewed head` limited to `paths` (none → no files). Meta: `pseudo_meta("since", "since",
   "Since your last review")`; each FileDiff's `old_rev` is `tree` or `reviewed`.
+* `blame_lines(repo, rev, path, lines)` (2.7): `git blame --line-porcelain --ignore-revs-file= -L<a>,<b>…
+  --end-of-options <rev> <path>` (blame takes no `--` there) with one `-L` per run of `lines` →
+  `[{"line", "commit", "path", "orig_line"}]` from each header (`<sha> <orig> <final>`) and its `filename`.
 * `show_file(repo, rev, path)`: sha rev → `git cat-file -t --end-of-options <sha>:<path>` must print `blob`
   (else GitError 404 "not a regular file"), then `git cat-file blob --end-of-options <sha>:<path>`; `rev == "worktree"` →
   `p = os.path.join(toplevel, path)`; `realpath(dirname(p))` must be inside `realpath(toplevel)` (else GitError 403);
@@ -424,6 +446,9 @@ CREATE TABLE IF NOT EXISTS rounds (review INTEGER NOT NULL DEFAULT 1, number INT
   submitted_at TEXT NOT NULL, verdict TEXT NOT NULL,
   summary TEXT NOT NULL, base TEXT, head TEXT NOT NULL, commit_shas TEXT NOT NULL,   -- commit_shas: JSON array
   PRIMARY KEY (review, number));
+CREATE TABLE IF NOT EXISTS flags (id INTEGER PRIMARY KEY, review INTEGER NOT NULL, view TEXT NOT NULL,
+  path TEXT NOT NULL, side TEXT NOT NULL, line INTEGER NOT NULL, start_line INTEGER, reason TEXT NOT NULL,
+  head TEXT NOT NULL, created_at TEXT NOT NULL);                            -- 2.7; a new table needs no migration
 ```
 
 On opening an existing file: `meta.schema_version` > current → exit 1 "db schema too new"; `meta.repo` ≠
@@ -452,6 +477,8 @@ class ReviewStore:
     def edit_comment(id, body=None, resolved=None, anchor=None, github=None) -> Comment   # anchor → validate, re-capture snippet, set moved_from
     def set_pr(reference) -> dict                 # PR mode (section 10)
     def set_since(reviewed, at=None) -> dict|None # opens (None: closes) "Since your last review" (2.1); 404 unknown commit
+    def add_flag(path, line, reason, view=None, side=None, start_line=None) -> Flag   # 2.7
+    def flags() -> dict; def clear_flags() -> int
     def github_target(id) -> dict                 # 10.2
     def record_github_post(id, posted) -> Comment # 10.3
     def delete_comment(id, cascade=False)   # root with replies and not cascade → StoreError(409, "thread has replies")
@@ -585,6 +612,9 @@ and `reviewed`); `path` must be non-empty, relative, NUL-free, without
 | POST | `/api/reload` | `{range?, n?, worktree?, first_parent?}` (omitted = keep) → `{"review": Review, "remapped": [...], "outdated": [Comment], "commits_added", "commits_removed"}`; git errors → 400, previous data kept |
 | POST | `/api/cover` | `{text}` → `{"cover", "version"}`; sets the cover letter (≤ 64 KiB Markdown, stored in `meta`; bumps `version` **and** `generation` so open pages re-render) |
 | POST | `/api/pr` | `{url}` → `{"pr", "version"}`; links the review to a pull request (section 10; bumps `version` and `generation`) |
+| GET | `/api/flags` | `{"head", "flags", "views"}` (2.7) |
+| POST | `/api/flags` | `{path, line, reason, view?, side?, start_line?}` → 201 Flag; 400 for lines the view does not show |
+| DELETE | `/api/flags` | `{"removed", "version"}`: removes every flag of the review |
 | POST | `/api/since` | `{reviewed, at?}` → `{"since", "version"}`; opens "Since your last review" from `reviewed` (any rev naming a commit; null closes it; 2.1; bumps `version` and `generation`); 404 unknown commit, 400 bad `at` |
 | POST | `/api/github/sync` | `{viewer, head, threads, reviews}` → `{"threads", "reviews", "added", "updated", "removed", "synced_at"}`; mirrors the pull request's discussion (10.5); 409 outside PR mode |
 | POST | `/api/restore` | `{payload, dry_run?}` → `{"source", "dry_run", "comments", "threads", "rounds", "outdated", "cover", "mirrored": {"matched", "restored", "left_to_sync", "unmatched"}, "dropped_copies", "renamed"}`; fills an empty review from an export (6.4); 409 when the review has comments or rounds of its own, the export is of another pull request or names a commit the repository lacks |
@@ -662,6 +692,11 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
   its `-wal`, `-shm` and `.lock`) of every session that is not running — no live record, and its `.lock` not held —
   and whose database and WAL have not changed for 7 days (`STALE_DB_SECONDS`), printing `ccr: removed <path>, the
   database of a session stopped and unchanged for 7 days`; `ccr start` never removes the database it resumes.
+* `ccr flag --path P --line N [--start-line M] [--side new|old] [--commit VIEW] (REASON | --file F | -)` — flags lines
+  (2.7; the view defaults to `since`): `ccr: flagged since src/calc.py new:29-30 [1]`. `ccr flag --clear` removes
+  every flag (`ccr: removed N flags`). `ccr flags [--json]` lists them: `ccr: N flags on <short head>`, one
+  `  [<id>] <view> <path> <side>:<lines> — <reason>` line each, then `ccr: N flags made on an earlier head are
+  hidden; run /re-review again` when some are stale.
 * `ccr status [--json]` — url, range (+note), `ccr: pr <url>` in PR mode, the `ccr: since …` line when open, commits, counts, rounds (last verdict), ui connected/last seen, log path, db path.
 * `ccr sessions [--json]` — every session file (repo, url, range, alive?, started_at), deleting stale ones; exit 3 if none.
 * `ccr logs [-n N] [-f]` — tail of the server log.
@@ -879,7 +914,8 @@ verdict — then toast *"Round N submitted · K comments"*, errors as a red toas
 * *Commit chain*: "All changes" first, commits oldest→newest with a rail, "Uncommitted changes" last (greyed with
   "(clean)" when it has no files). "Since your last review" (2.1), when open, is a group of its own above them
   (`.commit-item.is-since`, then `li.commit-sep`): tag `Δ`, and below the subject, in small type (`.since-at`), the
-  local date and time of that review (or `of <short R>` without `--since-at`) with its `+N −M`. Item: short sha (mono), subject (ellipsis), author avatar (initials, `av-N` class),
+  local date and time of that review (or `of <short R>` without `--since-at`) with its `+N −M`. A view showing flags
+  (2.7) carries a `⚑N` badge (`.badge-flag`). Item: short sha (mono), subject (ellipsis), author avatar (initials, `av-N` class),
   relative date, `+N −M`, badges (threads; pending yellow, unresolved red), `•` **new** dot (`.is-new`) when the sha is not
   in the last round's `commit_shas` (and a round exists), merge glyph. **Hover/focus** (300 ms) → one shared
   `#tooltip[role=tooltip]` with full subject + body (`pre-wrap`), author, absolute date, sha. **Click** → select
@@ -891,7 +927,7 @@ verdict — then toast *"Round N submitted · K comments"*, errors as a red toas
   (`ccr:folders:<repo>`); rows show status letter (A green, M yellow, D red, R blue, T purple), `+N −M`, thread
   count. `#file-filter`: case-insensitive substring on the full path; while non-empty the tree is flat (matches only)
   **and** non-matching file cards are hidden in the main pane (`N of 40 files — clear`; zero → *"No files match"*).
-  Click → `navigateTo({sha, path})`.
+  Click → `navigateTo({sha, path})`. A file with flags in the view shows `⚑N` (`.fcount`).
 
 **Main pane** (`#main` is the **only** vertical scroller; `body`, `.file-card`, `.diff-body` keep `overflow-y: visible`):
 
@@ -901,6 +937,12 @@ verdict — then toast *"Round N submitted · K comments"*, errors as a red toas
   on and the head, plus a `.since-conflicts` note naming the paths compared with the reviewed commit itself; with no
   files *"Nothing changed since your last review"*). In PR mode its old side, the version reviewed, offers only
   *Ask AI*: the gutter hides *GH comment* there, the editor has no intent switch and its threads take questions.
+  A view showing flags (2.7) has `#flag-nav` (*⚑ Next (N)*) in the header actions: each click selects the next flag's
+  lines in file order, wrapping around (no keyboard shortcut). Flagged rows get an orange 4 px stripe on their left
+  edge (`tr.line.is-flagged`; in split view on the flag's side, `td.num.is-flagged`) and the first one shown a ⚑
+  (`.flag-mark`) whose tooltip is the reason. Flags are fetched (`GET /api/flags`) on load and on every change; stale
+  ones raise `#banner-flags` (*"N flagged changes were marked on an earlier head of the pull request, so they are
+  hidden: run /re-review again"*).
   The **All changes** header additionally shows the cover letter (`#cover-letter`, safe Markdown; *"No cover letter"*
   hint when empty), `#btn-comment-review` (*Comment on the whole series*, anchor `kind=review`) and a muted `#outdated-note`
   (*"N comments are anchored to commits that left the series (see `ccr comments --outdated`)"*, hidden at 0); review-level
@@ -1075,7 +1117,7 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
 
 `style.css` defines all colours as custom properties on `:root[data-theme=light]` and `:root[data-theme=dark]`:
 `--bg --bg-2 --bg-3 --fg --fg-muted --border --accent --accent-fg --diff-add --diff-add-strong --diff-del --diff-del-strong
---diff-hunk --diff-num --diff-empty --line-selected --line-hover --line-flash --pending --resolved --new --danger --shadow --row-h
+--diff-hunk --diff-num --diff-empty --line-selected --line-hover --line-flash --pending --resolved --new --danger --flag --flag-bg --shadow --row-h
 --file-header-h --top-h`. Light resembles GitHub (`#e6ffec/#abf2bc`, `#ffebe9/rgba(255,129,130,.4)`, `#ddf4ff`), dark
 resembles GitHub dark-dimmed. `prefers-reduced-motion` disables animations. Focus rings visible. Buttons have
 `aria-label`s. Relative times refresh every 60 s via `[data-ts]`.
@@ -1086,7 +1128,7 @@ resembles GitHub dark-dimmed. `prefers-reduced-motion` disables animations. Focu
 |---|---|
 | Regions | `#app`, `#topbar`, `#sidebar`, `#main`, `#toasts`, `#tooltip` |
 | Topbar | `#pr-link` (PR mode only), `#btn-viewmode` (text = current mode "Unified"/"Split"), `#btn-wrap`, `#btn-ws`, `#btn-theme`, `#btn-reload`, `#btn-submit` (`.label`, `.badge-pending`; `:disabled` while nothing is pending), `#btn-copy-link`, `#btn-sidebar` |
-| Commit list | `#commit-list .commit-item[data-sha]` (`.is-selected`, `.is-range`, `.is-new`, `.commit-badge`) |
+| Commit list | `#commit-list .commit-item[data-sha]` (`.is-selected`, `.is-range`, `.is-new`, `.commit-badge`, `.badge-flag`; `.is-since` + `li.commit-sep`, `.since-at`) |
 | File tree | `#file-tree .tree-folder[data-dir]`, `.tree-file[data-path]`, `#file-filter`, `#filter-status` (main pane: *"N of M files — clear"*) |
 | Header | `#commit-header .subject`, `.sha-copy`, `#btn-comment-commit`, `#commit-header .thread-block[data-key-host="commit"]`; combined view only: `#outdated-note` (hidden at 0), `#cover-letter` (`.cover-body` rendered Markdown, or `.is-empty` with the *"No cover letter"* hint), `#btn-comment-review`, `#commit-header .thread-block[data-key-host="review"]` |
 | File card | `.file-card[data-path][data-rendered="0|1"]` → `.file-header` (`.file-path`, `.status-badge`, `.btn-comment-file` — in PR mode two, `[data-intent="question"]` and `[data-intent="github"]` —, `.btn-collapse`), `.diff-body`, `.file-card.is-collapsed` |
@@ -1094,7 +1136,8 @@ resembles GitHub dark-dimmed. `prefers-reduced-motion` disables animations. Focu
 | Gutter | `button.btn-add-comment[data-side][data-line]` (shared, moved into the hovered `td.num`); in PR mode two of them, `[data-intent="question"]` (*Ask AI*) and `[data-intent="github"]` (*GH comment*), moved together and shown once the PR-mode `[+]` (`.btn-fork`) opens |
 | Editor | `tr.editor` / `div.editor-block` → `form.comment-editor[data-key][data-tab]` (`[data-intent="github"]` while it writes a GitHub comment; `.editor-head > .editor-tabs > .editor-tab[data-tab]`, in PR mode on a line or file `.editor-head > .editor-intent > .intent-btn[data-intent]`, `textarea`, `.md-preview`, `.btn-submit-comment`, `.btn-cancel-comment`) |
 | Thread | `tr.threads[data-key]` / `div.thread-block` → `.thread[data-thread-id]` (`.is-resolved`, `.has-new`) → `.comment[data-id][data-author]` (`.comment-meta` `.author .time .tag-pending .tag-round .tag-edited .tag-new .tag-moved`, `a.tag-from[data-sha]` on a projected root, PR mode: `.tag-question`, `.tag-github` / `a.tag-github.is-posted`, `.comment-body`, `.comment-actions` `.act-edit .act-delete .act-reply .act-resolve`), `button.btn-reply`, `button.btn-show-resolved` |
-| Banners/toasts | `#banner-disconnected`, `#banner-compare`, `#banner-reloaded`, `#toasts .toast.info|error|success`, `#notice-token` |
+| Flags (2.7) | `#flag-nav`, `tr.line.is-flagged`, `td.num.is-flagged`, `.flag-mark[title]`, `.tree-file .fcount`, `#banner-flags` |
+| Banners/toasts | `#banner-disconnected`, `#banner-compare`, `#banner-reloaded`, `#banner-flags`, `#toasts .toast.info|error|success`, `#notice-token` |
 | Readiness | `body[data-ready="1"]` after the first full render; `body[data-loading="1"]` while the server reports `loading` |
 
 **Anchor keys** (`data-key`, `threadsByKey: Map<key, rootId[]>` sorted by `created_at`): `line:<commit>|<path>|<side>|<endLine>`,
@@ -1168,7 +1211,11 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
   `diff_since`), `test_store.py` (the view, its comments and projections, the old side refused for GitHub, the reload
   that conflicts, closing it, persistence, no shared base, the schema-3 migration), `test_server.py` (`/api/since`),
   `test_cli.py` (`start --since`, also on reuse) and `test_e2e.py` (the driver's `since` scenario: the group of its
-  own with the review's date and time, the header, and the reviewed side taking questions only).
+  own with the review's date and time, the header, and the reviewed side taking questions only). Flags (2.7):
+  `test_gitx.py` (`blame_lines`), `test_store.py` (their places, a commit's flag carried to the head, the checks, going
+  stale when the head moves), `test_server.py` and `test_cli.py` (`flag`, `flags`, `--clear`), and the `since`
+  scenario (stripes and ⚑ with the reason in unified and split view, the counts, *⚑ Next*, the flag in the commit that
+  last changed the line, and the banner once the head moved).
 * `test_gitx.py`: `parse_patch` on hand-written patches (rename, 100 % rename, binary, mode-only, no-newline ×2,
   multi-hunk, `/dev/null`, spaces/quoted paths, `@@ -1 +1 @@`, `--- ` content line, empty context line, type change =
   two sections); `list_commits` order/fields/`%B` split; `commit_stats` vs `--numstat` for every commit incl. merge and
