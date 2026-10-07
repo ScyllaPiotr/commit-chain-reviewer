@@ -52,9 +52,10 @@ __all__ = [
     "default_db_path",
     "COMBINED",
     "WORKTREE",
+    "SINCE",
 ]
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 BODY_MAX_BYTES = 64 << 10
 SNIPPET_MAX_LINES = 32
 SNIPPET_MAX_BYTES = 8 << 10
@@ -70,9 +71,11 @@ ANCHOR_KINDS = ("line", "file", "commit", "review")
 SIDES = ("old", "new")
 COMBINED = "combined"
 WORKTREE = "worktree"
+SINCE = "since"  # "Since your last review": what the head changed since a review of an earlier version (2.1)
 COMPARE_PREFIX = "compare:"
 SNIPPET_CUT_MARK = "…"
 UNKNOWN_LOCATION = {"path": None, "line": None, "status": "unknown"}
+NO_SINCE = "the Since your last review view is not open (start ccr with --since REV)"
 NO_PR = "this review is not linked to a GitHub pull request (start ccr with --pr URL)"
 GITHUB_LOCAL = {"status": "local"}
 GITHUB_AUTHOR = "github"  # the author of comments mirrored from the pull request's discussion (10.5)
@@ -100,7 +103,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY, started_at TEXT NOT NULL,
   range_spec TEXT NOT NULL DEFAULT '', cover TEXT NOT NULL DEFAULT '', chain TEXT NOT NULL DEFAULT '{}',
-  pr TEXT NOT NULL DEFAULT '');
+  pr TEXT NOT NULL DEFAULT '', since TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY, parent_id TEXT REFERENCES comments(id) ON DELETE CASCADE,
   review INTEGER NOT NULL DEFAULT 1,
@@ -190,14 +193,17 @@ def _columns(conn: sqlite3.Connection, table: str) -> set:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Schema 1 (one nameless review per repository) → 2 (reviews are rows and every comment carries one) → 3.
+    """Schema 1 (one nameless review per repository) → 2 (reviews are rows and every comment carries one) → 3 → 4.
 
     Everything a schema-1 database holds belonged to a single review, so it becomes review 1; the cover
     letter and the remembered chain move out of ``meta`` into its row.  Schema 3 adds the pull request a
-    review is linked to and the GitHub state of a comment (PR mode), both empty for existing rows.
+    review is linked to and the GitHub state of a comment (PR mode), both empty for existing rows.  Schema 4
+    adds the review a "Since your last review" view starts from, empty for existing rows.
     """
     if "pr" not in _columns(conn, "reviews"):
         conn.execute("ALTER TABLE reviews ADD COLUMN pr TEXT NOT NULL DEFAULT ''")
+    if "since" not in _columns(conn, "reviews"):
+        conn.execute("ALTER TABLE reviews ADD COLUMN since TEXT NOT NULL DEFAULT ''")
     if "github" not in _columns(conn, "comments"):
         conn.execute("ALTER TABLE comments ADD COLUMN github TEXT")
     if "review" not in _columns(conn, "comments"):
@@ -431,6 +437,7 @@ class ReviewStore:
         self.previous_review = None
         self.cover = ""
         self.pr = None
+        self.since = None
         self._chain_memory = {}
         try:
             if self.db_path != ":memory:":
@@ -483,6 +490,7 @@ class ReviewStore:
         self.review_id, self.review_started_at, self.resumed = row["id"], row["started_at"], resumed
         self.cover = row["cover"] or ""
         self.pr = json.loads(row["pr"]) if row["pr"] else None
+        self.since = json.loads(row["since"]) if row["since"] else None
         self._chain_memory = {sha: tuple(entry) for sha, entry in json.loads(row["chain"] or "{}").items()}
 
     def _select_review(self) -> None:
@@ -565,6 +573,46 @@ class ReviewStore:
             self.generation += 1
         return dict(pr)
 
+    def set_since(self, reviewed, at=None):
+        """Open the "Since your last review" view (2.1) from ``reviewed``, the commit a review was submitted on, at
+        ``at`` (an ISO-8601 UTC time, or None); ``reviewed=None`` closes it.  Returns the view's ``since`` block
+        (2.6), None while the first load is still running or once the view is closed.
+
+        ``reviewed`` is any rev naming a commit of this repository; the view is computed here and again on every
+        load, as the head and the base move.  Bumps ``generation`` as well as ``version``.
+        """
+        if reviewed is not None and (not isinstance(reviewed, str) or not reviewed):
+            raise StoreError("reviewed must be a commit")
+        if at is not None and (not isinstance(at, str) or not _GITHUB_TIME_RE.match(at)):
+            raise StoreError("at must be a UTC time like 2026-10-07T12:34:56Z")
+        record = None
+        if reviewed is not None:
+            try:
+                record = {"reviewed": gitx.rev_parse(self.repo, reviewed), "at": at}
+            except GitError as exc:
+                if exc.status == 404:
+                    raise NotFoundError("commit %s is not in this repository; fetch it first" % reviewed) from None
+                raise StoreError(str(exc), exc.status) from exc
+        with self._load_lock:
+            with self._lock:
+                data = self._data
+            fresh = None
+            if data is not None:
+                fresh = dict(data, cache={key: diff for key, diff in self._diff_cache.items() if key[0] != SINCE})
+                try:
+                    self._extract_since(fresh, record)
+                except GitError as exc:
+                    raise StoreError(str(exc), exc.status) from exc
+            with self._mutate():
+                self._conn.execute("UPDATE reviews SET since = ? WHERE id = ?",
+                                   (json.dumps(record) if record else "", self.review_id))
+                self.since = record
+                if fresh is not None:
+                    self._data = fresh
+                    self._diff_cache = fresh["cache"]
+                self.generation += 1
+            return self._since_block(fresh)
+
     def set_server_info(self, info: dict) -> None:
         """Record the ``server`` block of ``review()``/``state()`` (pid, port, started_at, version)."""
         with self._lock:
@@ -607,8 +655,10 @@ class ReviewStore:
                 worktree_flag = self.worktree if worktree is None else bool(worktree)
                 first_parent_flag = self.first_parent if first_parent is None else bool(first_parent)
                 previous_shas = [c["sha"] for c in self._data["commits"]] if self._data else []
+                since = self.since
             try:
                 fresh = self._extract(spec, n, previous_range, worktree_flag, first_parent_flag)
+                self._extract_since(fresh, since)
                 with self._lock:
                     return self._install(fresh, previous_shas)
             finally:
@@ -647,11 +697,46 @@ class ReviewStore:
             "combined": _meta_from_diff(combined),
             "worktree": _meta_from_diff(worktree_diff) if worktree_diff else None,
             "worktree_head": worktree_head,
+            "since": None,
             "first_parent": first_parent,
             "branch": gitx.current_branch(self.repo),
             "paths": paths,
             "cache": cache,
         }
+
+    def _extract_since(self, fresh: dict, record) -> None:
+        """Compute the "Since your last review" view of ``fresh`` (in place) from ``record`` (``self.since``).
+
+        ``old_base`` is where the reviewed version branched from what is now the base; the reviewed version
+        rebuilt on the base (``tree``) compared with the head leaves out what the new base brought.  Without a
+        shared base the reviewed commit is compared directly, on the paths of the pull request.
+        """
+        fresh["since"] = None
+        if record is None:
+            return
+        rng = fresh["range"]
+        combined = fresh["cache"].get((COMBINED, False)) or gitx.diff_range(self.repo, rng["base"], rng["head"])
+        reviewed = record["reviewed"]
+        old_base = gitx.merge_base(self.repo, reviewed, rng["base"]) if rng["base"] else None
+        if old_base is None:
+            tree, conflicts = None, []
+            paths = sorted({p for f in combined["files"] for p in (f["path"], f["old_path"]) if p})
+        else:
+            rebuilt = gitx.rebuild_tree(self.repo, old_base, rng["base"], reviewed)
+            tree, conflicts, paths = rebuilt["tree"], rebuilt["conflicts"], []
+        diff = gitx.diff_since(self.repo, tree, reviewed, rng["head"], conflicts, paths)
+        fresh["cache"][(SINCE, False)] = diff
+        fresh["since"] = {"reviewed": reviewed, "at": record.get("at"), "old_base": old_base, "tree": tree,
+                          "conflicts": conflicts, "paths": paths, "meta": _meta_from_diff(diff)}
+        fresh["paths"] = set(fresh["paths"]) | {p for f in diff["files"] for p in (f["path"], f["old_path"]) if p}
+
+    @staticmethod
+    def _since_block(data):
+        """The ``since`` block of the Review document (2.6), or None."""
+        since = (data or {}).get("since")
+        if since is None:
+            return None
+        return {key: since[key] for key in ("reviewed", "at", "old_base", "tree", "conflicts")}
 
     def _install(self, fresh: dict, previous_shas: list) -> dict:
         """Re-anchor comments against the new chain, persist, and make ``fresh`` the current data.
@@ -660,7 +745,8 @@ class ReviewStore:
         ``outdated`` every root that is (still) anchored outside the new chain.
         """
         new_shas = [c["sha"] for c in fresh["commits"]]
-        listed = set(new_shas) | {COMBINED} | ({WORKTREE} if fresh["worktree"] else set())
+        listed = set(new_shas) | {COMBINED} | ({WORKTREE} if fresh["worktree"] else set()) \
+            | ({SINCE} if fresh["since"] else set())
         comments = self._all_comments()
         memory = dict(self._chain_memory)
         memory.update((c["sha"], (index, c["subject"])) for index, c in enumerate(fresh["commits"]))
@@ -757,6 +843,8 @@ class ReviewStore:
         listed = set(self._data["by_sha"]) | {COMBINED}
         if self._data["worktree"] is not None:
             listed.add(WORKTREE)
+        if self._data["since"] is not None:
+            listed.add(SINCE)
         return listed
 
     def _row_to_comment(self, row, listed) -> dict:
@@ -844,7 +932,8 @@ class ReviewStore:
             commits = []
             if data is not None:
                 counts = self._root_counts()
-                metas = [data["combined"]] + data["commits"] + ([data["worktree"]] if data["worktree"] else [])
+                metas = ([data["since"]["meta"]] if data["since"] else []) + [data["combined"]] + data["commits"] \
+                    + ([data["worktree"]] if data["worktree"] else [])
                 commits = [dict(meta, comment_count=counts.get(meta["sha"], 0)) for meta in metas]
             return {
                 "repo": {
@@ -859,6 +948,7 @@ class ReviewStore:
                 "options": {"worktree": self.worktree},
                 "cover": self.cover,
                 "pr": dict(self.pr) if self.pr else None,
+                "since": self._since_block(data),
                 "commits": commits,
                 "version": self.version,
                 "generation": self.generation,
@@ -929,6 +1019,10 @@ class ReviewStore:
             if data["worktree"] is None:
                 raise NotFoundError("the worktree view is not enabled (start with --worktree)")
             return WORKTREE
+        if ref == SINCE:
+            if data["since"] is None:
+                raise NotFoundError(NO_SINCE)
+            return SINCE
         if ref.startswith(COMPARE_PREFIX):
             raise StoreError("compare views are not commentable")
         sha = self._listed_sha(ref)
@@ -941,7 +1035,7 @@ class ReviewStore:
         try:
             return self._resolve_view(ref)
         except NotFoundError:
-            if ref == WORKTREE:
+            if ref in (WORKTREE, SINCE):
                 raise
         try:
             sha = gitx.rev_parse(self.repo, ref)
@@ -959,10 +1053,16 @@ class ReviewStore:
             data = self._require_data()
             base, head = data["range"]["base"], data["range"]["head"]
             meta = data["by_sha"].get(view)
+            since = data["since"]
         if view == COMBINED:
             produce = partial(gitx.diff_range, self.repo, base, head, ws_ignore)
         elif view == WORKTREE:
             produce = partial(gitx.diff_worktree, self.repo, ws_ignore)
+        elif view == SINCE:
+            if since is None:
+                raise NotFoundError(NO_SINCE)
+            produce = partial(gitx.diff_since, self.repo, since["tree"], since["reviewed"], head, since["conflicts"],
+                              since["paths"], ws_ignore)
         else:
             parent = meta["parents"][0] if meta["parents"] else None
             produce = partial(gitx.diff_commit, self.repo, view, parent, ws_ignore)
@@ -1013,6 +1113,8 @@ class ReviewStore:
         revs = self._compare_revs()
         if data["worktree"] is not None:
             revs.update((WORKTREE, data["worktree_head"]))
+        if data["since"] is not None:  # the old side of "Since your last review": the rebuilt tree or the reviewed commit
+            revs.update(rev for rev in (data["since"]["tree"], data["since"]["reviewed"]) if rev)
         return revs
 
     def file(self, rev, path) -> dict:
@@ -1297,6 +1399,9 @@ class ReviewStore:
             raise StoreError("a GitHub review comment goes on a line or a file")
         if anchor["commit"] == WORKTREE:
             raise StoreError("uncommitted changes are not part of the pull request")
+        if anchor["commit"] == SINCE and anchor["kind"] == "line" and anchor["side"] == "old":
+            raise StoreError("the old side of Since your last review is the version you reviewed, which the pull "
+                             "request no longer has; ask Claude about it, or comment on the new side")
         if comment["outdated"]:
             raise StoreError("the comment is anchored to a commit that left the review", 409)
         data = self._require_data()
@@ -1578,7 +1683,7 @@ class ReviewStore:
 
     def _restore_commit(self, ref, resolved: dict):
         """The full sha of an export's anchor commit (a view name, a full sha, or an abbreviated one)."""
-        if ref is None or ref in (COMBINED, WORKTREE) or _is_full_sha(ref):
+        if ref is None or ref in (COMBINED, WORKTREE, SINCE) or _is_full_sha(ref):
             return ref
         if ref not in resolved:
             try:
@@ -1608,6 +1713,8 @@ class ReviewStore:
                 rev = WORKTREE if side == "new" else data["range"]["head"]
             elif commit == COMBINED:
                 rev = data["range"]["head"] if side == "new" else data["range"]["base"]
+            elif commit == SINCE:
+                rev = data["range"]["head"] if side == "new" else None
             else:
                 rev = commit if side == "new" else gitx.rev_parse(self.repo, commit + "^")
             rows = gitx.show_file(self.repo, rev, anchor["path"])["content"].split("\n") if rev else []
@@ -1824,6 +1931,8 @@ class ReviewStore:
             from_rev = data["worktree_head"]
         elif commit == COMBINED:
             from_rev = data["range"]["head"] if side == "new" else data["range"]["base"]
+        elif commit == SINCE:
+            from_rev = data["range"]["head"] if side == "new" else self._since_old_rev(anchor["path"])
         elif side == "new":
             from_rev = commit
         else:
@@ -1836,14 +1945,27 @@ class ReviewStore:
         except GitError:
             return dict(UNKNOWN_LOCATION)
 
+    def _since_old_rev(self, path):
+        """The revision the old side of ``path`` in "Since your last review" comes from, or None."""
+        try:
+            file_diff = _find_file(self._view_diff(SINCE, False), path)
+        except StoreError:
+            return None
+        return file_diff["old_rev"] if file_diff else None
+
     # ------------------------------------------------------------------ projection into another view
 
     def _view_revs(self, data: dict, view: str):
-        """``(old_rev, new_rev)`` of a view; ``WORKTREE`` stands for the working tree, None for "no such side"."""
+        """``(old_rev, new_rev)`` of a view; ``WORKTREE`` stands for the working tree, None for "no such side".
+
+        The old side of "Since your last review" is the version reviewed, which no other view shows.
+        """
         if view == COMBINED:
             return data["range"]["base"], data["range"]["head"]
         if view == WORKTREE:
             return data["worktree_head"], WORKTREE
+        if view == SINCE:
+            return None, data["range"]["head"]
         meta = data["by_sha"].get(view)
         if meta is None:
             return None, None
@@ -1926,7 +2048,7 @@ class ReviewStore:
         try:
             return self._resolve_commit_ref(ref)
         except NotFoundError:
-            if ref in (COMBINED, WORKTREE) or _is_full_sha(ref):
+            if ref in (COMBINED, WORKTREE, SINCE) or _is_full_sha(ref):
                 return ref
             if _is_hex_prefix(ref):
                 rows = self._conn.execute("SELECT DISTINCT commit_sha FROM comments WHERE review = ? AND commit_sha LIKE ?",

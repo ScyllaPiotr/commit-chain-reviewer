@@ -237,6 +237,8 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
 .commit-item .new-dot { display: none; width: 7px; height: 7px; border-radius: 50%; background: var(--new); flex-shrink: 0; }
 .commit-item.is-new .new-dot { display: inline-block; }
 .commit-item.is-clean { opacity: .6; }
+.commit-item.is-since .since-at { font-size: 10px; }
+.commit-sep { height: 1px; margin: 4px 8px; background: var(--border); list-style: none; }
 .commit-item .unseen-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--new); }
 .avatar {
   display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
@@ -300,6 +302,7 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
 .cover-letter .cover-body { max-height: 50vh; overflow: auto; }
 .cover-letter .md pre { background: var(--bg); }
 .commit-header .explain { color: var(--fg-muted); font-size: 13px; margin-top: 6px; }
+.commit-header .since-conflicts { background: var(--pending-bg); color: var(--pending); font-size: 13px; margin-top: 6px; padding: 6px 10px; border-radius: var(--radius); }
 .commit-header .stats { display: inline-flex; gap: 8px; font-family: var(--mono); font-size: 12px; }
 .thread-block { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
 .thread-block:empty { display: none; }

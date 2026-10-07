@@ -3,7 +3,8 @@
 Every public function shells out to ``git`` with a hardened argument vector
 (section 3.1), parses the NUL-separated machine output into plain dicts
 (CommitMeta / FileStat / FileDiff, sections 2.2-2.3) and never modifies the
-repository.  ``parse_patch`` and ``parse_raw_and_patch`` are pure parsers of
+repository (``rebuild_tree`` only adds unreferenced objects to its object
+store).  ``parse_patch`` and ``parse_raw_and_patch`` are pure parsers of
 unified-diff text; the other helpers wrap one git invocation each.
 
 Byte layouts verified against git 2.55.0 (``tests/test_gitx.py`` re-checks them):
@@ -52,6 +53,8 @@ __all__ = [
     "diff_commit",
     "diff_range",
     "diff_worktree",
+    "rebuild_tree",
+    "diff_since",
     "show_file",
     "map_line",
     "parse_patch",
@@ -64,6 +67,7 @@ __all__ = [
 ]
 
 MIN_GIT_VERSION = (2, 24)
+REBUILD_GIT_VERSION = (2, 40)  # git merge-tree --merge-base
 MAX_LINE_CHARS = 20000
 FILE_LINE_CAP = 5000
 RESPONSE_LINE_CAP = 30000
@@ -1020,6 +1024,50 @@ def diff_range(repo, base, head, ws_ignore=False) -> dict:
         _check_rev_arg(base)
     files = _diff_files(repo, base if base is not None else empty_tree(repo), head, ws_ignore)
     return _commit_diff(pseudo_meta("combined", "combined", "All changes"), _set_revs(files, base, head))
+
+
+def rebuild_tree(repo, old_base, new_base, reviewed) -> dict:
+    """``reviewed`` re-applied from ``old_base`` onto ``new_base``: ``{"tree", "conflicts"}`` (section 3.2).
+
+    ``git merge-tree --write-tree --merge-base=old_base new_base reviewed`` writes the tree even when paths
+    conflict, with conflict markers in them; ``conflicts`` lists those paths so the caller can take them from
+    ``reviewed`` itself.  Needs git >= 2.40.
+    """
+    for rev in (old_base, new_base, reviewed):
+        _check_rev_arg(rev)
+    if check_version() < REBUILD_GIT_VERSION:
+        raise GitError("rebuilding the reviewed version on the new base needs git >= %d.%d" % REBUILD_GIT_VERSION)
+    proc = _git(repo, ["merge-tree", "--write-tree", "--name-only", "-z", "--no-messages",
+                       "--merge-base=" + old_base, "--end-of-options", new_base, reviewed], ok_codes=(0, 1))
+    tokens = proc.stdout.split(b"\0")
+    tree = _decode(tokens[0]).strip()
+    if not _is_sha(tree):
+        raise GitError("git merge-tree printed no tree")
+    return {"tree": tree, "conflicts": [_decode(token) for token in tokens[1:] if token]}
+
+
+def diff_since(repo, tree, reviewed, head, conflicts=(), paths=(), ws_ignore=False) -> dict:
+    """CommitDiff of the ``since`` view (section 2.1): what ``head`` changed since ``reviewed`` was reviewed.
+
+    ``tree`` is ``reviewed`` rebuilt on ``head``'s base (``rebuild_tree``), so changes the new base brought cancel
+    out; each of its ``conflicts`` is compared from ``reviewed`` instead.  Without a tree (``reviewed`` shares no
+    base with ``head``) everything is compared from ``reviewed``, limited to ``paths``.  Every FileDiff's
+    ``old_rev`` says which of the two its old side is.
+    """
+    for rev in (reviewed, head) + ((tree,) if tree is not None else ()):
+        _check_rev_arg(rev)
+    literal = lambda names: [":(literal)" + name for name in names]
+    if tree is None:
+        files = _set_revs(_diff_files(repo, reviewed, head, ws_ignore, literal(paths)), reviewed, head) if paths else []
+    else:
+        skipped = set(conflicts)
+        files = [f for f in _diff_files(repo, tree, head, ws_ignore) if f["path"] not in skipped
+                 and f["old_path"] not in skipped]
+        _set_revs(files, tree, head)
+        if skipped:
+            files += _set_revs(_diff_files(repo, reviewed, head, ws_ignore, literal(sorted(skipped))), reviewed, head)
+            files.sort(key=lambda f: f["path"].encode("utf-8", "surrogateescape"))
+    return _commit_diff(pseudo_meta("since", "since", "Since your last review"), files)
 
 
 def _untracked_paths(repo) -> list:

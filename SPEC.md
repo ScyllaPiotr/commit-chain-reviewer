@@ -84,6 +84,18 @@ A review shows a **range** `base..head` as an ordered chain of commits (oldest �
 | `<40/64-hex>`    | a real commit; diff is against its **first parent** (root: empty tree) | always |
 | `combined`       | `git diff base head` — everything in the range at once ("All changes") | always (even for 1 commit) |
 | `worktree`       | uncommitted changes vs `HEAD`: staged + unstaged + **untracked** files  | `--worktree` given |
+| `since`          | "Since your last review": what `head` changed since an earlier review   | `--since REV` given |
+
+**Since your last review** (a re-review). `--since R` names the commit an earlier review was submitted on (the
+reviewed head; GitHub's `PullRequestReview.commit.oid`), `--since-at T` when that review was submitted. With
+`B = range.base` and `H = range.head`, `old_base = merge-base(R, B)` is where the reviewed version branched from
+what is now the base, and `tree = rebuild_tree(old_base, B, R)` is the version reviewed re-applied onto `B`. The
+view is `diff(tree, H)`: exactly what the author changed since the review, while what the new base brought cancels
+out. A path that conflicts in the rebuild is compared from `R` itself instead (its `old_rev` is `R`), so upstream
+changes may show in it; without a shared base (`old_base` null) every path of the pull request is compared from `R`.
+It is recomputed on every load, as `B` and `H` move. Its new side is `H`, so comments there behave as on "All
+changes" (they project, and in PR mode can be GitHub comments, 10.2); its old side is the version reviewed, which no
+other view shows: comments there stay in this view and are questions only.
 
 **Range spec grammar** (`--range SPEC` or `-n N`):
 
@@ -113,16 +125,16 @@ Commits listed = `git rev-list --reverse --topo-order [--first-parent] base..hea
 
 ```jsonc
 {
-  "sha": "9fceb02…40hex",          // or "combined" / "worktree"
-  "short_sha": "9fceb02d3a",       // 10 chars; "combined"/"worktree" for pseudo-commits
-  "kind": "commit",                // "commit" | "combined" | "worktree"
+  "sha": "9fceb02…40hex",          // or "combined" / "worktree" / "since"
+  "short_sha": "9fceb02d3a",       // 10 chars; "combined"/"worktree"/"since" for pseudo-commits
+  "kind": "commit",                // "commit" | "combined" | "worktree" | "since"
   "parents": ["…"],                // [] for pseudo-commits and root commits
   "is_merge": false,
   "shallow_boundary": false,       // true for a parentless commit that is a shallow-clone boundary
   "author": {"name": "…", "email": "…"},
   "author_date": "2026-…Z",        // null for pseudo-commits
   "commit_date": "2026-…Z",        // null for pseudo-commits
-  "subject": "first line of message",   // "All changes" / "Uncommitted changes" for pseudo-commits
+  "subject": "first line of message",   // "All changes" / "Uncommitted changes" / "Since your last review" for pseudo-commits
   "body": "rest of message",       // may be empty; internal newlines kept; truncated at 64 KiB
   "stats": {"files": 3, "additions": 40, "deletions": 12},
   "files": [FileStat, …],          // ordered as git orders them
@@ -249,7 +261,8 @@ Submitting with zero pending comments **and** empty summary is allowed only when
   "options": {"worktree": true},
   "cover": "Markdown description of the whole change (the PR cover letter); \"\" when none",
   "pr": null,                        // PR mode (10.1): {"url", "host", "owner", "repo", "number"} of the linked pull request
-  "commits": [CommitMeta, …],        // "combined" FIRST, then real commits oldest→newest, then "worktree" LAST
+  "since": null,                     // re-review (2.1): {"reviewed", "at", "old_base", "tree", "conflicts": [paths]}
+  "commits": [CommitMeta, …],        // "since" (when open) FIRST, "combined", real commits oldest→newest, "worktree" LAST
   "version": 17, "generation": 2, "loading": false, "now": "…Z",
   "counts": {"pending": 3, "submitted": 5, "unresolved": 4, "total": 8, "outdated": 0},   // root comments only, except total (all comments) and pending (all pending comments)
   "rounds": [Round, …],
@@ -353,6 +366,14 @@ def parse_raw_and_patch(data: bytes) -> list[FileDiff]     # output of `git diff
   (`nonl` on the last when no trailing newline). `status: "A"`, `old_*: null`, `old_rev: <HEAD sha>`, `new_rev: "worktree"`,
   `new_blob: null`. Conflicted files appear as `M` with markers in the new side. Intent-to-add files come from `git diff HEAD` only.
   If `git diff HEAD` fails because of `index.lock`, retry once after 200 ms, then GitError.
+* `rebuild_tree(repo, old_base, new_base, reviewed)` (2.1; git ≥ 2.40, else GitError): `git merge-tree --write-tree
+  --name-only -z --no-messages --merge-base=<old_base> --end-of-options <new_base> <reviewed>`, exit 0 (clean) or 1
+  (conflicts). Output: the tree sha, `\0`, then one `\0`-terminated name per conflicted path → `{"tree", "conflicts"}`.
+  The tree is written even with conflicts (with conflict markers in those paths). It writes unreferenced objects only.
+* `diff_since(repo, tree, reviewed, head, conflicts, paths, ws_ignore)`: `git diff tree head` without the conflicted
+  paths (by `path` or `old_path`), plus `git diff reviewed head -- :(literal)<path>…` for them, sorted by path; with
+  `tree` null, `git diff reviewed head` limited to `paths` (none → no files). Meta: `pseudo_meta("since", "since",
+  "Since your last review")`; each FileDiff's `old_rev` is `tree` or `reviewed`.
 * `show_file(repo, rev, path)`: sha rev → `git cat-file -t --end-of-options <sha>:<path>` must print `blob`
   (else GitError 404 "not a regular file"), then `git cat-file blob --end-of-options <sha>:<path>`; `rev == "worktree"` →
   `p = os.path.join(toplevel, path)`; `realpath(dirname(p))` must be inside `realpath(toplevel)` (else GitError 403);
@@ -391,7 +412,7 @@ explicit file via `--db`. For file dbs: `PRAGMA journal_mode=WAL; PRAGMA synchro
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);          -- schema_version, repo, version
 CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY, started_at TEXT NOT NULL,
   range_spec TEXT NOT NULL DEFAULT '', cover TEXT NOT NULL DEFAULT '', chain TEXT NOT NULL DEFAULT '{}',
-  pr TEXT NOT NULL DEFAULT '');                                              -- pr: JSON or ''  (schema 3)
+  pr TEXT NOT NULL DEFAULT '', since TEXT NOT NULL DEFAULT '');            -- pr (schema 3), since (4): JSON or ''
 CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY, parent_id TEXT REFERENCES comments(id) ON DELETE CASCADE,
   review INTEGER NOT NULL DEFAULT 1,
@@ -409,7 +430,8 @@ On opening an existing file: `meta.schema_version` > current → exit 1 "db sche
 `realpath(repo)` → exit 1 `db was created for <path>; pass --db-force to reuse` (unless `--db-force`).
 A schema-1 file (no `reviews` table, one review per repository) is migrated in place: `comments.review` and
 `rounds.review` default to 1 and `meta.cover` / `meta.chain` move into review 1, whose `started_at` is the
-oldest comment. A schema-2 file gains the empty `reviews.pr` and `comments.github` columns. `version` is
+oldest comment. A schema-2 file gains the empty `reviews.pr` and `comments.github` columns, a schema-3 file the
+empty `reviews.since` (`{"reviewed": <sha>, "at": <time|null>}`). `version` is
 persisted in `meta` so a restarted server continues counting (never restarts at 0). The git diff cache is a plain
 dict `(sha, full, ws) → CommitDiff` (derived data), cleared on reload.
 
@@ -429,6 +451,7 @@ class ReviewStore:
     def add_comment(body, anchor, author="user", parent_id=None, github=False) -> Comment   # github: 10.2
     def edit_comment(id, body=None, resolved=None, anchor=None, github=None) -> Comment   # anchor → validate, re-capture snippet, set moved_from
     def set_pr(reference) -> dict                 # PR mode (section 10)
+    def set_since(reviewed, at=None) -> dict|None # opens (None: closes) "Since your last review" (2.1); 404 unknown commit
     def github_target(id) -> dict                 # 10.2
     def record_github_post(id, posted) -> Comment # 10.3
     def delete_comment(id, cascade=False)   # root with replies and not cascade → StoreError(409, "thread has replies")
@@ -441,7 +464,7 @@ class ReviewStore:
 
 * `kind=review`: commit/path/side/line must be null.
 * `kind=commit`: `commit` required and must resolve (full/short sha of a listed commit, `combined`, `worktree` when
-  enabled, or any git rev that `rev_parse`s to a listed commit); stored as the full sha / pseudo name.
+  enabled, `since` when open, or any git rev that `rev_parse`s to a listed commit); stored as the full sha / pseudo name.
 * `kind=file`: commit + path required; `path` must match `path` or `old_path` of a file in that commit's diff (normalise to `path`).
 * `kind=line`: commit, path, `side ∈ {old, new}`, `line ≥ 1` required; `start_line` optional and must be `< line`.
   If `line` (and `start_line`) exist in the diff hunks for that side → capture snippet; else accept when `1 ≤ line ≤
@@ -457,7 +480,7 @@ For `kind=line`, `snippet` = the `s` text of the anchored line(s) on that side i
 
 ### 4.3 Outdated
 
-`outdated = anchor.commit not in {listed shas} ∪ {"combined"} ∪ ({"worktree"} if enabled)`. Outdated comments are kept,
+`outdated = anchor.commit not in {listed shas} ∪ {"combined"} ∪ ({"worktree"} if enabled) ∪ ({"since"} if open)`. Outdated comments are kept,
 returned by the API with `outdated: true`, listed by `ccr comments`; the UI only counts them in the *All changes* header (7.2).
 
 ### 4.4 Re-anchoring on reload
@@ -475,7 +498,8 @@ within ±20; for ranges require the same number of following lines to match. On 
 
 For root `kind=line` comments, `head_location = map_line(repo, from_rev, HEAD_sha, path, line)` where `from_rev` =
 `anchor.commit` (side new) / its `parents[0]` (side old) / `range.head` or `range.base` for `combined` / `HEAD`-at-extraction
-for `worktree` side old. For `worktree` side new → `{"path", "line", "status": "live"}`. `HEAD_sha` is re-read on each
+for `worktree` side old / `range.head` for `since` side new, the file's `old_rev` in that view for its side old. For
+`worktree` side new → `{"path", "line", "status": "live"}`. `HEAD_sha` is re-read on each
 request (`rev_parse("HEAD")`). Errors → `{"path": null, "line": null, "status": "unknown"}`.
 
 ### 4.6 Reviews
@@ -517,7 +541,8 @@ paths → 404 JSON. Log line (only with `--verbose`): `"%s %s %d %dms"` with the
   forwarding changes it; `Origin: null` → 403). Same for `Referer`. `Sec-Fetch-Site: cross-site|same-site` → 403 on
   `/api/*`. No CORS headers, ever.
 * **Revs & paths from clients**: `/api/file` accepts `rev` only if it is `worktree` or a full sha that occurs as
-  `old_rev`/`new_rev`/`sha`/`parents[0]` in the current review data; `path` must be non-empty, relative, NUL-free, without
+  `old_rev`/`new_rev`/`sha`/`parents[0]` in the current review data (with "Since your last review" open also its `tree`
+and `reviewed`); `path` must be non-empty, relative, NUL-free, without
   `..` segments and must be a `path`/`old_path` of some file in the review; otherwise 400. `/api/compare` accepts only
   shas that are listed commits or their `parents[0]` (or empty/absent `base` = empty tree). `/api/commits/{sha}` resolves
   short shas against the listed commits only.
@@ -546,7 +571,7 @@ paths → 404 JSON. Log line (only with `--verbose`): `"%s %s %d %dms"` with the
 | GET | `/api/review` | Review (2.6). While `loading`: `{"loading": true, …minimal}` with 200. |
 | GET | `/api/state` | `store.state()` (never 503) |
 | GET | `/api/events?since=N&timeout=S` | long-poll: `state()` + `"changed": true` as soon as `version > N` **or `since > version`** (client from another server incarnation) or `stopping`; `changed: false` after `S` seconds (cap 30, default 25). Records `ui.last_seen` for non-CLI agents. |
-| GET | `/api/commits/{sha}?full=1&ws=ignore` | CommitDiff (2.3); `sha` = listed sha / short sha / `combined` / `worktree`; 404 unknown; 503 `{"error":"loading"}` while loading |
+| GET | `/api/commits/{sha}?full=1&ws=ignore` | CommitDiff (2.3); `sha` = listed sha / short sha / `combined` / `worktree` / `since`; 404 unknown; 503 `{"error":"loading"}` while loading |
 | GET | `/api/commits/{sha}/file?path=P&ws=ignore` | one **untrimmed** FileDiff (path, then old_path); 404 |
 | GET | `/api/compare?base=X&head=Y&ws=ignore` | CommitDiff with `sha: "compare:<X10>..<Y10>"`, `kind: "compare"`, `subject: "Compare …"` |
 | GET | `/api/file?rev=R&path=P` | `{"rev","path","content","lines","truncated_lines"}`; 400 bad rev/path; 403 escape; 404 missing/not a blob; 413 too large; 415 binary |
@@ -560,6 +585,7 @@ paths → 404 JSON. Log line (only with `--verbose`): `"%s %s %d %dms"` with the
 | POST | `/api/reload` | `{range?, n?, worktree?, first_parent?}` (omitted = keep) → `{"review": Review, "remapped": [...], "outdated": [Comment], "commits_added", "commits_removed"}`; git errors → 400, previous data kept |
 | POST | `/api/cover` | `{text}` → `{"cover", "version"}`; sets the cover letter (≤ 64 KiB Markdown, stored in `meta`; bumps `version` **and** `generation` so open pages re-render) |
 | POST | `/api/pr` | `{url}` → `{"pr", "version"}`; links the review to a pull request (section 10; bumps `version` and `generation`) |
+| POST | `/api/since` | `{reviewed, at?}` → `{"since", "version"}`; opens "Since your last review" from `reviewed` (any rev naming a commit; null closes it; 2.1; bumps `version` and `generation`); 404 unknown commit, 400 bad `at` |
 | POST | `/api/github/sync` | `{viewer, head, threads, reviews}` → `{"threads", "reviews", "added", "updated", "removed", "synced_at"}`; mirrors the pull request's discussion (10.5); 409 outside PR mode |
 | POST | `/api/restore` | `{payload, dry_run?}` → `{"source", "dry_run", "comments", "threads", "rounds", "outdated", "cover", "mirrored": {"matched", "restored", "left_to_sync", "unmatched"}, "dropped_copies", "renamed"}`; fills an empty review from an export (6.4); 409 when the review has comments or rounds of its own, the export is of another pull request or names a commit the repository lacks |
 | POST | `/api/shutdown` | 202; sets `stopping`, `cond.notify_all()`, then `threading.Thread(target=httpd.shutdown, daemon=True).start()` |
@@ -594,12 +620,17 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
 
 ### 6.2 Commands
 
-* `ccr start [--range SPEC | -n N] [--worktree | --no-worktree] [--first-parent] [--port N] [--db PATH] [--log FILE] [--open] [--idle-timeout S] [--cover FILE] [--pr URL]`
+* `ccr start [--range SPEC | -n N] [--worktree | --no-worktree] [--first-parent] [--port N] [--db PATH] [--log FILE] [--open] [--idle-timeout S] [--cover FILE] [--pr URL] [--since REV [--since-at TIME]]`
   `--cover FILE` sets the cover letter (also on reuse). `--pr URL` (or `OWNER/REPO#N`) links the review to a pull
   request (section 10; also on reuse; an unparsable value exits 1 before anything starts) and adds the line
   `ccr: pr <url> (<owner/repo#N>): questions for Claude, GitHub comments for your pending review` before the URL. `ccr cover (TEXT | --file F | -)` sets/replaces it on a running
   review. The cover letter is shown above "All changes" in the UI with a *Comment on the whole series* button
-  (anchor `kind=review`), and `ccr export --md` prints it under `## Cover letter`.
+  (anchor `kind=review`), and `ccr export --md` prints it under `## Cover letter`. `--since REV` opens "Since your
+  last review" (2.1; also on reuse) from the commit an earlier review was submitted on, `--since-at TIME` (UTC,
+  `2026-10-07T12:34:56Z`) says when; a commit the repository lacks, a bad time or `--since-at` alone exit 1 before
+  anything starts. It adds the line `ccr: since your last review of <short R> (<at>): N files changed` before the URL
+  (on reuse after the `reload` lines), extended by `; not rebuilt on the new base, so compared with the reviewed
+  commit, upstream changes may show: <paths>` when paths conflicted, or by a note when there is no shared base.
   1. Take `<key>.lock` (`O_CREAT|O_EXCL`; ignore if older than 30 s) so concurrent starts serialise.
   2. If a live session exists: reload it with the given options (unchanged ones kept; no options → reload the pinned
      spec so new commits appear); print `ccr: reusing running session (pid P)` + the `reload` lines + the URL; exit 0.
@@ -631,7 +662,7 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
   its `-wal`, `-shm` and `.lock`) of every session that is not running — no live record, and its `.lock` not held —
   and whose database and WAL have not changed for 7 days (`STALE_DB_SECONDS`), printing `ccr: removed <path>, the
   database of a session stopped and unchanged for 7 days`; `ccr start` never removes the database it resumes.
-* `ccr status [--json]` — url, range (+note), `ccr: pr <url>` in PR mode, commits, counts, rounds (last verdict), ui connected/last seen, log path, db path.
+* `ccr status [--json]` — url, range (+note), `ccr: pr <url>` in PR mode, the `ccr: since …` line when open, commits, counts, rounds (last verdict), ui connected/last seen, log path, db path.
 * `ccr sessions [--json]` — every session file (repo, url, range, alive?, started_at), deleting stale ones; exit 3 if none.
 * `ccr logs [-n N] [-f]` — tail of the server log.
 * `ccr open` — `webbrowser.open(url)`.
@@ -740,6 +771,9 @@ Why not use the existing backoff helper here?
 #### [id: …] user · 1b2c3d4e5f src/x.py new:10 → HEAD src/x.py:10 · R1 · unresolved
 ```
 
+Groups come in this order: review-level comments, `## Since your last review` (2.1), the commits in chain order, "All
+changes", "Uncommitted changes", outdated.
+
 In PR mode the document header carries ` — PR <owner/repo#N>` after the range, and every root says what it is for
 right after its author: `GitHub comment (not posted)`, `GitHub comment (posted: <url>)` (with `; edited since, the
 update not posted yet` when it was edited after posting), or `question` for the
@@ -843,7 +877,9 @@ verdict — then toast *"Round N submitted · K comments"*, errors as a red toas
 **Sidebar** (resizable 200–480px, persisted; collapsible):
 
 * *Commit chain*: "All changes" first, commits oldest→newest with a rail, "Uncommitted changes" last (greyed with
-  "(clean)" when it has no files). Item: short sha (mono), subject (ellipsis), author avatar (initials, `av-N` class),
+  "(clean)" when it has no files). "Since your last review" (2.1), when open, is a group of its own above them
+  (`.commit-item.is-since`, then `li.commit-sep`): tag `Δ`, and below the subject, in small type (`.since-at`), the
+  local date and time of that review (or `of <short R>` without `--since-at`) with its `+N −M`. Item: short sha (mono), subject (ellipsis), author avatar (initials, `av-N` class),
   relative date, `+N −M`, badges (threads; pending yellow, unresolved red), `•` **new** dot (`.is-new`) when the sha is not
   in the last round's `commit_shas` (and a round exists), merge glyph. **Hover/focus** (300 ms) → one shared
   `#tooltip[role=tooltip]` with full subject + body (`pre-wrap`), author, absolute date, sha. **Click** → select
@@ -860,7 +896,11 @@ verdict — then toast *"Round N submitted · K comments"*, errors as a red toas
 **Main pane** (`#main` is the **only** vertical scroller; `body`, `.file-card`, `.diff-body` keep `overflow-y: visible`):
 
 * *Header card*: subject (h1), body (`pre-wrap`), author + relative date (title = absolute), sha click-to-copy,
-  parents (merges), stats, `#btn-comment-commit`. Pseudo-commits explain what they are (range / "vs HEAD").
+  parents (merges), stats, `#btn-comment-commit`. Pseudo-commits explain what they are (range / "vs HEAD" / for
+  "Since your last review", tagged *Re-review*: the review it starts from, the base the version reviewed was rebuilt
+  on and the head, plus a `.since-conflicts` note naming the paths compared with the reviewed commit itself; with no
+  files *"Nothing changed since your last review"*). In PR mode its old side, the version reviewed, offers only
+  *Ask AI*: the gutter hides *GH comment* there, the editor has no intent switch and its threads take questions.
   The **All changes** header additionally shows the cover letter (`#cover-letter`, safe Markdown; *"No cover letter"*
   hint when empty), `#btn-comment-review` (*Comment on the whole series*, anchor `kind=review`) and a muted `#outdated-note`
   (*"N comments are anchored to commits that left the series (see `ccr comments --outdated`)"*, hidden at 0); review-level
@@ -1120,6 +1160,15 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
   `feature`), an empty commit (`--allow-empty`), a big generated file (6000 changed lines) for `too_large`, a CRLF file,
   `.gitattributes` `*.dat diff=hex` + `diff.hex.textconv=xxd` (must still be `binary: true`); worktree: staged change,
   unstaged change, untracked file, untracked binary, untracked symlink, ignored file, nested repo directory.
+  `rereview_repo(tmp_path)` builds a re-reviewed pull request (2.1): the version `reviewed` on `base1`, then `v2`
+  rebased onto `base2` (which changes a file outside the pull request and a line of `src/calc.py` far from its
+  change) and `v3` onto `base3` (which also changes the line of `src/shared.py` the pull request changes, so its
+  rebuild conflicts); `v2`/`v3` differ from `reviewed` by a requested change, a test the review triggered and an
+  unrelated change. Tests of "Since your last review": `test_gitx.py` (`rebuild_tree` with and without conflicts,
+  `diff_since`), `test_store.py` (the view, its comments and projections, the old side refused for GitHub, the reload
+  that conflicts, closing it, persistence, no shared base, the schema-3 migration), `test_server.py` (`/api/since`),
+  `test_cli.py` (`start --since`, also on reuse) and `test_e2e.py` (the driver's `since` scenario: the group of its
+  own with the review's date and time, the header, and the reviewed side taking questions only).
 * `test_gitx.py`: `parse_patch` on hand-written patches (rename, 100 % rename, binary, mode-only, no-newline ×2,
   multi-hunk, `/dev/null`, spaces/quoted paths, `@@ -1 +1 @@`, `--- ` content line, empty context line, type change =
   two sections); `list_commits` order/fields/`%B` split; `commit_stats` vs `--numstat` for every commit incl. merge and
@@ -1234,6 +1283,9 @@ lines and their context), so `github_target` puts a GitHub comment there:
   of "All changes" on that side. `side` `new` → `RIGHT`, `old` → `LEFT`; a range adds `start_line`/`start_side`.
 * Refused when the rows found no longer read as the comment's snippet (409): "All changes" anchors keep their line
   numbers across a reload, so after the pull request head moved the line under one may be another line now.
+* `kind=line` on `since` (2.1), new side: its lines are `range.head`'s, so they stay. Its old side is the version
+  reviewed, which the pull request no longer has: refused (*"the old side of Since your last review is the version
+  you reviewed, which the pull request no longer has; ask Claude about it, or comment on the new side"*).
 * Refused, with a message saying why: other anchor kinds, `worktree`, outdated anchors, a review without a base, and
   each failed rule above (*"src/app.py:10 (new side) is not in the pull request diff, and GitHub takes comments only
   on the lines that diff shows"*, *"line 2 of notes.txt is changed again later in the pull request, so its diff has

@@ -21,7 +21,7 @@ import urllib.request
 import pytest
 
 from ccr import __version__
-from conftest import FEATURE_SUBJECTS, run_git
+from conftest import FEATURE_SUBJECTS, REVIEWED_AT, run_git
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CCR = os.path.join(ROOT, "bin", "ccr")
@@ -884,3 +884,28 @@ def test_a_pr_mode_review_comes_back_from_its_markdown_export(cli, fixture_repo,
     assert by_id[question["id"]]["parent_id"] != thread["id"] and by_id[by_id[question["id"]]["parent_id"]]["body"] == \
         "And line 6?", "the question sits in the mirrored thread the sync brought"
     cli.run("stop", check=0)
+
+
+def test_start_since_opens_the_since_your_last_review_view(rereview_repo, ccr_session_dir):
+    r = rereview_repo
+    cli = Runner(r, str(ccr_session_dir))
+    try:
+        assert cli.run("start", "--since-at", REVIEWED_AT).stderr == "ccr: --since-at needs --since\n"
+        assert "fetch it first" in cli.run("start", "--since", "0" * 40).stderr
+        assert "--since-at must be a UTC time" in cli.run("start", "--since", "reviewed", "--since-at", "today").stderr
+        assert not any(name.endswith(".json") for name in os.listdir(str(ccr_session_dir)))
+        record = cli.start("--range", "%s..%s" % (r.base2, r.v2), "--since", "reviewed", "--since-at", REVIEWED_AT)
+        expected = "ccr: since your last review of %s (%s): 2 files changed\n" % (r.reviewed[:10], REVIEWED_AT)
+        assert expected in open(record["log"]).read()
+        assert expected in cli.run("status", check=0).stdout
+        created = cli.run("comment", "--commit", "since", "--path", "src/calc.py", "--line", "29", "Why the check?",
+                          check=0).stdout
+        assert created.endswith("(since src/calc.py new:29)\n")
+        listing = cli.run("comments", check=0).stdout
+        assert "## Since your last review\n" in listing and "if b == 0:" in listing
+        moved = cli.run("start", "--range", "%s..%s" % (r.base3, r.v3), "--since", "reviewed", check=0).stdout
+        assert ("ccr: since your last review of %s: 3 files changed; not rebuilt on the new base, so compared with the "
+                "reviewed commit, upstream changes may show: src/shared.py\n" % r.reviewed[:10]) in moved
+        cli.run("stop", check=0)
+    finally:
+        cli.cleanup()

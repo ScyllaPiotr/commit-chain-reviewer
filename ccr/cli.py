@@ -41,6 +41,7 @@ COMMENT_AUTHORS = AUTHORS + ("github",)  # "github": mirrored from the pull requ
 DEFAULT_CLI_AUTHOR = "claude"
 _FULL_SHA_RE = re.compile(r"\b[0-9a-f]{40}(?:[0-9a-f]{24})?\b")
 _BATCH_HEADING_RE = re.compile(r"^##\s+(\S+?)(?:\s+\[resolve\])?\s*$")
+SINCE_AT_RE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
 
 class CliError(Exception):
@@ -137,6 +138,10 @@ def _add_server_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cover", metavar="FILE", help="Markdown cover letter describing the whole change")
     parser.add_argument("--pr", metavar="URL", help="link the review to a GitHub pull request (PR mode: questions "
                         "for Claude and GitHub comments for your pending review); URL or OWNER/REPO#N")
+    parser.add_argument("--since", metavar="REV", help="open the \"Since your last review\" view: what the head "
+                        "changed since REV, the commit an earlier review was submitted on, was reviewed")
+    parser.add_argument("--since-at", metavar="TIME", dest="since_at",
+                        help="when that review was submitted (UTC, like 2026-10-07T12:34:56Z); needs --since")
     parser.add_argument("--idle-timeout", type=float, default=server.DEFAULT_IDLE_TIMEOUT, metavar="S",
                         help="stop after S seconds without requests (0 = never; default 86400)")
 
@@ -387,7 +392,7 @@ def print_serving(record: dict, review: dict) -> None:
     rng = review["range"]
     suffix = ", +worktree" if review["options"]["worktree"] else ""
     out("ccr: serving %s  (%s, %d commits%s)" % (record["repo"], range_label(rng), real_commits(review), suffix))
-    for line in (render.review_line(review), render.pr_line(review)):
+    for line in (render.review_line(review), render.pr_line(review), render.since_line(review)):
         if line:
             out(line)
     out("ccr: url %s" % record["url"])
@@ -409,9 +414,26 @@ def check_pr(reference) -> None:
             raise CliError(str(exc)) from None
 
 
+def check_since(repo: str, args) -> None:
+    """Fail fast (exit 1, nothing started) on ``--since`` / ``--since-at`` values the review cannot take."""
+    if args.since_at is not None:
+        if args.since is None:
+            raise CliError("--since-at needs --since")
+        if not SINCE_AT_RE.match(args.since_at):
+            raise CliError("--since-at must be a UTC time like 2026-10-07T12:34:56Z")
+    if args.since is not None:
+        try:
+            gitx.rev_parse(repo, args.since)
+        except GitError as exc:
+            if exc.status == 404:
+                raise CliError("commit %s is not in this repository; fetch it first" % args.since) from None
+            raise
+
+
 def cmd_start(args) -> int:
     repo = resolve_repo(args)
     check_pr(args.pr)
+    check_since(repo, args)
     paths = session.paths_for(repo)
     with session.start_lock(paths):
         found = session.find_live(repo)
@@ -423,12 +445,17 @@ def cmd_start(args) -> int:
                     client.post("/api/cover", {"text": handle.read()})
             if args.pr is not None:
                 client.post("/api/pr", {"url": args.pr})
+            if args.since is not None:
+                client.post("/api/since", {"reviewed": args.since, "at": args.since_at})
             result = client.post("/api/reload", reload_body(args))
             if args.json:
                 print_json(start_json(record, result["review"], True))
             else:
                 out("ccr: reusing running session (pid %d)" % record["pid"])
                 print_reload(result)
+                since = render.since_line(result["review"])
+                if since:
+                    out(since)
                 out("ccr: url %s" % record["url"])
             if args.open:
                 webbrowser.open(record["url"])
@@ -438,7 +465,8 @@ def cmd_start(args) -> int:
         prune_stale_dbs(say=(lambda line: None) if args.json else None, keep=(paths.db,))
         record, _ = session.start_background(
             repo, paths, spec=args.range, n=args.n, worktree=bool(args.worktree), first_parent=bool(args.first_parent),
-            port=args.port, db=args.db, log=args.log, idle_timeout=args.idle_timeout, cover=args.cover, pr=args.pr)
+            port=args.port, db=args.db, log=args.log, idle_timeout=args.idle_timeout, cover=args.cover, pr=args.pr,
+            since=args.since, since_at=args.since_at)
     review = Client(record["url"], record["token"]).get("/api/review")
     if args.json:
         print_json(start_json(record, review, False))
@@ -460,10 +488,11 @@ def cmd_cover(args) -> int:
 def cmd_serve(args) -> int:
     repo = resolve_repo(args)
     check_pr(args.pr)
+    check_since(repo, args)
     return server.serve(repo, spec=args.range, n=args.n, worktree=bool(args.worktree),
                         first_parent=bool(args.first_parent), port=args.port, db=args.db, db_force=args.db_force,
                         token=args.token, log=args.log, verbose=args.verbose, idle_timeout=args.idle_timeout,
-                        open_browser=args.open, cover=args.cover, pr=args.pr)
+                        open_browser=args.open, cover=args.cover, pr=args.pr, since=args.since, since_at=args.since_at)
 
 
 def stop_one(record: dict, state: dict, args) -> None:
@@ -530,6 +559,8 @@ def cmd_status(args) -> int:
         out("ccr: note: %s" % rng["note"])
     if review.get("pr"):
         out("ccr: pr %s" % render.clean(review["pr"]["url"], True))
+    if render.since_line(review):
+        out(render.since_line(review))
     out("ccr: comments %d pending, %d submitted, %d unresolved, %d outdated (%d total)" % (
         counts["pending"], counts["submitted"], counts["unresolved"], counts["outdated"], counts["total"]))
     rounds = review["rounds"]

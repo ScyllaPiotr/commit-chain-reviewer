@@ -723,3 +723,27 @@ def test_github_sync_route_and_replies_to_mirrored_threads(live):
     assert reply.status == 201 and reply.json["github"] == {"status": "local"}
     target = live.get("/api/comments/%s/github" % reply.json["id"]).json
     assert (target["subject_type"], target["thread_id"], target["reply_to"]) == ("REPLY", "T1", "C1")
+
+
+def test_since_route_opens_the_view(rereview_repo):
+    r = rereview_repo
+    store = ReviewStore(r.path, "%s..%s" % (r.base2, r.v2), None, db_path=":memory:")
+    store.load()
+    srv = Live(r, store, make_server(store, TOKEN, 0))
+    try:
+        assert srv.post("/api/since", {"reviewed": "0" * 40}).status == 404
+        assert srv.post("/api/since", {"reviewed": r.reviewed, "at": "now"}).status == 400
+        before = srv.get("/api/state").json
+        opened = srv.post("/api/since", {"reviewed": r.reviewed, "at": "2023-11-15T09:30:00Z"})
+        assert opened.status == 200 and opened.json["since"]["old_base"] == r.base1
+        review = srv.get("/api/review").json
+        assert review["generation"] == before["generation"] + 1 and review["commits"][0]["sha"] == "since"
+        diff = srv.get("/api/commits/since").json
+        assert (diff["kind"], [f["path"] for f in diff["files"]]) == ("since", ["src/calc.py", "tests/test_calc.py"])
+        tree = review["since"]["tree"]
+        assert srv.get("/api/file?rev=%s&path=src/calc.py" % tree).status == 200
+        closed = srv.post("/api/since", {"reviewed": None})
+        assert closed.status == 200 and closed.json["since"] is None
+        assert srv.get("/api/commits/since").status == 404
+    finally:
+        srv.close()

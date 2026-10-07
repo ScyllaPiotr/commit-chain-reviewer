@@ -550,6 +550,8 @@ export async function runScenario(page, url) {
 
 /** The pull request the PR-mode server is linked to (mirrors PR_URL in test_e2e.py). */
 export const PR_URL = 'https://github.com/o/r/pull/7';
+/** When the review "Since your last review" starts from was submitted (mirrors REVIEWED_AT in tests/conftest.py). */
+export const SINCE_AT = '2023-11-15T09:30:00Z';
 
 /** PR mode (spec section 10) against the same fixture, linked to PR_URL: questions for Claude and GitHub comments. */
 export async function runPrScenario(page, url) {
@@ -860,12 +862,67 @@ export async function runPrScenario(page, url) {
   });
 }
 
+/** "Since your last review" (re-review, spec 2.1) against the re-reviewed pull request of tests/conftest.py, in PR mode:
+ *  `base2..v2` opened since the review of `reviewed`. */
+export async function runSinceScenario(page, url) {
+  const runner = new Runner(page, page.report);
+  const card = '.file-card[data-path="src/calc.py"]';
+  const oldRow = (n) => `${card} tr.line.del[data-o="${n}"]`;
+  const isShown = (sel) => `(() => { const el = document.querySelector(${JSON.stringify(sel)}); return Boolean(el) && getComputedStyle(el).display !== 'none'; })()`;
+
+  await runner.step('Since your last review is a group of its own', async () => {
+    await page.navigate(url);
+    await page.waitFor(`document.querySelectorAll('#commit-list .commit-item').length === 3`);
+    const list = await page.evaluate(`(() => { const items = [...document.querySelector('#commit-list').children];
+      const since = items[0];
+      return { order: items.map((li) => li.dataset.sha || li.className), subject: since.querySelector('.subject').textContent,
+        when: since.querySelector('.since-at').textContent, size: getComputedStyle(since.querySelector('.since-at')).fontSize,
+        subjectSize: getComputedStyle(since.querySelector('.subject')).fontSize }; })()`);
+    const expected = await page.evaluate(`new Date(${JSON.stringify(SINCE_AT)}).toLocaleString()`);
+    if (list.order.join(',') !== 'since,commit-sep,combined,' + list.order[3]) throw new Error('commit list: ' + list.order);
+    if (list.subject !== 'Since your last review' || list.when !== expected) throw new Error('since item: ' + JSON.stringify(list));
+    if (parseFloat(list.size) >= parseFloat(list.subjectSize)) throw new Error('the date is not in small type: ' + JSON.stringify(list));
+    return list.when;
+  });
+
+  await runner.step('open Since your last review', async () => {
+    await page.click('#commit-list .commit-item[data-sha="since"]');
+    await page.waitFor(`document.querySelector('#commit-list .commit-item[data-sha="since"]').classList.contains('is-selected') && document.querySelector(${JSON.stringify(card + '[data-rendered="1"] table.diff')})`);
+    const header = await page.evaluate(`(() => { const h = document.querySelector('#commit-header');
+      return { subject: h.querySelector('.subject').textContent.trim(), tag: h.querySelector('.kind-tag').textContent,
+        explain: h.querySelector('.explain').textContent, conflicts: Boolean(h.querySelector('.since-conflicts')),
+        files: [...document.querySelectorAll('.file-card[data-path]')].map((c) => c.dataset.path) }; })()`);
+    if (header.subject !== 'Since your last review' || header.tag !== 'Re-review' || header.conflicts) throw new Error('header: ' + JSON.stringify(header));
+    if (!/rebuilt on its current base .* compared with its head/.test(header.explain)) throw new Error('explanation: ' + header.explain);
+    if (header.files.join(',') !== 'src/calc.py,tests/test_calc.py') throw new Error('files: ' + header.files);
+    await page.shot('since-view');
+    return header.files.join(', ');
+  });
+
+  await runner.step('the reviewed side takes questions only', async () => {
+    await page.hover(oldRow(25) + ' td.code');
+    await page.hover(oldRow(25) + ' .btn-fork');
+    await page.waitFor(isShown(oldRow(25) + ' .btn-add-comment[data-intent="question"]'), { label: '[+] of the reviewed line open' });
+    if (await page.evaluate(isShown(oldRow(25) + ' .btn-add-comment[data-intent="github"]'))) throw new Error('GH comment offered on the version reviewed');
+    await page.click(oldRow(25) + ' .btn-add-comment[data-intent="question"]');
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor textarea')`, { label: 'editor' });
+    const editor = await page.evaluate(`(() => { const f = document.querySelector('tr.editor form.comment-editor'); return { label: f.querySelector('.btn-submit-comment').textContent, intent: Boolean(f.querySelector('.editor-intent')), info: f.querySelector('.anchor-info').textContent }; })()`);
+    if (editor.label !== 'Ask AI' || editor.intent || editor.info !== 'old:25') throw new Error('editor: ' + JSON.stringify(editor));
+    await page.type('Why did mul change?');
+    await page.click('tr.editor .btn-submit-comment');
+    await page.waitFor(`!document.querySelector('tr.editor') && [...document.querySelectorAll('#main .thread')].some((t) => t.textContent.includes('Why did mul change?'))`, { label: 'question posted' });
+    const replies = await page.evaluate(`[...document.querySelector(${JSON.stringify(card)}).querySelectorAll('.thread .thread-foot .btn-reply')].map((b) => b.textContent).join(',')`);
+    if (replies !== 'Ask AI') throw new Error('a thread on the version reviewed offers ' + replies);
+    return 'question only';
+  });
+}
+
 /** Entry point: launch, run, always kill the browser, print the report. */
 export async function main(argv) {
   const url = argv[2];
   const shotsDir = argv[3] || join(process.cwd(), 'shots');
-  const scenario = argv[4] === 'pr' ? runPrScenario : runScenario;
-  if (!url) { process.stderr.write('usage: node driver.mjs <url-with-?t=token> [shots-dir] [review|pr]\n'); return 2; }
+  const scenario = { pr: runPrScenario, since: runSinceScenario }[argv[4]] || runScenario;
+  if (!url) { process.stderr.write('usage: node driver.mjs <url-with-?t=token> [shots-dir] [review|pr|since]\n'); return 2; }
   mkdirSync(shotsDir, { recursive: true });
   const report = { ok: true, steps: [], consoleErrors: [], screenshots: [] };
   let browser = null;

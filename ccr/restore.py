@@ -21,7 +21,7 @@ import json
 import re
 from datetime import datetime, timedelta
 
-from .render import COMBINED, WORKTREE
+from .render import COMBINED, SINCE, WORKTREE
 
 __all__ = ["RestoreError", "parse", "parse_json", "parse_markdown"]
 
@@ -38,7 +38,8 @@ _AUTHOR_RE = re.compile(r"^@(\S+) \(GitHub(, you)?\)$")
 _POSTED_RE = re.compile(r"^GitHub (?:comment|reply) \(posted: (\S+?)(?:; edited since, the update not posted yet)?\)$")
 _ROOT_INTENTS = ("question", "GitHub comment", "GitHub thread", "GitHub review")
 _GROUPS = {"## All changes (combined)": COMBINED, "## Uncommitted changes": WORKTREE,
-           "## Review-level comments": "review", "## Outdated (anchored to commits no longer in the range)": "outdated"}
+           "## Since your last review": SINCE, "## Review-level comments": "review",
+           "## Outdated (anchored to commits no longer in the range)": "outdated"}
 _NO_ANCHOR = {"kind": None, "commit": None, "path": None, "side": None, "line": None, "start_line": None}
 _ROOT_LEAD_SECONDS = 60  # how long before its earliest known time a Markdown thread's first comment is dated
 

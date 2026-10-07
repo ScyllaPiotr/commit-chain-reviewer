@@ -90,7 +90,7 @@
   }
 
   function shortSha(sha) { return sha && HEX_RE.test(sha) ? sha.slice(0, 10) : sha; }
-  const isPseudo = (sha) => sha === 'combined' || sha === 'worktree';
+  const isPseudo = (sha) => sha === 'combined' || sha === 'worktree' || sha === 'since';
   /** PR mode (spec section 10): the review is linked to a GitHub pull request, so a comment is a question for Claude
    *  or a GitHub comment for the user's pending review there. */
   const prMode = () => Boolean(state.review && state.review.pr);
@@ -100,10 +100,14 @@
   /** The GitHub review thread a root is (mirrored, or posted from ccr), so a reply to it can go to GitHub too. */
   const githubThreadOf = (root) => (root && root.github && ['remote', 'posted'].includes(root.github.status)
     && root.github.thread_id && !root.github.deleted ? root.github.thread_id : null);
+  /** The old side of "Since your last review" is the version reviewed, which the pull request no longer has: it
+   *  takes questions only (spec 2.1). */
+  const isReviewedSide = (a) => Boolean(a && a.commit === 'since' && a.kind === 'line' && a.side === 'old');
   /** A thread takes GitHub replies when it is a review thread on GitHub or can start one there: a question or the
-   *  user's GitHub comment on a line or a file (10.5); not on a commit, the whole pull request or a review body. */
+   *  user's GitHub comment on a line or a file (10.5); not on a commit, the whole pull request, a review body or the
+   *  version reviewed. */
   const takesGitHubReply = (root) => Boolean(prMode() && root && (githubThreadOf(root)
-    || (!isMirrored(root) && root.anchor && ['line', 'file'].includes(root.anchor.kind))));
+    || (!isMirrored(root) && root.anchor && ['line', 'file'].includes(root.anchor.kind) && !isReviewedSide(root.anchor))));
   /** A mirrored root that starts collapsed, as GitHub shows it: an outdated thread, a review body, a deleted one. */
   const isQuiet = (root) => isMirrored(root) && Boolean(root.github.outdated || root.github.kind === 'review' || root.github.deleted);
   /** In PR mode a comment is part of the discussion on GitHub (mirrored, or the user's GitHub comment or reply) or of
@@ -191,8 +195,9 @@
   const renderAnchor = (c) => (c ? (c.view_anchor === undefined ? c.anchor : c.view_anchor) : null);
   /** The view comments are projected onto: the selected listed commit (a compare keeps the previous selection), else All changes. */
   const projectView = () => (state.selectedSha && commitMeta(state.selectedSha) ? state.selectedSha : 'combined');
-  /** How the "from …" tag names a view: its short sha, "All changes" or "uncommitted changes". */
-  const viewLabel = (sha) => (sha === 'combined' ? 'All changes' : sha === 'worktree' ? 'uncommitted changes' : shortSha(sha));
+  /** How the "from …" tag names a view: its short sha, "All changes", "uncommitted changes" or "Since your last review". */
+  const viewLabel = (sha) => (sha === 'combined' ? 'All changes' : sha === 'worktree' ? 'uncommitted changes'
+    : sha === 'since' ? 'Since your last review' : shortSha(sha));
   function commitIndex(sha) {
     return state.review ? state.review.commits.findIndex((c) => c.sha === sha) : -1;
   }
@@ -401,24 +406,33 @@
     const lr = lastRound();
     const rangeSet = compareRangeSet();
     const real = realCommits();
+    const since = state.review.since;
     const html = state.review.commits.map((c) => {
       const pseudo = c.kind !== 'commit';
       const clean = c.kind === 'worktree' && c.stats.files === 0;
       const isNew = !pseudo && lr && !lr.commit_shas.includes(c.sha);
-      const cls = ['commit-item', pseudo ? 'is-pseudo' : '', c.is_merge ? 'is-merge' : '', clean ? 'is-clean' : '',
+      const cls = ['commit-item', pseudo ? 'is-pseudo' : '', c.kind === 'since' ? 'is-since' : '', c.is_merge ? 'is-merge' : '', clean ? 'is-clean' : '',
         !state.compare && c.sha === state.selectedSha ? 'is-selected' : '', rangeSet.has(c.sha) ? 'is-range' : '',
         isNew ? 'is-new' : '', c === real[0] ? 'is-chain-start' : '', c === real[real.length - 1] ? 'is-chain-end' : ''].filter(Boolean).join(' ');
       const subject = clean ? `${c.subject} (clean)` : c.subject;
+      const where = c.kind === 'combined' ? esc(rangeLabel()) : c.kind === 'since' ? sinceWhenHtml(since) : 'vs HEAD';
       const line2 = pseudo
-        ? `<span>${c.kind === 'combined' ? esc(rangeLabel()) : 'vs HEAD'}</span> ${statsHtml(c.stats.additions, c.stats.deletions)}`
+        ? `<span>${where}</span> ${statsHtml(c.stats.additions, c.stats.deletions)}`
         : `${avatarHtml('user', c.author.name)} ${timeHtml(c.author_date, 'when')} ${statsHtml(c.stats.additions, c.stats.deletions)}${c.is_merge ? ' <span class="merge-glyph" title="Merge commit">⑂</span>' : ''}`;
       return `<li class="${cls}" data-sha="${esc(c.sha)}" tabindex="0" role="button" aria-current="${c.sha === state.selectedSha ? 'true' : 'false'}">
         <span class="rail"><span class="dot"></span></span>
-        <span class="body"><span class="line1"><span class="sha">${esc(pseudo ? (c.kind === 'combined' ? 'all' : 'wt') : c.short_sha.slice(0, 7))}</span><span class="subject">${esc(subject)}</span><span class="new-dot" title="Not part of the last submitted round"></span></span>
+        <span class="body"><span class="line1"><span class="sha">${esc(pseudo ? ({ combined: 'all', since: 'Δ' }[c.kind] || 'wt') : c.short_sha.slice(0, 7))}</span><span class="subject">${esc(subject)}</span><span class="new-dot" title="Not part of the last submitted round"></span></span>
         <span class="line2">${line2}</span></span>
-        <span class="side">${commitBadgesHtml(c.sha)}</span></li>`;
+        <span class="side">${commitBadgesHtml(c.sha)}</span></li>${c.kind === 'since' ? '<li class="commit-sep" role="separator"></li>' : ''}`;
     }).join('');
     list.innerHTML = html;
+  }
+
+  /** "Since your last review": when that review was submitted (local time), else which commit it was on. */
+  function sinceWhenHtml(since) {
+    if (!since) return '';
+    return since.at ? `<span class="since-at" title="Your last review: ${esc(fmtAbs(since.at))}">${esc(fmtAbs(since.at))}</span>`
+      : `of ${esc(shortSha(since.reviewed))}`;
   }
 
   function rangeLabel() {
@@ -466,7 +480,9 @@
     const tt = $('#tooltip');
     const meta = c.kind === 'commit'
       ? `${esc(c.author.name)} &lt;${esc(c.author.email)}&gt; · ${esc(fmtAbs(c.author_date))}<br>${esc(c.sha)}${c.parents.length > 1 ? `<br>merge of ${c.parents.map((p) => esc(shortSha(p))).join(' + ')}` : ''}`
-      : (c.kind === 'combined' ? `git diff ${esc(rangeLabel())}` : 'staged + unstaged + untracked vs HEAD');
+      : c.kind === 'combined' ? `git diff ${esc(rangeLabel())}`
+        : c.kind === 'since' ? esc(sinceExplanation())
+          : 'staged + unstaged + untracked vs HEAD';
     tt.innerHTML = `<div class="tt-subject">${esc(c.subject)}</div>${c.body ? `<div class="tt-body">${esc(c.body)}</div>` : ''}<div class="tt-meta">${meta}</div>`;
     tt.hidden = false;
     const r = item.getBoundingClientRect();
@@ -595,19 +611,37 @@
     if (diff.kind === 'combined') return `Everything in the range ${rangeLabel()} as one diff (${shortSha(r.base) || 'empty tree'} → ${shortSha(r.head)}).`;
     if (diff.kind === 'worktree') return 'Uncommitted changes vs HEAD: staged, unstaged and untracked files.';
     if (diff.kind === 'compare') return `Compare view of ${diff.sha.slice('compare:'.length)} — read-only.`;
+    if (diff.kind === 'since') return sinceExplanation();
     return '';
+  }
+
+  function sinceExplanation() {
+    const since = state.review.since;
+    if (!since) return '';
+    const r = state.review.range;
+    const when = `your review of ${shortSha(since.reviewed)}${since.at ? ` on ${fmtAbs(since.at)}` : ''}`;
+    if (!since.tree) return `What changed since ${when}, compared with that commit directly (it shares no base with ${shortSha(r.head)}), so upstream changes show too.`;
+    return `What changed since ${when}: the pull request as you reviewed it, rebuilt on its current base ${shortSha(r.base)}, compared with its head ${shortSha(r.head)}. What the new base brought is left out.`;
+  }
+
+  /** The paths "Since your last review" could not rebuild on the new base: compared with the reviewed commit itself. */
+  function sinceConflictsHtml() {
+    const since = state.review.since;
+    if (!since || !since.conflicts.length) return '';
+    return `<p class="since-conflicts" role="note">Not rebuilt on the new base, so compared with the reviewed commit itself; upstream changes may show in ${since.conflicts.length === 1 ? 'it' : 'them'}: ${since.conflicts.map((p) => `<code>${esc(p)}</code>`).join(', ')}</p>`;
   }
 
   function renderHeader() {
     const diff = currentDiff();
     const host = $('#commit-header');
     if (!diff) { host.innerHTML = ''; return; }
-    const kindTag = diff.kind === 'combined' ? 'Range' : diff.kind === 'worktree' ? 'Worktree' : diff.kind === 'compare' ? 'Compare' : diff.is_merge ? 'Merge' : '';
+    const kindTag = { combined: 'Range', worktree: 'Worktree', compare: 'Compare', since: 'Re-review' }[diff.kind] || (diff.is_merge ? 'Merge' : '');
     const parts = [];
     parts.push(`<div class="subject-row"><h1 class="subject">${esc(diff.subject)}</h1>${kindTag ? `<span class="kind-tag">${esc(kindTag)}</span>` : ''}</div>`);
     if (diff.body) parts.push(`<pre class="body">${esc(diff.body)}</pre>`);
     const explain = kindExplanation(diff);
     if (explain) parts.push(`<p class="explain">${esc(explain)}</p>`);
+    if (diff.kind === 'since') parts.push(sinceConflictsHtml());
     let meta = '<div class="meta">';
     if (diff.kind === 'commit') {
       meta += `<span class="author">${avatarHtml('user', diff.author.name, true)} ${esc(diff.author.name)} <span class="email">&lt;${esc(diff.author.email)}&gt;</span></span>`;
@@ -627,7 +661,9 @@
       // "All changes" gets only the whole-series button: a commit-level comment on the combined view would just
       // duplicate a review-level one.
       if (diff.kind !== 'combined') {
-        const label = diff.kind === 'worktree' ? 'Comment on the uncommitted changes' : prMode() ? 'Ask AI about this commit' : 'Comment on this commit';
+        const label = diff.kind === 'worktree' ? 'Comment on the uncommitted changes'
+          : diff.kind === 'since' ? (prMode() ? 'Ask AI about these changes' : 'Comment on these changes')
+            : prMode() ? 'Ask AI about this commit' : 'Comment on this commit';
         meta += `<button type="button" id="btn-comment-commit" class="sm-btn" aria-label="${label}">💬 ${label}</button>`;
       }
       if (diff.kind === 'combined') {
@@ -644,7 +680,7 @@
       parts.push(coverLetterHtml());
       parts.push('<div class="thread-block" data-key-host="review"></div>');
     }
-    if (!diff.files.length) parts.push('<p class="explain">This commit has no file changes.</p>');
+    if (!diff.files.length) parts.push(`<p class="explain">${diff.kind === 'since' ? 'Nothing changed since your last review.' : 'This commit has no file changes.'}</p>`);
     parts.push('<div class="thread-block" data-key-host="commit"></div>');
     preserveEditors(host, () => {
       host.innerHTML = parts.join('');
@@ -1285,9 +1321,11 @@
     const line = cell.dataset.line;
     const key = lineKey(state.viewSha, card.dataset.path, side, +line);
     const moved = buttons[0].parentElement !== cell;
+    const questionOnly = isReviewedSide({ kind: 'line', commit: state.viewSha, side });
     for (const btn of buttons) {
       btn.dataset.side = side;
       btn.dataset.line = line;
+      btn.hidden = questionOnly && btn.dataset.intent === 'github';
       btn.classList.remove('is-parked');
       if (moved) btn.classList.remove('is-open');
       btn.classList.toggle('is-visible', Boolean(show));
@@ -1894,6 +1932,7 @@
     if (entry.mode === 'reply') return takesGitHubReply(state.comments.get(entry.rootId)) ? (entry.intent === 'github' ? 'github' : 'question') : null;
     if (entry.mode !== 'new') return null;
     const kind = entry.anchor && entry.anchor.kind;
+    if (isReviewedSide(entry.anchor)) return 'question';
     return (kind === 'line' || kind === 'file') && entry.intent === 'github' ? 'github' : 'question';
   }
 
@@ -1913,7 +1952,7 @@
       : intent === 'question' ? 'Ask Claude (Markdown)…' : reply ? 'Reply (Markdown)…' : 'Leave a comment (Markdown)…';
     const kind = entry.anchor && entry.anchor.kind;
     const intentButton = (name, text) => `<button type="button" class="intent-btn${intent === name ? ' is-active' : ''}" data-intent="${name}" aria-pressed="${intent === name}">${text}</button>`;
-    const intentSwitch = intent && (reply || kind === 'line' || kind === 'file')
+    const intentSwitch = intent && (reply || kind === 'line' || kind === 'file') && !isReviewedSide(entry.anchor)
       ? `<div class="editor-intent" role="group" aria-label="What this comment is">${intentButton('question', 'Ask AI')}${intentButton('github', what)}</div>` : '';
     let info = '';
     if (entry.anchor && entry.anchor.kind === 'line') {

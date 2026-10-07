@@ -475,6 +475,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             "reload": lambda: self._reload(body),
             "cover": lambda: self._send_json(200, {"cover": store.set_cover(body.get("text")), "version": store.version}),
             "pr": lambda: self._send_json(200, {"pr": store.set_pr(body.get("url")), "version": store.version}),
+            "since": lambda: self._send_json(200, {"since": store.set_since(body.get("reviewed"), body.get("at")),
+                                                   "version": store.version}),
             "restore": lambda: self._send_json(200, store.restore(body.get("payload"), bool(body.get("dry_run")))),
             "shutdown": self._shutdown,
         }
@@ -635,7 +637,7 @@ def _print_serving(store: ReviewStore, url: str, out) -> None:
     commits = sum(1 for c in review["commits"] if c["kind"] == "commit")
     suffix = ", +worktree" if review["options"]["worktree"] else ""
     out.write("ccr: serving %s  (%s, %d commits%s)\n" % (store.repo, _range_label(review["range"]), commits, suffix))
-    for line in (render.review_line(review), render.pr_line(review)):
+    for line in (render.review_line(review), render.pr_line(review), render.since_line(review)):
         if line:
             out.write(line + "\n")
     out.write("ccr: url %s\n" % url)
@@ -647,7 +649,7 @@ def _print_serving(store: ReviewStore, url: str, out) -> None:
 def serve(repo, spec=None, n=None, worktree: bool = False, first_parent: bool = False, port=None, db=None,
           db_force: bool = False, token=None, log=None, verbose: bool = False,
           idle_timeout: float = DEFAULT_IDLE_TIMEOUT, open_browser: bool = False, cover=None, pr=None,
-          out=None, err=None) -> int:
+          since=None, since_at=None, out=None, err=None) -> int:
     """Run ``ccr serve`` in the foreground (section 5.2 lifecycle); returns the process exit code.
 
     Range and database problems raise :class:`GitError` / :class:`StoreError` /
@@ -669,6 +671,8 @@ def serve(repo, spec=None, n=None, worktree: bool = False, first_parent: bool = 
                 store.set_cover(handle.read())
         if pr is not None:
             store.set_pr(pr)
+        if since is not None:
+            store.set_since(since, since_at)
         httpd = _bind(store, token, paths.key, port, verbose, idle_timeout)
     except BaseException:
         store.close()

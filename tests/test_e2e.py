@@ -20,6 +20,7 @@ import pytest
 from ccr import __version__
 from ccr.server import make_server
 from ccr.store import ReviewStore, utcnow
+from conftest import REVIEWED_AT
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DRIVER = os.path.join(ROOT, "tests", "e2e", "driver.mjs")
@@ -47,10 +48,12 @@ pytestmark = pytest.mark.skipif(
 class LiveServer:
     """A serving ``ReviewServer`` on an ephemeral port with an in-memory store."""
 
-    def __init__(self, repo, pr=None):
-        self.store = ReviewStore(repo.path, "main..feature", None, worktree=True, db_path=":memory:")
+    def __init__(self, repo, pr=None, spec="main..feature", worktree=True, since=None):
+        self.store = ReviewStore(repo.path, spec, None, worktree=worktree, db_path=":memory:")
         if pr:
             self.store.set_pr(pr)
+        if since:
+            self.store.set_since(*since)
         self.store.load()
         self.httpd = make_server(self.store, TOKEN, 0)
         self.store.set_server_info({"pid": os.getpid(), "port": self.httpd.port, "started_at": utcnow(),
@@ -188,3 +191,25 @@ def test_browser_pr_mode_flow(live_pr, tmp_path):
     assert comments["Unrelated to the change"]["anchor"]["line"] == 10
     assert comments["Should value 6 be named?"]["github"] == {"status": "local"}
     assert comments["Should value 6 be named?"]["parent_id"] == comments["What is value 6 for?"]["id"]
+
+
+@pytest.fixture
+def live_since(rereview_repo):
+    r = rereview_repo
+    server = LiveServer(r, pr=PR_URL, spec="%s..%s" % (r.base2, r.v2), worktree=False, since=(r.reviewed, REVIEWED_AT))
+    yield server
+    server.close()
+
+
+def test_browser_since_your_last_review(live_since, tmp_path):
+    report = run_driver(live_since.url, str(tmp_path / "shots"), "since")
+    pretty = json.dumps({k: v for k, v in report.items() if k != "stderr"}, indent=1, ensure_ascii=False)
+    failed = [s for s in report["steps"] if not s["ok"]]
+    assert not failed, "failed steps: %s\n%s\n%s" % ([s["name"] for s in failed], pretty, report["stderr"])
+    assert report["consoleErrors"] == [] and report["ok"] is True and report["exit_code"] == 0, pretty
+    assert [s["name"] for s in report["steps"]] == [
+        "Since your last review is a group of its own", "open Since your last review",
+        "the reviewed side takes questions only"], pretty
+    question = live_since.store.list_comments()[0]
+    assert (question["anchor"]["commit"], question["anchor"]["side"], question["anchor"]["line"]) == ("since", "old", 25)
+    assert question["github"] is None and question["snippet"] == "    return a * b"

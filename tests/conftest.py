@@ -323,6 +323,92 @@ def build_fixture_repo(path) -> FixtureRepo:
     return FixtureRepo(path, dict(b.shas))
 
 
+# --------------------------------------------------------------------------- a re-reviewed pull request
+
+CALC_HEAD = ['"""Calculator."""', ""] + ["CONST_%02d = %d" % (i, i) for i in range(1, 16)] + [""]
+CALC_ADD_MUL = ["", "def add(a, b):", "    return a + b", "", "", "def mul(a, b):", "    return a * b"]
+CALC_DIVIDE = ["", "", "def divide(a, b):", "    return a / b"]
+CALC_DIVIDE_CHECKED = ["", "", "def divide(a, b):", "    if b == 0:", "        raise ZeroDivisionError(\"b is zero\")",
+                       "    return a / b"]
+SHARED_FILLER = ["# filler %d" % i for i in range(1, 7)]
+TESTS_ADD = ["from calc import add, divide", "", "", "def test_add():", "    assert add(1, 2) == 3"]
+TESTS_DIVIDE = ["", "", "def test_divide():", "    assert divide(6, 3) == 2"]
+TESTS_DIVIDE_BY_ZERO = ["", "", "def test_divide_by_zero():", "    with pytest.raises(ZeroDivisionError):",
+                        "        divide(1, 0)"]
+REVIEWED_AT = "2023-11-15T09:30:00Z"
+
+
+def _lines(*parts) -> str:
+    return "\n".join(line for part in parts for line in part) + "\n"
+
+
+class RereviewRepo:
+    """A pull request reviewed at ``reviewed``, then reworked: ``v2`` rebased onto ``base2`` and ``v3`` onto ``base3``.
+
+    ``base1`` is where the reviewed version branched off ``main``.  ``base2`` changes ``src/upstream.py`` and the
+    first line of ``src/calc.py``, far from the pull request's lines, so rebuilding the reviewed version on it is
+    clean; ``base3`` also changes the line of ``src/shared.py`` the pull request changes, so that rebuild conflicts.
+    ``v2`` (and ``v3``) differ from the reviewed version by a requested change (``divide`` checks for zero), a
+    change the review triggered (a test for it) and an unrelated one (``mul``).
+    """
+
+    def __init__(self, path: str, shas: dict):
+        self.path = path
+        self.__dict__.update(shas)
+
+    def __fspath__(self) -> str:
+        return self.path
+
+    def git(self, *args: str) -> bytes:
+        return run_git(self.path, list(args))
+
+
+def build_rereview_repo(path) -> RereviewRepo:
+    path = os.path.abspath(os.fspath(path))
+    os.makedirs(path, exist_ok=True)
+    b = _Builder(path)
+    b.git("init", "-q")
+    b.git("symbolic-ref", "HEAD", "refs/heads/main")
+    b.git("config", "core.autocrlf", "false")
+    shas = {}
+
+    def commit(subject, files):
+        for rel, text in files.items():
+            b.write(rel, text)
+        b.git("add", "-A")
+        return b.commit(subject)
+
+    shared = lambda mode, limit: _lines(["MODE = '%s'" % mode], SHARED_FILLER, ["LIMIT = %d" % limit])
+    shas["base1"] = commit("Base", {"src/calc.py": _lines(CALC_HEAD, CALC_ADD_MUL), "src/upstream.py": "VERSION = 1\n",
+                                    "src/shared.py": shared("fast", 10), "tests/test_calc.py": _lines(TESTS_ADD)})
+    b.git("checkout", "-q", "-b", "reviewed")
+    shas["reviewed"] = commit("Add divide", {"src/calc.py": _lines(CALC_HEAD, CALC_ADD_MUL, CALC_DIVIDE),
+                                             "src/shared.py": shared("fast", 20),
+                                             "tests/test_calc.py": _lines(TESTS_ADD, TESTS_DIVIDE)})
+    b.git("checkout", "-q", "main")
+    upstream_head = ['"""A small calculator."""'] + CALC_HEAD[1:]
+    shas["base2"] = commit("Upstream", {"src/upstream.py": "VERSION = 2\n",
+                                        "src/calc.py": _lines(upstream_head, CALC_ADD_MUL)})
+    mul_changed = CALC_ADD_MUL[:-1] + ["    return a * b if b else 0"]
+    reworked = {"src/calc.py": _lines(upstream_head, mul_changed, CALC_DIVIDE_CHECKED),
+                "tests/test_calc.py": _lines(TESTS_ADD, TESTS_DIVIDE, TESTS_DIVIDE_BY_ZERO)}
+    b.git("checkout", "-q", "-b", "v2")
+    shas["v2"] = commit("Add divide", dict(reworked, **{"src/shared.py": shared("fast", 20)}))
+    b.git("checkout", "-q", "main")
+    shas["base3"] = commit("Upstream limit", {"src/shared.py": shared("safe", 15)})
+    b.git("checkout", "-q", "-b", "v3")
+    shas["v3"] = commit("Add divide", dict(reworked, **{"src/shared.py": shared("safe", 20)}))
+    return RereviewRepo(path, shas)
+
+
+@pytest.fixture
+def rereview_repo(tmp_path) -> RereviewRepo:
+    """A freshly built re-reviewed pull request (see :class:`RereviewRepo`), ``v3`` checked out."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    return build_rereview_repo(tmp_path / "rereview")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_home(tmp_path_factory):
     """Point HOME/XDG at a scratch dir so neither the fixture nor ccr sees the developer's git config."""

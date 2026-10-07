@@ -23,6 +23,7 @@ __all__ = [
     "clean",
     "review_line",
     "pr_line",
+    "since_line",
     "build_threads",
     "sort_threads",
     "select_threads",
@@ -36,13 +37,14 @@ MARK = "★"
 SHORT_SHA_LEN = 10
 COMBINED = "combined"
 WORKTREE = "worktree"
+SINCE = "since"
 
 # C0 (minus \t and \n) and C1 controls, line/paragraph separators, and the bidi embedding/isolate controls.
 _CONTROL_RE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 _FULL_SHA_RE = re.compile(r"\b[0-9a-f]{40}(?:[0-9a-f]{24})?\b")
 _MARKERS = {"ctx": " ", "del": "-", "add": "+"}
 _HEAD_LABELS = {"same": "", "live": " (live)", "moved": " (moved)", "changed": " (changed near)", "deleted": " (deleted)"}
-_GROUP_REVIEW, _GROUP_COMMIT, _GROUP_COMBINED, _GROUP_WORKTREE, _GROUP_OUTDATED = range(5)
+_GROUP_REVIEW, _GROUP_SINCE, _GROUP_COMMIT, _GROUP_COMBINED, _GROUP_WORKTREE, _GROUP_OUTDATED = range(6)
 
 
 # --------------------------------------------------------------------------- text helpers
@@ -98,6 +100,25 @@ def pr_line(review: dict):
         return None
     return "ccr: pr %s (%s): questions for Claude, GitHub comments for your pending review" % (
         clean(pr.get("url"), True), _pr_label(pr))
+
+
+def since_line(review: dict):
+    """The ``ccr:`` banner of the "Since your last review" view, or None when it is not open."""
+    since = review.get("since")
+    if not since:
+        return None
+    meta = next((c for c in review.get("commits") or [] if c.get("kind") == SINCE), None)
+    line = "ccr: since your last review of %s" % _short(since["reviewed"])
+    if since.get("at"):
+        line += " (%s)" % since["at"]
+    if meta:
+        line += ": %s changed" % _plural(meta["stats"]["files"], "file")
+    if since.get("tree") is None:
+        line += "; no base shared with the reviewed commit, so it is compared directly and upstream changes may show"
+    elif since.get("conflicts"):
+        line += "; not rebuilt on the new base, so compared with the reviewed commit, upstream changes may show: %s" \
+            % ", ".join(clean(path, True) for path in since["conflicts"])
+    return line
 
 
 def _body_lines(body, indent: str = "") -> list:
@@ -158,6 +179,8 @@ def _group_of(root: dict) -> int:
         return _GROUP_COMBINED
     if anchor["commit"] == WORKTREE:
         return _GROUP_WORKTREE
+    if anchor["commit"] == SINCE:
+        return _GROUP_SINCE
     return _GROUP_COMMIT
 
 
@@ -189,7 +212,8 @@ def _commit_matches(anchor_commit, wanted: str) -> bool:
         return False
     if anchor_commit == wanted:
         return True
-    return len(wanted) >= 4 and anchor_commit not in (COMBINED, WORKTREE) and anchor_commit.startswith(wanted)
+    return len(wanted) >= 4 and anchor_commit not in (COMBINED, WORKTREE, SINCE) \
+        and anchor_commit.startswith(wanted)
 
 
 def select_threads(threads: list, state=None, round=None, author=None, commit=None, path=None,
@@ -246,6 +270,8 @@ def _group_heading(root: dict, commits_by_sha: dict) -> str:
         return "## All changes (combined)"
     if group == _GROUP_WORKTREE:
         return "## Uncommitted changes"
+    if group == _GROUP_SINCE:
+        return "## Since your last review"
     sha = root["anchor"]["commit"]
     subject = clean((commits_by_sha.get(sha) or {}).get("subject", ""), True)
     return '## Commit %s — "%s"' % (_short(sha), subject)

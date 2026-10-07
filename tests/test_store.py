@@ -21,6 +21,7 @@ from ccr.gitx import GitError
 from ccr.store import (
     COMBINED,
     SCHEMA_VERSION,
+    SINCE,
     WORKTREE,
     NotFoundError,
     ReviewStore,
@@ -28,7 +29,7 @@ from ccr.store import (
     default_db_path,
     utcnow,
 )
-from conftest import FEATURE_SUBJECTS, build_fixture_repo, run_git
+from conftest import FEATURE_SUBJECTS, REVIEWED_AT, build_fixture_repo, run_git
 
 THREE_HUNKS, RENAME, BINARY, EDIT_NONL, MERGE, EMPTY, BIG = FEATURE_SUBJECTS
 INSERTED = "inserted_a = 'a'\ninserted_b = 'b'\ninserted_c = 'c'"
@@ -61,10 +62,10 @@ def unstage_all(repo):
 def test_review_shape_and_pseudo_commits(fixture_repo, store):
     store.set_server_info({"pid": 4242, "port": 7777, "started_at": "2026-09-03T13:00:00Z", "version": "0.1.0"})
     review = store.review()
-    assert set(review) == {"repo", "range", "review", "options", "cover", "pr", "commits", "version", "generation",
-                           "loading", "now", "counts", "rounds", "server", "ui"}
+    assert set(review) == {"repo", "range", "review", "options", "cover", "pr", "since", "commits", "version",
+                           "generation", "loading", "now", "counts", "rounds", "server", "ui"}
     assert review["review"] == {"id": 1, "started_at": review["review"]["started_at"], "resumed": False, "previous": None}
-    assert review["pr"] is None
+    assert review["pr"] is None and review["since"] is None
     assert review["repo"] == {"path": fixture_repo.path, "name": os.path.basename(fixture_repo.path),
                               "branch": "feature", "bare": False}
     assert review["range"] == {"spec": "main..feature", "given": "main..feature", "base": fixture_repo.main,
@@ -1609,4 +1610,134 @@ def test_sync_places_lines_of_a_newer_pull_request_head(tmp_path):
     store.sync_github(discussion("f" * 40, [gh_thread("T1", [gh_comment("C1", "nyh", "Why?")], path="a.txt", line=7)]))
     root = next(c for c in store.list_comments() if c["author"] == "github")
     assert (root["anchor"]["kind"], root["github"]["placement"]) == ("file", "file"), "an unknown head: the file at least"
+    store.close()
+
+
+# --------------------------------------------------------------------------- "Since your last review" (2.1)
+
+ZERO_CHECK = 29      # src/calc.py of v2 and v3: "    if b == 0:"
+REVIEWED_MUL = 25    # src/calc.py as reviewed (old side of the view): "    return a * b"
+
+
+def since_store(r, base, head, db_path=":memory:"):
+    store = ReviewStore(r.path, "%s..%s" % (base, head), None, db_path=db_path)
+    assert store.set_since(r.reviewed, REVIEWED_AT) is None, "nothing to compute before the first load"
+    store.load()
+    return store
+
+
+def test_since_view_is_listed_first_and_shows_only_what_the_author_changed(rereview_repo):
+    r = rereview_repo
+    store = since_store(r, r.base2, r.v2)
+    review = store.review()
+    since = review["since"]
+    assert (since["reviewed"], since["at"], since["old_base"], since["conflicts"]) == (r.reviewed, REVIEWED_AT, r.base1, [])
+    assert [(c["sha"], c["kind"]) for c in review["commits"]] == [(SINCE, "since"), (COMBINED, "combined"), (r.v2, "commit")]
+    assert review["commits"][0]["subject"] == "Since your last review"
+    diff = store.commit_diff("since")
+    assert [f["path"] for f in diff["files"]] == ["src/calc.py", "tests/test_calc.py"]
+    assert {f["old_rev"] for f in diff["files"]} == {since["tree"]}
+    assert store.file(since["tree"], "src/calc.py")["lines"] == 29, "context expansion reads the rebuilt tree"
+    assert store.file(r.reviewed, "src/shared.py")["content"].endswith("LIMIT = 20")
+    store.close()
+
+
+def test_comments_on_the_since_view(rereview_repo):
+    r = rereview_repo
+    store = since_store(r, r.base2, r.v2)
+    store.set_pr(PR_URL)
+    question = store.add_comment("Why the check?", line_anchor(SINCE, "src/calc.py", ZERO_CHECK))
+    assert (question["anchor"]["commit"], question["snippet"]) == (SINCE, "    if b == 0:")
+    projected = store.list_comments(project=COMBINED)[0]
+    assert projected["view_anchor"] == line_anchor(COMBINED, "src/calc.py", ZERO_CHECK) and projected["projected"]
+    on_github = store.add_comment("Say why.", line_anchor(SINCE, "src/calc.py", ZERO_CHECK), github=True)
+    target = store.github_target(on_github["id"])
+    assert (target["path"], target["line"], target["side"], target["commit"]) == ("src/calc.py", ZERO_CHECK, "RIGHT", r.v2)
+    old = store.add_comment("Why did mul change?", line_anchor(SINCE, "src/calc.py", REVIEWED_MUL, side="old"))
+    assert old["snippet"] == "    return a * b"
+    with pytest.raises(StoreError, match="old side of Since your last review is the version you reviewed"):
+        store.add_comment("On GitHub", line_anchor(SINCE, "src/calc.py", REVIEWED_MUL, side="old"), github=True)
+    assert next(c for c in store.list_comments(project=COMBINED) if c["id"] == old["id"])["view_anchor"] is None, \
+        "the version reviewed has no lines in any other view"
+    in_combined = store.add_comment("And here?", line_anchor(COMBINED, "src/calc.py", ZERO_CHECK))
+    shown = {c["id"]: c["view_anchor"] for c in store.list_comments(project=SINCE)}
+    assert shown[in_combined["id"]] == line_anchor(SINCE, "src/calc.py", ZERO_CHECK)
+    assert shown[old["id"]] == old["anchor"]
+    assert [c["id"] for c in store.list_comments(commit="since")] == [question["id"], on_github["id"], old["id"]]
+    located = {c["id"]: c["head_location"] for c in store.list_comments(locate=True)}
+    assert located[question["id"]] == {"path": "src/calc.py", "line": ZERO_CHECK, "status": "same"}
+    assert located[old["id"]] == {"path": "src/calc.py", "line": REVIEWED_MUL, "status": "changed"}
+    store.close()
+
+
+def test_since_is_recomputed_on_reload_and_names_what_it_could_not_rebuild(rereview_repo):
+    r = rereview_repo
+    store = since_store(r, r.base2, r.v2)
+    question = store.add_comment("Why the check?", line_anchor(SINCE, "src/calc.py", ZERO_CHECK))
+    generation = store.generation
+    store.load(spec="%s..%s" % (r.base3, r.v3))
+    assert store.generation > generation
+    since = store.review()["since"]
+    assert (since["old_base"], since["conflicts"]) == (r.base1, ["src/shared.py"])
+    files = {f["path"]: f["old_rev"] for f in store.commit_diff("since")["files"]}
+    assert files == {"src/calc.py": since["tree"], "src/shared.py": r.reviewed, "tests/test_calc.py": since["tree"]}
+    assert not next(c for c in store.list_comments() if c["id"] == question["id"])["outdated"]
+    store.close()
+
+
+def test_set_since_checks_its_input_and_closes_the_view(rereview_repo):
+    r = rereview_repo
+    store = since_store(r, r.base2, r.v2)
+    with pytest.raises(NotFoundError, match="fetch it first"):
+        store.set_since("0" * 40)
+    with pytest.raises(StoreError, match="at must be a UTC time"):
+        store.set_since(r.reviewed, "yesterday")
+    with pytest.raises(StoreError, match="reviewed must be a commit"):
+        store.set_since(42)
+    comment = store.add_comment("Why?", line_anchor(SINCE, "src/calc.py", ZERO_CHECK))
+    block = store.set_since("reviewed")
+    assert (block["reviewed"], block["at"]) == (r.reviewed, None), "any rev naming the commit; the time is optional"
+    generation = store.generation
+    assert store.set_since(None) is None and store.generation == generation + 1
+    review = store.review()
+    assert review["since"] is None and SINCE not in [c["sha"] for c in review["commits"]]
+    with pytest.raises(NotFoundError, match="Since your last review view is not open"):
+        store.commit_diff("since")
+    assert store.list_comments()[0]["outdated"] and store.list_comments()[0]["id"] == comment["id"]
+    store.close()
+
+
+def test_since_persists_with_its_review(rereview_repo, tmp_path):
+    r = rereview_repo
+    db = str(tmp_path / "since.sqlite")
+    since_store(r, r.base2, r.v2, db_path=db).close()
+    store = ReviewStore(r.path, "%s..%s" % (r.base2, r.v2), None, db_path=db)
+    store.load()
+    assert store.review()["since"]["reviewed"] == r.reviewed
+    store.close()
+
+
+def test_without_a_shared_base_the_reviewed_commit_is_compared_directly(rereview_repo):
+    r = rereview_repo
+    store = ReviewStore(r.path, None, 100, db_path=":memory:")  # the whole history of v3: no base
+    store.load()
+    since = store.set_since(r.reviewed)
+    assert (since["old_base"], since["tree"]) == (None, None)
+    files = {f["path"]: f["old_rev"] for f in store.commit_diff("since")["files"]}
+    assert files == {path: r.reviewed for path in ("src/calc.py", "src/shared.py", "src/upstream.py",
+                                                   "tests/test_calc.py")}
+    store.close()
+
+
+def test_schema_3_database_gains_the_since_column(rereview_repo, tmp_path):
+    r = rereview_repo
+    db = str(tmp_path / "v3.sqlite")
+    ReviewStore(r.path, "%s..%s" % (r.base2, r.v2), None, db_path=db).close()
+    conn = sqlite3.connect(db)
+    conn.executescript("UPDATE meta SET value = '3' WHERE key = 'schema_version'; ALTER TABLE reviews DROP COLUMN since;")
+    conn.close()
+    store = ReviewStore(r.path, "%s..%s" % (r.base2, r.v2), None, db_path=db)
+    store.load()
+    assert store.review()["since"] is None
+    assert store.set_since(r.reviewed)["reviewed"] == r.reviewed
     store.close()

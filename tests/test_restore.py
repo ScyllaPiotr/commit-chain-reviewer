@@ -10,7 +10,7 @@ from ccr import render
 from ccr.restore import RestoreError, parse, parse_markdown
 from ccr.store import COMBINED, StoreError
 from conftest import FEATURE_SUBJECTS
-from test_store import PR_URL, discussion, gh_comment, gh_thread, line_anchor, open_store
+from test_store import PR_URL, discussion, gh_comment, gh_thread, line_anchor, open_store, since_store
 
 THREE_HUNKS, RENAME = FEATURE_SUBJECTS[:2]
 STORED = ("id", "parent_id", "author", "body", "created_at", "updated_at", "state", "round", "resolved", "anchor",
@@ -84,6 +84,22 @@ def test_a_markdown_export_restores_what_it_keeps(fixture_repo):
     assert [{k: r[k] for k in ("number", "submitted_at", "verdict", "summary")} for r in restored.review()["rounds"]] == \
         [{k: r[k] for k in ("number", "submitted_at", "verdict", "summary")} for r in original.review()["rounds"]], \
         "a summary keeps its newline (taken from the comment submit made of it)"
+
+
+def test_threads_since_your_last_review_come_back_from_either_export(rereview_repo):
+    r = rereview_repo
+    original = since_store(r, r.base2, r.v2)
+    original.add_comment("Why the check?", line_anchor("since", "src/calc.py", 29))
+    original.add_comment("Why did mul change?", line_anchor("since", "src/calc.py", 25, side="old"))
+    original.add_comment("Overall?", {"kind": "commit", "commit": "since"})
+    original.add_comment("The commit.", {"kind": "commit", "commit": r.v2})
+    markdown = export_md(original)
+    assert "## Since your last review\n" in markdown and markdown.index("## Since") < markdown.index("## Commit ")
+    for text in (markdown, json.dumps(export_json(original))):
+        restored = since_store(r, r.base2, r.v2)
+        assert restored.restore(parse(text))["outdated"] == 0
+        assert {c["body"]: (c["anchor"], c["snippet"]) for c in restored.list_comments()} == \
+            {c["body"]: (c["anchor"], c["snippet"]) for c in original.list_comments()}
 
 
 def test_restore_fills_only_an_empty_review_and_checks_first(fixture_repo):

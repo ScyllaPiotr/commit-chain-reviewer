@@ -1244,3 +1244,62 @@ class TestMapLineCopies:
         run_git(str(repo), author + ["commit", "-qm", "copy"])
         c2 = run_git(str(repo), ["rev-parse", "HEAD"]).decode().strip()
         assert gitx.map_line(str(repo), c1, c2, "zz.txt", 5) == {"path": "zz.txt", "line": 5, "status": "same"}
+
+
+# --------------------------------------------------------------------------- rebuild_tree / diff_since (3.2)
+
+def changed_rows(file_diff):
+    return [(row["t"], row["s"]) for hunk in file_diff["hunks"] for row in hunk["lines"] if row["t"] != "ctx"]
+
+
+class TestSince:
+    def test_the_reviewed_version_rebuilt_on_a_new_base_keeps_what_the_base_brought(self, rereview_repo):
+        r = rereview_repo
+        refs = r.git("for-each-ref")
+        old_base = gitx.merge_base(r.path, r.reviewed, r.base2)
+        assert old_base == r.base1
+        rebuilt = gitx.rebuild_tree(r.path, old_base, r.base2, r.reviewed)
+        assert SHA_RE.match(rebuilt["tree"]) and rebuilt["conflicts"] == []
+        assert gitx.show_file(r.path, rebuilt["tree"], "src/upstream.py")["content"] == "VERSION = 2"
+        assert "def divide(a, b):\n    return a / b" in gitx.show_file(r.path, rebuilt["tree"], "src/calc.py")["content"]
+        assert r.git("for-each-ref") == refs, "only objects are written, no refs"
+
+    def test_since_shows_only_what_the_author_changed(self, rereview_repo):
+        r = rereview_repo
+        rebuilt = gitx.rebuild_tree(r.path, r.base1, r.base2, r.reviewed)
+        diff = gitx.diff_since(r.path, rebuilt["tree"], r.reviewed, r.v2, rebuilt["conflicts"])
+        assert (diff["sha"], diff["kind"], diff["subject"]) == ("since", "since", "Since your last review")
+        assert [f["path"] for f in diff["files"]] == ["src/calc.py", "tests/test_calc.py"], \
+            "upstream.py and the new first line of calc.py came with the base, so they cancel out"
+        calc = diff["files"][0]
+        assert changed_rows(calc) == [("del", "    return a * b"), ("add", "    return a * b if b else 0"),
+                                      ("add", "    if b == 0:"), ("add", '        raise ZeroDivisionError("b is zero")')]
+        assert (calc["old_rev"], calc["new_rev"]) == (rebuilt["tree"], r.v2)
+        assert diff["stats"]["files"] == 2
+
+    def test_a_conflicting_path_is_compared_with_the_reviewed_commit(self, rereview_repo):
+        r = rereview_repo
+        rebuilt = gitx.rebuild_tree(r.path, r.base1, r.base3, r.reviewed)
+        assert rebuilt["conflicts"] == ["src/shared.py"]
+        diff = gitx.diff_since(r.path, rebuilt["tree"], r.reviewed, r.v3, rebuilt["conflicts"])
+        assert [f["path"] for f in diff["files"]] == ["src/calc.py", "src/shared.py", "tests/test_calc.py"]
+        shared = diff["files"][1]
+        assert (shared["old_rev"], shared["new_rev"]) == (r.reviewed, r.v3)
+        assert changed_rows(shared) == [("del", "MODE = 'fast'"), ("add", "MODE = 'safe'")], \
+            "the base's own change of that file shows up: that is what the caller warns about"
+        assert diff["files"][0]["old_rev"] == rebuilt["tree"]
+        ws = gitx.diff_since(r.path, rebuilt["tree"], r.reviewed, r.v3, rebuilt["conflicts"], ws_ignore=True)
+        assert [f["path"] for f in ws["files"]] == ["src/calc.py", "src/shared.py", "tests/test_calc.py"]
+
+    def test_without_a_tree_the_reviewed_commit_is_compared_on_the_given_paths(self, rereview_repo):
+        r = rereview_repo
+        diff = gitx.diff_since(r.path, None, r.reviewed, r.v2, paths=["src/calc.py", "src/upstream.py"])
+        assert [(f["path"], f["old_rev"]) for f in diff["files"]] == [("src/calc.py", r.reviewed),
+                                                                      ("src/upstream.py", r.reviewed)]
+        assert gitx.diff_since(r.path, None, r.reviewed, r.v2)["files"] == [], "no paths, nothing to compare"
+
+    def test_bad_revisions_are_refused(self, rereview_repo):
+        with pytest.raises(GitError):
+            gitx.rebuild_tree(rereview_repo.path, "--output=x", rereview_repo.base2, rereview_repo.reviewed)
+        with pytest.raises(GitError):
+            gitx.rebuild_tree(rereview_repo.path, rereview_repo.base1, rereview_repo.base2, "0" * 40)
