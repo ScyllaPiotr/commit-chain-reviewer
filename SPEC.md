@@ -95,7 +95,8 @@ out. A path that conflicts in the rebuild is compared from `R` itself instead (i
 changes may show in it; without a shared base (`old_base` null) every path of the pull request is compared from `R`.
 It is recomputed on every load, as `B` and `H` move. Its new side is `H`, so comments there behave as on "All
 changes" (they project, and in PR mode can be GitHub comments, 10.2); its old side is the version reviewed, which no
-other view shows: comments there stay in this view and are questions only.
+other view shows: comments there stay in this view, and a GitHub comment written there goes to GitHub at the place
+those lines held at the head (10.2).
 
 **Range spec grammar** (`--range SPEC` or `-n N`):
 
@@ -935,11 +936,11 @@ verdict — then toast *"Round N submitted · K comments"*, errors as a red toas
   parents (merges), stats, `#btn-comment-commit`. Pseudo-commits explain what they are (range / "vs HEAD" / for
   "Since your last review", tagged *Re-review*: the review it starts from, the base the version reviewed was rebuilt
   on and the head, plus a `.since-conflicts` note naming the paths compared with the reviewed commit itself; with no
-  files *"Nothing changed since your last review"*). In PR mode its old side, the version reviewed, offers only
-  *Ask AI*: the gutter hides *GH comment* there, the editor has no intent switch and its threads take questions.
+  files *"Nothing changed since your last review"*).
   A view showing flags (2.7) has `#flag-nav` (*⚑ Next (N)*) in the header actions: each click selects the next flag's
-  lines in file order, wrapping around (no keyboard shortcut). Flagged rows get an orange 4 px stripe on their left
-  edge (`tr.line.is-flagged`; in split view on the flag's side, `td.num.is-flagged`) and the first one shown a ⚑
+  lines in file order, wrapping around (no keyboard shortcut). Flagged rows get bright orange 6 px stripes on both
+  edges (`tr.line.is-flagged`: its first and last cells; in split view those of the flag's side, `td.num.is-flagged`
+  and `td.code.is-flagged`) and the first one shown a ⚑
   (`.flag-mark`) whose tooltip is the reason. Flags are fetched (`GET /api/flags`) on load and on every change; stale
   ones raise `#banner-flags` (*"N flagged changes were marked on an earlier head of the pull request, so they are
   hidden: run /re-review again"*).
@@ -1117,7 +1118,7 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
 
 `style.css` defines all colours as custom properties on `:root[data-theme=light]` and `:root[data-theme=dark]`:
 `--bg --bg-2 --bg-3 --fg --fg-muted --border --accent --accent-fg --diff-add --diff-add-strong --diff-del --diff-del-strong
---diff-hunk --diff-num --diff-empty --line-selected --line-hover --line-flash --pending --resolved --new --danger --flag --flag-bg --shadow --row-h
+--diff-hunk --diff-num --diff-empty --line-selected --line-hover --line-flash --pending --resolved --new --danger --flag --flag-fg --flag-bg --shadow --row-h
 --file-header-h --top-h`. Light resembles GitHub (`#e6ffec/#abf2bc`, `#ffebe9/rgba(255,129,130,.4)`, `#ddf4ff`), dark
 resembles GitHub dark-dimmed. `prefers-reduced-motion` disables animations. Focus rings visible. Buttons have
 `aria-label`s. Relative times refresh every 60 s via `[data-ts]`.
@@ -1136,7 +1137,7 @@ resembles GitHub dark-dimmed. `prefers-reduced-motion` disables animations. Focu
 | Gutter | `button.btn-add-comment[data-side][data-line]` (shared, moved into the hovered `td.num`); in PR mode two of them, `[data-intent="question"]` (*Ask AI*) and `[data-intent="github"]` (*GH comment*), moved together and shown once the PR-mode `[+]` (`.btn-fork`) opens |
 | Editor | `tr.editor` / `div.editor-block` → `form.comment-editor[data-key][data-tab]` (`[data-intent="github"]` while it writes a GitHub comment; `.editor-head > .editor-tabs > .editor-tab[data-tab]`, in PR mode on a line or file `.editor-head > .editor-intent > .intent-btn[data-intent]`, `textarea`, `.md-preview`, `.btn-submit-comment`, `.btn-cancel-comment`) |
 | Thread | `tr.threads[data-key]` / `div.thread-block` → `.thread[data-thread-id]` (`.is-resolved`, `.has-new`) → `.comment[data-id][data-author]` (`.comment-meta` `.author .time .tag-pending .tag-round .tag-edited .tag-new .tag-moved`, `a.tag-from[data-sha]` on a projected root, PR mode: `.tag-question`, `.tag-github` / `a.tag-github.is-posted`, `.comment-body`, `.comment-actions` `.act-edit .act-delete .act-reply .act-resolve`), `button.btn-reply`, `button.btn-show-resolved` |
-| Flags (2.7) | `#flag-nav`, `tr.line.is-flagged`, `td.num.is-flagged`, `.flag-mark[title]`, `.tree-file .fcount`, `#banner-flags` |
+| Flags (2.7) | `#flag-nav`, `tr.line.is-flagged`, `td.num.is-flagged`, `td.code.is-flagged`, `.flag-mark[title]`, `.tree-file .fcount`, `#banner-flags` |
 | Banners/toasts | `#banner-disconnected`, `#banner-compare`, `#banner-reloaded`, `#banner-flags`, `#toasts .toast.info|error|success`, `#notice-token` |
 | Readiness | `body[data-ready="1"]` after the first full render; `body[data-loading="1"]` while the server reports `loading` |
 
@@ -1211,10 +1212,10 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
   `diff_since`), `test_store.py` (the view, its comments and projections, the old side refused for GitHub, the reload
   that conflicts, closing it, persistence, no shared base, the schema-3 migration), `test_server.py` (`/api/since`),
   `test_cli.py` (`start --since`, also on reuse) and `test_e2e.py` (the driver's `since` scenario: the group of its
-  own with the review's date and time, the header, and the reviewed side taking questions only). Flags (2.7):
+  own with the review's date and time, the header, and the reviewed side taking questions and GH comments). Flags (2.7):
   `test_gitx.py` (`blame_lines`), `test_store.py` (their places, a commit's flag carried to the head, the checks, going
   stale when the head moves), `test_server.py` and `test_cli.py` (`flag`, `flags`, `--clear`), and the `since`
-  scenario (stripes and ⚑ with the reason in unified and split view, the counts, *⚑ Next*, the flag in the commit that
+  scenario (stripes on both edges and ⚑ with the reason in unified and split view, the counts, *⚑ Next*, the flag in the commit that
   last changed the line, and the banner once the head moved).
 * `test_gitx.py`: `parse_patch` on hand-written patches (rename, 100 % rename, binary, mode-only, no-newline ×2,
   multi-hunk, `/dev/null`, spaces/quoted paths, `@@ -1 +1 @@`, `--- ` content line, empty context line, type change =
@@ -1331,8 +1332,11 @@ lines and their context), so `github_target` puts a GitHub comment there:
 * Refused when the rows found no longer read as the comment's snippet (409): "All changes" anchors keep their line
   numbers across a reload, so after the pull request head moved the line under one may be another line now.
 * `kind=line` on `since` (2.1), new side: its lines are `range.head`'s, so they stay. Its old side is the version
-  reviewed, which the pull request no longer has: refused (*"the old side of Since your last review is the version
-  you reviewed, which the pull request no longer has; ask Claude about it, or comment on the new side"*).
+  reviewed, which the pull request no longer has, so each end is carried through that view's diff to the head: a line
+  that stayed to its own row, a removed or changed one to the row that took the place of its change (the first row
+  after it, else the last one before it). The rows must still read as the snippet in that view (409 otherwise), the
+  file must still exist at the head, and the result is a `RIGHT` comment, which `github_target` marks with
+  `carried_from` (`{"side": "old", "start_line", "line"}`) and `ccr gh-post --dry-run` names.
 * Refused, with a message saying why: other anchor kinds, `worktree`, outdated anchors, a review without a base, and
   each failed rule above (*"src/app.py:10 (new side) is not in the pull request diff, and GitHub takes comments only
   on the lines that diff shows"*, *"line 2 of notes.txt is changed again later in the pull request, so its diff has

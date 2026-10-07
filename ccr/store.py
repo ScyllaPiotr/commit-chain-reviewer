@@ -399,6 +399,28 @@ def _view_name(view: str) -> str:
         view, view[:gitx.SHORT_SHA_LEN])
 
 
+def _head_line(file_diff: dict, line: int) -> int:
+    """Where an old-side line of a diff sits on its new side: its own row when it stayed, else the row that took the
+    place of the change it is part of (the first one after it, else the last one before it)."""
+    for hunk in file_diff["hunks"]:
+        rows = hunk["lines"]
+        for index, row in enumerate(rows):
+            if row["o"] != line:
+                continue
+            if row["n"] is not None:
+                return row["n"]
+            after = next((r["n"] for r in rows[index + 1:] if r["n"] is not None), None)
+            if after is not None:
+                return after
+            return next((r["n"] for r in reversed(rows[:index]) if r["n"] is not None), max(hunk["new_start"], 1))
+    shift = 0  # outside every hunk: shifted by the hunks above it
+    for hunk in file_diff["hunks"]:
+        above = hunk["old_start"] < line if hunk["old_count"] == 0 else hunk["old_start"] + hunk["old_count"] - 1 < line
+        if above:
+            shift += hunk["new_count"] - hunk["old_count"]
+    return line + shift
+
+
 def _valid_repo_path(path) -> bool:
     if not isinstance(path, str) or not path or "\0" in path or path.startswith("/"):
         return False
@@ -1410,9 +1432,6 @@ class ReviewStore:
             raise StoreError("a GitHub review comment goes on a line or a file")
         if anchor["commit"] == WORKTREE:
             raise StoreError("uncommitted changes are not part of the pull request")
-        if anchor["commit"] == SINCE and anchor["kind"] == "line" and anchor["side"] == "old":
-            raise StoreError("the old side of Since your last review is the version you reviewed, which the pull "
-                             "request no longer has; ask Claude about it, or comment on the new side")
         if comment["outdated"]:
             raise StoreError("the comment is anchored to a commit that left the review", 409)
         data = self._require_data()
@@ -1427,9 +1446,14 @@ class ReviewStore:
                 raise StoreError("%s is not part of the pull request diff" % anchor["path"])
             return dict(target, path=file_diff["path"])
         side = anchor["side"]
-        path, end = self._github_line(anchor, data, anchor["line"])
-        start = end
-        if anchor["start_line"] is not None:
+        carried = anchor["commit"] == SINCE and side == "old"
+        if carried:  # the version reviewed is not in the pull request any more: the comment goes where it was
+            path, start, end = self._reviewed_at_head(comment)
+            side = "new"
+        else:
+            path, end = self._github_line(anchor, data, anchor["line"])
+            start = end
+        if anchor["start_line"] is not None and not carried:
             start_path, start = self._github_line(anchor, data, anchor["start_line"])
             if start_path != path or start >= end:
                 raise StoreError("the range %d-%d of %s does not stay one range in the pull request diff; comment on it "
@@ -1446,13 +1470,36 @@ class ReviewStore:
             raise StoreError("a GitHub comment range must stay within one hunk of the pull request diff")
         github_side = "RIGHT" if side == "new" else "LEFT"
         lines = [{"line": number, "text": text} for number, text in _side_rows(file_diff, side) if start <= number <= end]
-        if comment.get("snippet") and _cap_snippet([row["text"] for row in lines]) != comment["snippet"]:
+        if not carried and comment.get("snippet") and _cap_snippet([row["text"] for row in lines]) != comment["snippet"]:
             raise StoreError("%s:%s (%s side) no longer reads as it did when the comment was written, so the pull "
                              "request moved under it; put the comment where it belongs again"
                              % (path, end if start == end else "%d-%d" % (start, end), side), 409)
-        return dict(target, path=file_diff["path"], subject_type="LINE", line=end, side=github_side,
-                    start_line=start if start < end else None, start_side=github_side if start < end else None,
-                    lines=lines)
+        result = dict(target, path=file_diff["path"], subject_type="LINE", line=end, side=github_side,
+                      start_line=start if start < end else None, start_side=github_side if start < end else None,
+                      lines=lines)
+        if carried:
+            result["carried_from"] = {"side": "old", "start_line": anchor["start_line"], "line": anchor["line"]}
+        return result
+
+    def _reviewed_at_head(self, comment: dict) -> tuple:
+        """``(path, start, end)`` at the head for lines of the version reviewed - the old side of "Since your last
+        review" - which the pull request no longer has (10.2): a line that stayed keeps its place, a removed or
+        changed one goes to the line that took the place of its change."""
+        anchor = comment["anchor"]
+        file_diff = _find_file(self._view_diff(SINCE, False), anchor["path"])
+        if file_diff is None or file_diff["status"] == "D":
+            raise StoreError("%s is gone from the pull request, so GitHub has no line for a comment on it; comment on "
+                             "the pull request instead" % anchor["path"])
+        first = anchor["start_line"] or anchor["line"]
+        if comment.get("snippet"):
+            rows = [text for number, text in _side_rows(file_diff, "old") if first <= number <= anchor["line"]]
+            if _cap_snippet(rows) != comment["snippet"]:
+                raise StoreError("%s:%s (old side) of Since your last review no longer reads as it did when the comment "
+                                 "was written; put the comment where it belongs again"
+                                 % (anchor["path"], anchor["line"] if first == anchor["line"] else "%d-%d"
+                                    % (first, anchor["line"])), 409)
+        start, end = sorted((_head_line(file_diff, first), _head_line(file_diff, anchor["line"])))
+        return file_diff["path"], start, end
 
     def _github_comment(self, comment_id) -> dict:
         comment = self._fetch(comment_id)

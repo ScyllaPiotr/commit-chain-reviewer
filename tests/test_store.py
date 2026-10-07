@@ -1655,8 +1655,19 @@ def test_comments_on_the_since_view(rereview_repo):
     assert (target["path"], target["line"], target["side"], target["commit"]) == ("src/calc.py", ZERO_CHECK, "RIGHT", r.v2)
     old = store.add_comment("Why did mul change?", line_anchor(SINCE, "src/calc.py", REVIEWED_MUL, side="old"))
     assert old["snippet"] == "    return a * b"
-    with pytest.raises(StoreError, match="old side of Since your last review is the version you reviewed"):
-        store.add_comment("On GitHub", line_anchor(SINCE, "src/calc.py", REVIEWED_MUL, side="old"), github=True)
+    carried = store.add_comment("Where did the plain one go?", line_anchor(SINCE, "src/calc.py", REVIEWED_MUL, side="old"),
+                                github=True)
+    target = store.github_target(carried["id"])
+    assert (target["path"], target["line"], target["side"], target["start_line"]) == ("src/calc.py", 25, "RIGHT", None)
+    assert target["carried_from"] == {"side": "old", "start_line": None, "line": REVIEWED_MUL}
+    assert target["lines"] == [{"line": 25, "text": "    return a * b if b else 0"}], \
+        "a changed line of the version reviewed goes to the line that replaced it at the head"
+    ranged = store.add_comment("And around it?", line_anchor(SINCE, "src/calc.py", 28, side="old", start_line=24),
+                               github=True)
+    target = store.github_target(ranged["id"])
+    assert (target["start_line"], target["line"]) == (24, 28), "the lines that stayed keep their places"
+    store.delete_comment(carried["id"])
+    store.delete_comment(ranged["id"])
     assert next(c for c in store.list_comments(project=COMBINED) if c["id"] == old["id"])["view_anchor"] is None, \
         "the version reviewed has no lines in any other view"
     in_combined = store.add_comment("And here?", line_anchor(COMBINED, "src/calc.py", ZERO_CHECK))
@@ -1797,3 +1808,17 @@ def test_flags_are_checked_and_go_stale_when_the_head_moves(rereview_repo):
         "made on another head: its lines may hold other code now"
     assert flags["flags"][0]["id"] == flag["id"]
     store.close()
+
+
+def test_a_line_of_the_old_side_is_placed_where_it_was_on_the_new_side():
+    from ccr.store import _head_line
+    from ccr.gitx import parse_patch
+    patch = ("diff --git a/f b/f\n--- a/f\n+++ b/f\n"
+             "@@ -2,4 +2,2 @@\n x2\n-x3\n-x4\n x5\n"     # 3 and 4 removed
+             "@@ -10,2 +8,3 @@\n x10\n-x11\n+y11\n+y12\n"  # 11 replaced by two lines
+             "@@ -20,2 +19,1 @@\n x20\n-x21\n")          # the last line removed
+    file_diff = parse_patch(patch)[0]
+    assert [_head_line(file_diff, n) for n in (2, 3, 4, 5)] == [2, 3, 3, 3], "a removed line: the one after it"
+    assert _head_line(file_diff, 11) == 9, "a replaced line: its first replacement"
+    assert _head_line(file_diff, 21) == 19, "removed at the end: the one before it"
+    assert [_head_line(file_diff, n) for n in (1, 7, 15)] == [1, 5, 14], "outside the hunks: shifted"

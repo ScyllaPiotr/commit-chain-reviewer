@@ -100,14 +100,10 @@
   /** The GitHub review thread a root is (mirrored, or posted from ccr), so a reply to it can go to GitHub too. */
   const githubThreadOf = (root) => (root && root.github && ['remote', 'posted'].includes(root.github.status)
     && root.github.thread_id && !root.github.deleted ? root.github.thread_id : null);
-  /** The old side of "Since your last review" is the version reviewed, which the pull request no longer has: it
-   *  takes questions only (spec 2.1). */
-  const isReviewedSide = (a) => Boolean(a && a.commit === 'since' && a.kind === 'line' && a.side === 'old');
   /** A thread takes GitHub replies when it is a review thread on GitHub or can start one there: a question or the
-   *  user's GitHub comment on a line or a file (10.5); not on a commit, the whole pull request, a review body or the
-   *  version reviewed. */
+   *  user's GitHub comment on a line or a file (10.5); not on a commit, the whole pull request or a review body. */
   const takesGitHubReply = (root) => Boolean(prMode() && root && (githubThreadOf(root)
-    || (!isMirrored(root) && root.anchor && ['line', 'file'].includes(root.anchor.kind) && !isReviewedSide(root.anchor))));
+    || (!isMirrored(root) && root.anchor && ['line', 'file'].includes(root.anchor.kind))));
   /** A mirrored root that starts collapsed, as GitHub shows it: an outdated thread, a review body, a deleted one. */
   const isQuiet = (root) => isMirrored(root) && Boolean(root.github.outdated || root.github.kind === 'review' || root.github.deleted);
   /** In PR mode a comment is part of the discussion on GitHub (mirrored, or the user's GitHub comment or reply) or of
@@ -886,8 +882,8 @@
     banner.querySelector('.banner-text').textContent = `${stale} flagged change${stale === 1 ? ' was' : 's were'} marked on an earlier head of the pull request, so ${stale === 1 ? 'it is' : 'they are'} hidden: run /re-review again`;
   }
 
-  /** Mark the rows of a rendered card that the view's flags name: an orange stripe on each, and ⚑ with the reason on
-   *  the first one shown. */
+  /** Mark the rows of a rendered card that the view's flags name: orange stripes on both edges of each (in split view
+   *  of the flag's side), and ⚑ with the reason on the first one shown. */
   function applyFlags(card) {
     for (const el of card.querySelectorAll('.is-flagged')) el.classList.remove('is-flagged');
     for (const el of card.querySelectorAll('.flag-mark')) el.remove();
@@ -899,6 +895,8 @@
         if (!cell) continue;
         cell.classList.add('is-flagged');
         cell.closest('tr').classList.add('is-flagged');
+        const code = cell.nextElementSibling; // split view: the code cell of the flag's side
+        if (code && code.classList.contains(flag.side)) code.classList.add('is-flagged');
         if (marked) continue;
         const mark = document.createElement('span');
         mark.className = 'flag-mark';
@@ -1397,11 +1395,9 @@
     const line = cell.dataset.line;
     const key = lineKey(state.viewSha, card.dataset.path, side, +line);
     const moved = buttons[0].parentElement !== cell;
-    const questionOnly = isReviewedSide({ kind: 'line', commit: state.viewSha, side });
     for (const btn of buttons) {
       btn.dataset.side = side;
       btn.dataset.line = line;
-      btn.hidden = questionOnly && btn.dataset.intent === 'github';
       btn.classList.remove('is-parked');
       if (moved) btn.classList.remove('is-open');
       btn.classList.toggle('is-visible', Boolean(show));
@@ -2008,7 +2004,6 @@
     if (entry.mode === 'reply') return takesGitHubReply(state.comments.get(entry.rootId)) ? (entry.intent === 'github' ? 'github' : 'question') : null;
     if (entry.mode !== 'new') return null;
     const kind = entry.anchor && entry.anchor.kind;
-    if (isReviewedSide(entry.anchor)) return 'question';
     return (kind === 'line' || kind === 'file') && entry.intent === 'github' ? 'github' : 'question';
   }
 
@@ -2028,7 +2023,7 @@
       : intent === 'question' ? 'Ask Claude (Markdown)…' : reply ? 'Reply (Markdown)…' : 'Leave a comment (Markdown)…';
     const kind = entry.anchor && entry.anchor.kind;
     const intentButton = (name, text) => `<button type="button" class="intent-btn${intent === name ? ' is-active' : ''}" data-intent="${name}" aria-pressed="${intent === name}">${text}</button>`;
-    const intentSwitch = intent && (reply || kind === 'line' || kind === 'file') && !isReviewedSide(entry.anchor)
+    const intentSwitch = intent && (reply || kind === 'line' || kind === 'file')
       ? `<div class="editor-intent" role="group" aria-label="What this comment is">${intentButton('question', 'Ask AI')}${intentButton('github', what)}</div>` : '';
     let info = '';
     if (entry.anchor && entry.anchor.kind === 'line') {

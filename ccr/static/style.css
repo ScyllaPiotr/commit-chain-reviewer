@@ -46,8 +46,9 @@
   --new-bg: #dafbe1;
   --danger: #cf222e;
   --danger-bg: #ffebe9;
-  --flag: #e16f24;
-  --flag-bg: #fff1e5;
+  --flag: #ffa31a;
+  --flag-fg: #a35200;
+  --flag-bg: #fff3dc;
   --success: #1a7f37;
   --shadow: 0 1px 3px rgba(31, 35, 40, .12), 0 8px 24px rgba(66, 74, 83, .12);
   --shadow-sm: 0 1px 0 rgba(31, 35, 40, .04);
@@ -93,8 +94,9 @@
   --new-bg: rgba(70, 149, 74, .15);
   --danger: #e5534b;
   --danger-bg: rgba(229, 83, 75, .15);
-  --flag: #f0883e;
-  --flag-bg: rgba(240, 136, 62, .15);
+  --flag: #ffb347;
+  --flag-fg: #ffb347;
+  --flag-bg: rgba(255, 179, 71, .15);
   --success: #57ab5a;
   --shadow: 0 0 0 1px #444c56, 0 8px 24px rgba(0, 0, 0, .5);
   --shadow-sm: none;
@@ -238,7 +240,7 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
 .commit-item .line2 { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--fg-muted); margin-top: 1px; }
 .commit-item .side { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
 .commit-item .commit-badge { font-size: 10px; line-height: 16px; min-width: 16px; padding: 0 5px; }
-.commit-item .badge-flag, .tree-file .fcount { background: var(--flag-bg); color: var(--flag); font-weight: 600; }
+.commit-item .badge-flag, .tree-file .fcount { background: var(--flag-bg); color: var(--flag-fg); font-weight: 600; }
 .tree-file .fcount { font-size: 10px; line-height: 16px; padding: 0 5px; border-radius: 8px; }
 .commit-item .new-dot { display: none; width: 7px; height: 7px; border-radius: 50%; background: var(--new); flex-shrink: 0; }
 .commit-item.is-new .new-dot { display: inline-block; }
@@ -397,9 +399,10 @@ table.diff span.cr { color: var(--fg-muted); opacity: .6; font-size: 10px; user-
 table.diff span.trunc { color: var(--fg-muted); font-style: italic; user-select: none; }
 table.diff tr.line.is-selected td, table.diff tr.line.in-range td { background: var(--line-selected) !important; }
 table.diff tr.line.is-flash td { animation: flash 1.5s ease-out; }
-/* flagged lines (re-review): an orange stripe on the row's left edge, on the flag's side in split view, and ⚑ */
-table.diff[data-view="unified"] tr.line.is-flagged > td:first-child, table.diff[data-view="split"] td.num.is-flagged { box-shadow: inset 4px 0 0 var(--flag); }
-table.diff td.num .flag-mark { position: absolute; left: 7px; color: var(--flag); font-family: var(--sans); font-weight: 700; cursor: help; }
+/* flagged lines (re-review): orange stripes on both edges of the row - in split view of the flag's side - and ⚑ */
+table.diff[data-view="unified"] tr.line.is-flagged > td:first-child, table.diff[data-view="split"] td.num.is-flagged { box-shadow: inset 6px 0 0 var(--flag); }
+table.diff[data-view="unified"] tr.line.is-flagged > td:last-child, table.diff[data-view="split"] td.code.is-flagged { box-shadow: inset -6px 0 0 var(--flag); }
+table.diff td.num .flag-mark { position: absolute; left: 9px; color: var(--flag); font-family: var(--sans); font-weight: 700; cursor: help; }
 table.diff tr.line[data-x="1"] td.num { color: var(--fg-muted); opacity: .8; }
 table.diff.selecting td.code { user-select: none; }
 table.diff.sel-old td.code.new, table.diff.sel-new td.code.old { user-select: none; }

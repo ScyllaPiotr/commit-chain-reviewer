@@ -902,30 +902,44 @@ export async function runSinceScenario(page, url) {
     return header.files.join(', ');
   });
 
-  await runner.step('the reviewed side takes questions only', async () => {
-    await page.hover(oldRow(25) + ' td.code');
-    await page.hover(oldRow(25) + ' .btn-fork');
-    await page.waitFor(isShown(oldRow(25) + ' .btn-add-comment[data-intent="question"]'), { label: '[+] of the reviewed line open' });
-    if (await page.evaluate(isShown(oldRow(25) + ' .btn-add-comment[data-intent="github"]'))) throw new Error('GH comment offered on the version reviewed');
+  await runner.step('the reviewed side takes questions and GH comments', async () => {
+    const open = async () => {
+      await page.hover(oldRow(25) + ' td.code');
+      await page.hover(oldRow(25) + ' .btn-fork');
+      await page.waitFor(isShown(oldRow(25) + ' .btn-add-comment[data-intent="question"]') + ' && ' + isShown(oldRow(25) + ' .btn-add-comment[data-intent="github"]'), { label: '[+] of the reviewed line open into both' });
+    };
+    const posted = (text) => `!document.querySelector('tr.editor') && [...document.querySelectorAll('#main .thread')].some((t) => t.textContent.includes(${JSON.stringify(text)}))`;
+    const editor = `(() => { const f = document.querySelector('tr.editor form.comment-editor'); return { label: f.querySelector('.btn-submit-comment').textContent, intent: Boolean(f.querySelector('.editor-intent')), info: f.querySelector('.anchor-info').textContent }; })()`;
+    await open();
     await page.click(oldRow(25) + ' .btn-add-comment[data-intent="question"]');
-    await page.waitFor(`document.querySelector('tr.editor form.comment-editor textarea')`, { label: 'editor' });
-    const editor = await page.evaluate(`(() => { const f = document.querySelector('tr.editor form.comment-editor'); return { label: f.querySelector('.btn-submit-comment').textContent, intent: Boolean(f.querySelector('.editor-intent')), info: f.querySelector('.anchor-info').textContent }; })()`);
-    if (editor.label !== 'Ask AI' || editor.intent || editor.info !== 'old:25') throw new Error('editor: ' + JSON.stringify(editor));
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor textarea')`, { label: 'question editor' });
+    const question = await page.evaluate(editor);
+    if (question.label !== 'Ask AI' || !question.intent || question.info !== 'old:25') throw new Error('question editor: ' + JSON.stringify(question));
     await page.type('Why did mul change?');
     await page.click('tr.editor .btn-submit-comment');
-    await page.waitFor(`!document.querySelector('tr.editor') && [...document.querySelectorAll('#main .thread')].some((t) => t.textContent.includes('Why did mul change?'))`, { label: 'question posted' });
-    const replies = await page.evaluate(`[...document.querySelector(${JSON.stringify(card)}).querySelectorAll('.thread .thread-foot .btn-reply')].map((b) => b.textContent).join(',')`);
-    if (replies !== 'Ask AI') throw new Error('a thread on the version reviewed offers ' + replies);
-    return 'question only';
+    await page.waitFor(posted('Why did mul change?'), { label: 'question posted' });
+    await open();
+    await page.click(oldRow(25) + ' .btn-add-comment[data-intent="github"]');
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor[data-intent="github"] textarea')`, { label: 'GitHub editor' });
+    const github = await page.evaluate(editor);
+    if (github.label !== 'Add GH comment' || github.info !== 'old:25') throw new Error('GitHub editor: ' + JSON.stringify(github));
+    await page.type('Where did the plain mul go?');
+    await page.click('tr.editor .btn-submit-comment');
+    await page.waitFor(posted('Where did the plain mul go?'), { label: 'GitHub comment drafted' });
+    const replies = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(card + ' .thread')})].find((t) => t.textContent.includes('Why did mul change?')).querySelectorAll('.thread-foot .btn-reply').length`);
+    if (replies !== 2) throw new Error(`the question thread on the version reviewed offers ${replies} reply buttons`);
+    return 'question and GH comment';
   });
 
   const flagColor = `(() => { const p = document.createElement('span'); p.style.color = 'var(--flag)'; document.body.appendChild(p); const c = getComputedStyle(p).color; p.remove(); return c; })()`;
   const flagged = (rowSel, side) => `(() => { const row = document.querySelector(${JSON.stringify(rowSel)}); if (!row) return null;
     const split = row.closest('table.diff').dataset.view === 'split';
     const cell = row.querySelector('td.num.' + ${JSON.stringify(side)});
-    const striped = split ? cell : row.querySelector('td');
+    const left = split ? cell : row.querySelector('td');
+    const right = split ? row.querySelector('td.code.' + ${JSON.stringify(side)}) : row.querySelector('td:last-child');
     const mark = cell.querySelector('.flag-mark');
-    return { flagged: row.classList.contains('is-flagged'), stripe: getComputedStyle(striped).boxShadow, mark: mark ? mark.title : null }; })()`;
+    return { flagged: row.classList.contains('is-flagged'), left: getComputedStyle(left).boxShadow, right: getComputedStyle(right).boxShadow,
+      mark: mark ? mark.title : null }; })()`;
   const badges = `Object.fromEntries([...document.querySelectorAll('#commit-list .commit-item')].map((li) => [li.dataset.sha.length > 10 ? 'commit' : li.dataset.sha, (li.querySelector('.badge-flag') || {}).textContent || '']))`;
 
   await runner.step('flagged lines carry a stripe and ⚑ with the reason', async () => {
@@ -939,10 +953,11 @@ export async function runSinceScenario(page, url) {
       const added = await page.evaluate(flagged(`${card} tr.line[data-n="25"]`, 'new'));
       const removed = await page.evaluate(flagged(`${card} tr.line[data-o="25"]`, 'old'));
       for (const [what, got, reason] of [['new', added, MUL_REASON], ['old', removed, REVIEWED_REASON]]) {
-        if (!got || !got.flagged || !got.stripe.includes(orange) || !got.stripe.includes('4px') || got.mark !== reason) throw new Error(`${view} ${what} side: ${JSON.stringify(got)} (flag colour ${orange})`);
+        const stripes = got && got.left.includes(orange) && got.left.includes(' 6px 0px') && got.right.includes(orange) && got.right.includes('-6px 0px');
+        if (!got || !got.flagged || !stripes || got.mark !== reason) throw new Error(`${view} ${what} side: ${JSON.stringify(got)} (flag colour ${orange})`);
       }
       const plain = await page.evaluate(flagged(`${card} tr.line[data-n="29"]`, 'new'));
-      if (plain.flagged || plain.mark) throw new Error('an unflagged line is marked: ' + JSON.stringify(plain));
+      if (plain.flagged || plain.mark || plain.left !== 'none' || plain.right !== 'none') throw new Error('an unflagged line is marked: ' + JSON.stringify(plain));
     }
     await page.click('#btn-viewmode');
     await page.waitFor(`document.querySelector(${JSON.stringify(card + ' table.diff[data-view="unified"]')})`, { label: 'unified again' });

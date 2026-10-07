@@ -211,10 +211,11 @@ def test_browser_since_your_last_review(live_since, tmp_path):
     assert report["consoleErrors"] == [] and report["ok"] is True and report["exit_code"] == 0, pretty
     assert [s["name"] for s in report["steps"]] == [
         "Since your last review is a group of its own", "open Since your last review",
-        "the reviewed side takes questions only", "flagged lines carry a stripe and ⚑ with the reason",
+        "the reviewed side takes questions and GH comments", "flagged lines carry a stripe and ⚑ with the reason",
         "Next ⚑ steps through the flags", "a flag shows in the commit that last changed its line",
         "flags made on an earlier head are hidden"], pretty
     assert all(flag["stale"] for flag in live_since.store.flags()["flags"])
-    question = live_since.store.list_comments()[0]
+    question, github = live_since.store.list_comments()
     assert (question["anchor"]["commit"], question["anchor"]["side"], question["anchor"]["line"]) == ("since", "old", 25)
     assert question["github"] is None and question["snippet"] == "    return a * b"
+    assert github["anchor"] == question["anchor"] and github["github"] == {"status": "local"}

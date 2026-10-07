@@ -1031,6 +1031,11 @@ def print_github_plan(comment_id: str, target: dict, say) -> None:
                                                  target["commit"][:gitx.SHORT_SHA_LEN]))
     if target["subject_type"] == "REPLY":
         say("  thread: %s" % render.clean(target.get("thread_url"), True))
+    carried = target.get("carried_from")
+    if carried:
+        span = "%d-%d" % (carried["start_line"], carried["line"]) if carried.get("start_line") else str(carried["line"])
+        say("  written on old:%s of Since your last review, the version reviewed; carried to where it was at the head"
+            % span)
     for row in target["lines"]:
         say("  %6d | %s" % (row["line"], render.clean(row["text"])))
     say("  body:")
