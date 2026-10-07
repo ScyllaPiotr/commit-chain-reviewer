@@ -211,7 +211,8 @@ conversation ends without a decision, leave the server running and say so:
 
 Use it when the user wants to read or review a GitHub pull request they did not write ("review PR #N with ccr",
 "let me look at this PR"). You change no code. Every comment is either a **question** you answer, or a **GitHub
-comment** you check and, when it holds, post verbatim into the user's pending GitHub review.
+comment** you check and, when it holds, post verbatim into the user's pending GitHub review. A text you wrote goes
+there only when the user approved exactly that text ("Your wording, on the user's approval" below).
 
 ### Setup
 
@@ -271,9 +272,10 @@ much longer. So handle a round in two passes, each ending in one `ccr reply --ba
    - A posted comment the user edited since reads `GitHub comment (posted: <url>; edited since, the update not posted
      yet)`: check the new text like a new comment; when sound, `ccr gh-post` updates that comment in the pending review
      (`<id>: updated → <url>`), it never adds a second one.
-   - Not sound → do not post, and never post a reworded version. Reply with what is wrong and one corrected wording,
-     without `[resolve]`. The user edits the comment (an edit makes it pending again) or answers "post it as it is",
-     and submits again; then check the text as it is now, and post.
+   - Not sound → do not post, and never post a reworded version on your own. Reply with what is wrong and one
+     corrected wording, without `[resolve]`. The user edits the comment (an edit makes it pending again), answers
+     "post it as it is", or answers "post it after your correction" (then you put the correction in, as the next
+     section says), and submits again; then check the text as it is now, and post.
    - `<id>: ERROR …` → nothing was posted, unless the line says it was posted but not recorded (then run the same
      `ccr gh-post` again: it finds the comment and records it). Say in the thread what was refused and how to fix
      it (a line outside the pull request diff, or one that moved since, goes where it belongs, in **All changes**).
@@ -285,6 +287,28 @@ much longer. So handle a round in two passes, each ending in one `ccr reply --ba
 - Pending comments are drafts here too: `ccr gh-post` refuses a GitHub comment until the user submits it.
 - Never submit, edit or delete the GitHub review or anything in it yourself, and post nothing but the user's
   submitted GitHub comments: the user submits the review on GitHub, with the verdict and the body they choose.
+
+### Your wording, on the user's approval
+
+Besides their own comments, you may put a text you wrote into the user's pending review: your corrected wording of
+their GitHub comment, or a GitHub comment you proposed in a reply. The approval must be explicit and name concrete
+text: the user's comment in a submitted round says to post your proposal ("post it", "post it after your
+correction", "post them with these changes", with the changes spelled out). "Looks good", "maybe" or a pending draft
+approve nothing; when in doubt, ask in the thread and post nothing.
+
+- Use exactly the approved text: your proposal with the user's stated changes applied, and nothing else.
+- Put it in as the user's draft, never post it straight away:
+  - a correction of their GitHub comment: `ccr edit --repo "$REPO" <id> --file -` with the approved text;
+  - a new GitHub comment on a line or a file, at the place your proposal named:
+    `ccr comment --repo "$REPO" --as user --github --commit <sha> --path <p> [--line <n> [--side old] [--start-line
+    <m>]] --file -`.
+
+  Either one is pending in ccr then. Say in the approving thread what you added and that it waits for their Submit.
+- Once they submit it, it comes back in the next round: check it like any GitHub comment and post it with
+  `ccr gh-post`, a dry run first. Like everything you post, it goes into the user's **pending** GitHub review, which
+  only the user submits.
+- A GitHub reply into a thread on GitHub cannot be written from the CLI (`ccr reply` makes questions and answers
+  only). Give the approved text in your reply and ask the user to add it with **GH reply** in that thread.
 
 When the user is done, ask whether to stop the server (step 6) and offer to remove the worktree and the review ref.
 
@@ -312,9 +336,11 @@ When the user is done, ask whether to stop the server (step 6) and offer to remo
   hand over the new URL (a restart issues a new token).
 - Do not paste the token/URL into commit messages, issues or files.
 - PR mode: no code changes; post only with `ccr gh-post`, only the user's submitted GitHub comments that passed your
-  check, and verbatim; never write GitHub comments yourself (`ccr comment --github` is not for you) and never submit
-  the GitHub review. The questions get their answers in a first `ccr reply --batch -` call, before any GitHub
-  comment is checked; the GitHub comments you did not post get their replies in a second; a posted one gets no reply.
+  check, and verbatim, into the user's pending review; never submit the GitHub review. Write GitHub text in the user's
+  name (`ccr edit` of their GitHub comment, `ccr comment --as user --github`) only as "Your wording, on the user's
+  approval" allows: the exact text they explicitly approved, put in as their pending draft for them to submit. The
+  questions get their answers in a first `ccr reply --batch -` call, before any GitHub comment is checked; the GitHub
+  comments you did not post get their replies in a second; a posted one gets no reply.
 
 ## What you will read
 
