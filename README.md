@@ -26,6 +26,7 @@ buttons, and so do the threads that come from GitHub:
 * **Ask AI**: a question for Claude, answered in the thread. Nothing goes to GitHub.
 * **GH comment**, or **GH reply** in a GitHub thread: a message for the pull request. When you submit, Claude checks
   it against the code and posts it verbatim into your pending GitHub review, or replies with what is wrong with it.
+  Claude answers your questions first, so you can read the answers while it checks the GitHub comments.
 
 The pull request's discussion on GitHub comes in too, so you can ask Claude about a GitHub thread or answer it on
 the spot, in that same thread. The background colour tells the two dialogues apart: **blue** for yours with Claude,

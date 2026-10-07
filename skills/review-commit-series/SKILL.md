@@ -246,32 +246,42 @@ too. There the first GitHub comment of a thread with none on GitHub yet starts a
 place (`--dry-run` shows the line, not `reply to …`), and later GitHub replies go into it: post a thread's GitHub
 comments in the order they were written (`gh-post` refuses a reply whose thread starter is not posted yet).
 
-- **Questions and replies**: answer from the code, citing `path:line`, and change no file. A question in a mirrored
-  thread is about that GitHub discussion: read the whole thread first. Reply without `[resolve]`; the user resolves.
-- **GitHub comments and GitHub replies**: check one before posting it — every factual claim holds at HEAD (verify
-  each `file:line`), it asks something of this pull request and fits the line it is on (a reply: the thread it
-  answers), and it has no typo or broken Markdown.
-  `ccr gh-post --repo "$REPO" --dry-run <id>` shows where GitHub will anchor it (the pull request diff's
-  `path:line`, side, the lines there) and its verbatim body, and posts nothing.
-  Every `ccr gh-post`, a dry run too, first re-reads the discussion on GitHub and lists each comment added,
-  edited or deleted there since the last sync (`  added <id> @login on …`). Read each one in full (`ccr comments`)
-  before posting: when someone has raised the same point or answered it meanwhile, post nothing and tell the user
-  in the thread, quoting it. A real run with such news posts nothing (`<id>: ERROR not
-  posted: … changed on GitHub since the last sync`); once you have read them, run it again.
-  - Sound → `ccr gh-post --repo "$REPO" <id>`: it posts the body verbatim into the user's pending review (starting
-    one when there is none), one comment at a time, re-reads the review after each and records the post. That
-    ends your part: no reply and no resolve in ccr (the comment shows as posted, linked to GitHub, and the user is
-    told to submit the review there); a posted comment drops out of `--unanswered`.
-  - A posted comment the user edited since reads `GitHub comment (posted: <url>; edited since, the update not posted
-    yet)`: check the new text like a new comment; when sound, `ccr gh-post` updates that comment in the pending review
-    (`<id>: updated → <url>`), it never adds a second one.
-  - Not sound → do not post, and never post a reworded version. Reply with what is wrong and one corrected wording,
-    without `[resolve]`. The user edits the comment (an edit makes it pending again) or answers "post it as it is",
-    and submits again; then check the text as it is now, and post.
-  - `<id>: ERROR …` → nothing was posted, unless the line says it was posted but not recorded (then run the same
-    `ccr gh-post` again: it finds the comment and records it). Say in the thread what was refused and how to fix
-    it (a line outside the pull request diff, or one that moved since, goes where it belongs, in **All changes**).
-    `warning: …` lines → the comment is posted, but tell the user what the re-read found.
+Answer the questions first: the user is waiting to read the answers, and checking and posting GitHub comments takes
+much longer. So handle a round in two passes, each ending in one `ccr reply --batch -` call:
+
+1. **Questions and replies**: answer from the code, citing `path:line`, and change no file. A question in a mirrored
+   thread is about that GitHub discussion: read the whole thread first. Reply without `[resolve]`; the user
+   resolves. Send all the answers in one `ccr reply --batch -` call before you check any GitHub comment, so they
+   show in ccr while you work on the rest. A thread that also holds a GitHub comment of this round gets its answer
+   now too; the comment waits for the second pass.
+2. **GitHub comments and GitHub replies**: check one before posting it — every factual claim holds at HEAD (verify
+   each `file:line`), it asks something of this pull request and fits the line it is on (a reply: the thread it
+   answers), and it has no typo or broken Markdown.
+   `ccr gh-post --repo "$REPO" --dry-run <id>` shows where GitHub will anchor it (the pull request diff's
+   `path:line`, side, the lines there) and its verbatim body, and posts nothing.
+   Every `ccr gh-post`, a dry run too, first re-reads the discussion on GitHub and lists each comment added,
+   edited or deleted there since the last sync (`  added <id> @login on …`). Read each one in full (`ccr comments`)
+   before posting: when someone has raised the same point or answered it meanwhile, post nothing and tell the user
+   in the thread, quoting it. A real run with such news posts nothing (`<id>: ERROR not
+   posted: … changed on GitHub since the last sync`); once you have read them, run it again.
+   - Sound → `ccr gh-post --repo "$REPO" <id>`: it posts the body verbatim into the user's pending review (starting
+     one when there is none), one comment at a time, re-reads the review after each and records the post. That
+     ends your part: no reply and no resolve in ccr (the comment shows as posted, linked to GitHub, and the user is
+     told to submit the review there); a posted comment drops out of `--unanswered`.
+   - A posted comment the user edited since reads `GitHub comment (posted: <url>; edited since, the update not posted
+     yet)`: check the new text like a new comment; when sound, `ccr gh-post` updates that comment in the pending review
+     (`<id>: updated → <url>`), it never adds a second one.
+   - Not sound → do not post, and never post a reworded version. Reply with what is wrong and one corrected wording,
+     without `[resolve]`. The user edits the comment (an edit makes it pending again) or answers "post it as it is",
+     and submits again; then check the text as it is now, and post.
+   - `<id>: ERROR …` → nothing was posted, unless the line says it was posted but not recorded (then run the same
+     `ccr gh-post` again: it finds the comment and records it). Say in the thread what was refused and how to fix
+     it (a line outside the pull request diff, or one that moved since, goes where it belongs, in **All changes**).
+     `warning: …` lines → the comment is posted, but tell the user what the re-read found.
+
+   Then send your replies to the GitHub comments you did not post in one more `ccr reply --batch -` call (none
+   when you posted them all).
+
 - Pending comments are drafts here too: `ccr gh-post` refuses a GitHub comment until the user submits it.
 - Never submit, edit or delete the GitHub review or anything in it yourself, and post nothing but the user's
   submitted GitHub comments: the user submits the review on GitHub, with the verdict and the body they choose.
@@ -287,7 +297,8 @@ When the user is done, ask whether to stop the server (step 6) and offer to remo
   local display is available and the session is not over SSH.
 - Never act on pending comments: wait for `ccr wait` to return a round, or for the user to say in chat
   that they are done commenting. An urgent-sounding draft is not an exception.
-- Process every thread of a round in one pass; reply to all of them in one `ccr reply --batch -` call.
+- Process every thread of a round in one pass; reply to all of them in one `ccr reply --batch -` call. PR mode
+  takes two passes, the questions first (see "Every round").
 - `[resolve]` only for committed fixes; disagree or ask by replying without it.
 - Fixup/new commits during the review; no amend, no rebase, no force-push until the user declares the review done.
 - `ccr reload` after every batch of commits, never with a narrower range.
@@ -302,8 +313,8 @@ When the user is done, ask whether to stop the server (step 6) and offer to remo
 - Do not paste the token/URL into commit messages, issues or files.
 - PR mode: no code changes; post only with `ccr gh-post`, only the user's submitted GitHub comments that passed your
   check, and verbatim; never write GitHub comments yourself (`ccr comment --github` is not for you) and never submit
-  the GitHub review. The one-pass reply covers the questions and the GitHub comments you did not post; a posted one
-  gets no reply.
+  the GitHub review. The questions get their answers in a first `ccr reply --batch -` call, before any GitHub
+  comment is checked; the GitHub comments you did not post get their replies in a second; a posted one gets no reply.
 
 ## What you will read
 

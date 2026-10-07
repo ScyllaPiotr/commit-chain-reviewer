@@ -1103,8 +1103,9 @@ separate git worktree, start ccr with `--repo` on that worktree; never `ccr stop
 
 **PR mode** (section 10): the same loop on someone else's pull request. The agent fetches the pull request head
 into a worktree of its own, starts ccr there with `--range <merge base>..HEAD --pr <url>` and the pull request
-body as the cover letter, and changes no code: it answers questions, checks GitHub comments and posts the sound
-ones with `ccr gh-post`, and never submits the GitHub review.
+body as the cover letter, and changes no code: it answers a round's questions first, in one `ccr reply --batch`,
+so the user reads them while it checks the GitHub comments, posts the sound ones with `ccr gh-post`, replies to the
+others in a second batch, and never submits the GitHub review.
 
 Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `ccr@skills-dir`), or `claude plugin marketplace add <checkout> && claude plugin install ccr@ccr-local`, or `claude --plugin-dir <checkout>`. The plugin's `bin/` is on PATH while it is enabled; outside Claude Code use `bin/ccr` or `pip install -e .`.
 
@@ -1189,7 +1190,8 @@ worktree of its own, `--range <merge base>..HEAD`, so "All changes" is the diff 
 A user's comment is then one of two things:
 
 * a **question** for Claude: every comment by default, and the only kind on a commit, on the whole pull request
-  and in a reply in their threads (10.5). The agent answers it in the thread; nothing reaches GitHub.
+  and in a reply in their threads (10.5). The agent answers it in the thread, before it turns to the round's GitHub
+  comments; nothing reaches GitHub.
 * a **GitHub comment**: a root on a line, a range or a file, written with a *GH comment* button, or a reply written
   with *GH reply* in a thread on one (10.4, 10.5). Once it is
   submitted in a round, the agent checks it — its claims against the code, whether it fits its line and asks
