@@ -1014,8 +1014,8 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
   expand a collapsed file; expand a collapsed resolved thread; if the row is missing
   try expanding context to include it (else toast); `scrollToRow` (`main.scrollTop = rowTop − headerOffsets −
   120`; instant under `prefers-reduced-motion`); flash 1.5 s. All scroll targets have `scroll-margin-top`.
-* **Commit switch** remembers per sha `scrollTop` + current file; when the target commit contains the current file
-  (by `path`/`old_path`) scroll to it and flash its header; else restore that commit's `scrollTop`. Selected item
+* **Commit switch** (sidebar click, `]`/`[`, Back/Forward) opens the commit at the top (`main.scrollTop = 0`), so the
+  commit message is the first thing read; only a target with a file, line or thread scrolls further. Selected item
   scrolled into view in the sidebar. `]`/`[` at the ends → toast *"First/Last commit"*.
 * **Keyboard**: Ctrl/⌘+Enter posts and `Esc` cancels the focused editor (draft kept) — always on. Every single-key
   shortcut is **off by default** behind `const KEYBOARD_SHORTCUTS = false` at the top of `app.js` (the handlers stay in
@@ -1068,7 +1068,7 @@ state = { token, review, generation, version, startedAt, nowOffset, selectedSha,
   hl: Map<'sha|path|side', Line[]>, comments: Map<id, Comment>, threadsByKey: Map<key, id[]>, threadOrder: id[],
   orphans: Set<id>, openEditors: Map<key, {...}>, sel: null|{...}, currentFile: number, currentThread: id|null,
   collapsedFolders: Set<string>, collapsedFiles: Set<path>, submitting: boolean,
-  seenUntil: string, perCommitScroll: Map<sha, {top, path}> }
+  seenUntil: string }
 ```
 
 ---

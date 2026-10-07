@@ -332,8 +332,24 @@ export async function runScenario(page, url) {
 
   await runner.step('click 2nd commit', async () => {
     const before = await page.evaluate('location.hash');
+    // A click in the Files pane scrolls to the top of that file; one the 2nd commit also touches, and that commit
+    // must still open at its message rather than follow the file.
+    const shared = await page.evaluate(`(async () => {
+      const sha = document.querySelector('#commit-list .commit-item:nth-child(2)').dataset.sha;
+      const diff = await (await fetch('/api/commits/' + sha, { headers: { 'X-CCR-Token': ccrState.token } })).json();
+      const paths = new Set(diff.files.map((f) => f.path));
+      return [...document.querySelectorAll('#files .file-card')].map((c) => c.dataset.path).find((p) => paths.has(p)) || null; })()`);
+    if (!shared) throw new Error('the 2nd commit shares no file with All changes');
+    await page.click(`#file-tree .tree-file[data-path=${JSON.stringify(shared)}]`);
+    const card = `[...document.querySelectorAll('#files .file-card')].find((c) => c.dataset.path === ${JSON.stringify(shared)})`;
+    await page.waitFor(`location.hash === '#combined/' + encodeURIComponent(${JSON.stringify(shared)})`, { label: 'Files-pane click navigated' });
+    const off = await page.evaluate(`Math.round(${card}.getBoundingClientRect().top - document.querySelector('#main').getBoundingClientRect().top)`);
+    if (Math.abs(off - 16) > 2 || !(await page.evaluate(`document.querySelector('#main').scrollTop > 0`))) throw new Error(`the clicked file's top sits ${off}px below the pane's, not 16px`);
+    await page.waitFor(`ccrState.currentFile === [...document.querySelectorAll('#files .file-card')].indexOf(${card})`, { label: 'clicked file is the current one' });
     await page.click('#commit-list .commit-item:nth-child(2)');
     await page.waitFor(`document.querySelector('#commit-list .commit-item:nth-child(2)').classList.contains('is-selected') && document.querySelector('.file-card[data-rendered="1"] table.diff[data-view="unified"]')`);
+    const top = await page.evaluate(`document.querySelector('#main').scrollTop`);
+    if (top !== 0) throw new Error(`the commit opened scrolled to ${top}px, not at its message`);
     if (await page.evaluate(`Boolean(document.querySelector('#cover-letter') || document.querySelector('#btn-comment-review') || document.querySelector('#commit-header .thread-block[data-key-host="review"]'))`)) throw new Error('cover letter shown on a real commit');
     const hash = await page.evaluate('location.hash');
     if (hash === before || !/^#[0-9a-f]{40,64}$/.test(hash)) throw new Error('hash not updated: ' + hash);

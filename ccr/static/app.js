@@ -158,7 +158,7 @@
     comments: new Map(), threadsByKey: new Map(), threadOrder: [], orphans: new Set(),
     openEditors: new Map(), sel: null, currentFile: 0, currentThread: null,
     collapsedFolders: new Set(), collapsedFiles: new Set(),
-    seenUntil: '', perCommitScroll: new Map(),
+    seenUntil: '',
     // derived / transient
     counts: { byCommit: new Map(), byFile: new Map(), pendingComments: 0 },
     knownIds: new Set(), expandedResolved: new Set(), fileFilter: '', submitting: false,
@@ -2372,7 +2372,7 @@
   async function fullReinit() {
     stopPolling();
     state.startedAt = null;
-    state.diffs.clear(); state.fileText.clear(); state.hl.clear(); state.perCommitScroll.clear();
+    state.diffs.clear(); state.fileText.clear(); state.hl.clear();
     state.comments.clear(); state.threadsByKey.clear(); state.threadOrder = []; state.knownIds = new Set(); state.projectedFor = null;
     toast('Server restarted — reloading the review', 'info');
     await initialLoad();
@@ -2604,9 +2604,6 @@
   }
 
   async function selectCommit(sha, { push = true, keepFile = false } = {}) {
-    const main = $('#main');
-    if (state.viewSha && !state.compare && currentDiff()) state.perCommitScroll.set(state.selectedSha, { top: main.scrollTop, path: currentFilePath() });
-    const prevPath = !state.compare && currentDiff() ? currentFilePath() : null;
     clearSelection({ keepHash: true });
     hideTooltip();
     state.compare = null;
@@ -2622,16 +2619,7 @@
     try { await Promise.all(jobs); } catch (e) { toast(`Could not load ${shortSha(sha)}: ${e.message}`, 'error'); return; }
     if (state.viewSha !== sha) return;
     renderView();
-    if (keepFile) return;
-    const diff = currentDiff();
-    const target = prevPath && diff.files.find((f) => f.path === prevPath || f.old_path === prevPath);
-    if (target) {
-      const card = cardFor(target.path);
-      if (card) { scrollToEl(card, { offset: 16 }); flash(card); }
-    } else {
-      const mem = state.perCommitScroll.get(sha);
-      main.scrollTop = mem ? mem.top : 0;
-    }
+    if (!keepFile) $('#main').scrollTop = 0; // open at the commit message; with a file target the caller scrolls
   }
 
   function renderView() {
@@ -2644,8 +2632,6 @@
   }
 
   async function openCompare(base, head, { push = true } = {}) {
-    const main = $('#main');
-    if (!state.compare && currentDiff()) state.perCommitScroll.set(state.selectedSha, { top: main.scrollTop, path: currentFilePath() });
     clearSelection({ keepHash: true });
     hideTooltip();
     try {
@@ -2657,7 +2643,7 @@
     state.currentThread = null;
     if (push) writeHash({ compare: { base, head } }, false);
     renderView();
-    main.scrollTop = 0;
+    $('#main').scrollTop = 0;
   }
 
   function exitCompare() {
