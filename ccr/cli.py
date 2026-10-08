@@ -1034,8 +1034,9 @@ def print_github_plan(comment_id: str, target: dict, say) -> None:
     carried = target.get("carried_from")
     if carried:
         span = "%d-%d" % (carried["start_line"], carried["line"]) if carried.get("start_line") else str(carried["line"])
-        say("  written on old:%s of Since your last review, the version reviewed; carried to where it was at the head"
-            % span)
+        say("  written on old:%s of Since your last review, the version reviewed; %s" % (span, (
+            "on the base's lines, which the pull request removes" if carried.get("to") == "base"
+            else "those lines are still at the head, so it goes on them there")))
     for row in target["lines"]:
         say("  %6d | %s" % (row["line"], render.clean(row["text"])))
     say("  body:")

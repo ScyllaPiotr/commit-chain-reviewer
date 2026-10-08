@@ -1655,19 +1655,26 @@ def test_comments_on_the_since_view(rereview_repo):
     assert (target["path"], target["line"], target["side"], target["commit"]) == ("src/calc.py", ZERO_CHECK, "RIGHT", r.v2)
     old = store.add_comment("Why did mul change?", line_anchor(SINCE, "src/calc.py", REVIEWED_MUL, side="old"))
     assert old["snippet"] == "    return a * b"
-    carried = store.add_comment("Where did the plain one go?", line_anchor(SINCE, "src/calc.py", REVIEWED_MUL, side="old"),
+    removed = store.add_comment("Where did the plain one go?", line_anchor(SINCE, "src/calc.py", REVIEWED_MUL, side="old"),
                                 github=True)
-    target = store.github_target(carried["id"])
-    assert (target["path"], target["line"], target["side"], target["start_line"]) == ("src/calc.py", 25, "RIGHT", None)
-    assert target["carried_from"] == {"side": "old", "start_line": None, "line": REVIEWED_MUL}
-    assert target["lines"] == [{"line": 25, "text": "    return a * b if b else 0"}], \
-        "a changed line of the version reviewed goes to the line that replaced it at the head"
+    target = store.github_target(removed["id"])
+    assert (target["path"], target["line"], target["side"], target["start_line"]) == ("src/calc.py", 25, "LEFT", None)
+    assert target["carried_from"] == {"side": "old", "start_line": None, "line": REVIEWED_MUL, "to": "base"}
+    assert target["lines"] == [{"line": 25, "text": "    return a * b"}], \
+        "a line that is no more: on the removed content, which the base still has"
     ranged = store.add_comment("And around it?", line_anchor(SINCE, "src/calc.py", 28, side="old", start_line=24),
                                github=True)
     target = store.github_target(ranged["id"])
-    assert (target["start_line"], target["line"]) == (24, 28), "the lines that stayed keep their places"
-    store.delete_comment(carried["id"])
-    store.delete_comment(ranged["id"])
+    assert (target["side"], target["start_line"], target["line"]) == ("LEFT", 24, 25), \
+        "the range keeps what the base has: def divide() came with the pull request"
+    stayed = store.add_comment("Still here?", line_anchor(SINCE, "src/calc.py", 28, side="old", start_line=26), github=True)
+    target = store.github_target(stayed["id"])
+    assert (target["side"], target["start_line"], target["line"], target["carried_from"]["to"]) == ("RIGHT", 26, 28, "head")
+    with pytest.raises(StoreError, match="line 9 of tests/test_calc.py as you reviewed it was added by the pull request "
+                                         "and is gone from it now"):
+        store.add_comment("Why 2.0?", line_anchor(SINCE, "tests/test_calc.py", 9, side="old"), github=True)
+    for comment in (removed, ranged, stayed):
+        store.delete_comment(comment["id"])
     assert next(c for c in store.list_comments(project=COMBINED) if c["id"] == old["id"])["view_anchor"] is None, \
         "the version reviewed has no lines in any other view"
     in_combined = store.add_comment("And here?", line_anchor(COMBINED, "src/calc.py", ZERO_CHECK))

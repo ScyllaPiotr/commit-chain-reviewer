@@ -1447,9 +1447,8 @@ class ReviewStore:
             return dict(target, path=file_diff["path"])
         side = anchor["side"]
         carried = anchor["commit"] == SINCE and side == "old"
-        if carried:  # the version reviewed is not in the pull request any more: the comment goes where it was
-            path, start, end = self._reviewed_at_head(comment)
-            side = "new"
+        if carried:  # the version reviewed is not in the pull request any more
+            path, start, end, side = self._reviewed_on_github(comment, data)
         else:
             path, end = self._github_line(anchor, data, anchor["line"])
             start = end
@@ -1478,28 +1477,54 @@ class ReviewStore:
                       start_line=start if start < end else None, start_side=github_side if start < end else None,
                       lines=lines)
         if carried:
-            result["carried_from"] = {"side": "old", "start_line": anchor["start_line"], "line": anchor["line"]}
+            result["carried_from"] = {"side": "old", "start_line": anchor["start_line"], "line": anchor["line"],
+                                      "to": "head" if side == "new" else "base"}
         return result
 
-    def _reviewed_at_head(self, comment: dict) -> tuple:
-        """``(path, start, end)`` at the head for lines of the version reviewed - the old side of "Since your last
-        review" - which the pull request no longer has (10.2): a line that stayed keeps its place, a removed or
-        changed one goes to the line that took the place of its change."""
+    def _reviewed_on_github(self, comment: dict, data: dict) -> tuple:
+        """``(path, start, end, side)`` in the pull request diff for lines of the version reviewed, the old side of
+        "Since your last review" (10.2).
+
+        Lines that are all still at the head go there.  A comment that takes in a removed line goes on the removed
+        content: the base's lines, which the pull request diff shows on its old side.  A line the pull request had
+        added and has removed since is in neither, and GitHub takes a pending comment only on that diff.
+        """
         anchor = comment["anchor"]
-        file_diff = _find_file(self._view_diff(SINCE, False), anchor["path"])
-        if file_diff is None or file_diff["status"] == "D":
-            raise StoreError("%s is gone from the pull request, so GitHub has no line for a comment on it; comment on "
-                             "the pull request instead" % anchor["path"])
-        first = anchor["start_line"] or anchor["line"]
+        since = _find_file(self._view_diff(SINCE, False), anchor["path"])
+        if since is None:
+            raise StoreError("%s is not part of Since your last review any more; put the comment where it belongs "
+                             "again" % anchor["path"], 409)
+        first, last = anchor["start_line"] or anchor["line"], anchor["line"]
+        span = str(last) if first == last else "%d-%d" % (first, last)
         if comment.get("snippet"):
-            rows = [text for number, text in _side_rows(file_diff, "old") if first <= number <= anchor["line"]]
+            rows = [text for number, text in _side_rows(since, "old") if first <= number <= last]
             if _cap_snippet(rows) != comment["snippet"]:
                 raise StoreError("%s:%s (old side) of Since your last review no longer reads as it did when the comment "
-                                 "was written; put the comment where it belongs again"
-                                 % (anchor["path"], anchor["line"] if first == anchor["line"] else "%d-%d"
-                                    % (first, anchor["line"])), 409)
-        start, end = sorted((_head_line(file_diff, first), _head_line(file_diff, anchor["line"])))
-        return file_diff["path"], start, end
+                                 "was written; put the comment where it belongs again" % (anchor["path"], span), 409)
+        removed = sorted(row["o"] for hunk in since["hunks"] for row in hunk["lines"]
+                         if row["n"] is None and row["o"] is not None and first <= row["o"] <= last)
+        if not removed:
+            start, end = sorted((_head_line(since, first), _head_line(since, last)))
+            return since["path"], start, end, "new"
+        combined = _find_file(self._view_diff(COMBINED, False), since["path"])
+        if combined is None:
+            raise StoreError("%s is not part of the pull request diff" % since["path"])
+        base_path = combined["old_path"] or combined["path"]
+        shown = {number for number, _ in _side_rows(combined, "old")}
+
+        def in_base(line):
+            mapped = self._map(since["old_rev"], data["range"]["base"], since["old_path"] or since["path"], line)
+            ok = mapped and mapped["status"] in ("same", "moved") and mapped["path"] == base_path
+            return mapped["line"] if ok and mapped["line"] in shown else None
+
+        start = in_base(first) or in_base(removed[0])
+        end = in_base(last) or in_base(removed[-1])
+        if start is None or end is None:
+            gone = removed[0] if in_base(removed[0]) is None else removed[-1]
+            raise StoreError("line %d of %s as you reviewed it was added by the pull request and is gone from it now, "
+                             "so the pull request diff no longer has it, and GitHub takes a pending comment only on "
+                             "that diff; comment on the file instead, or ask Claude" % (gone, anchor["path"]))
+        return combined["path"], min(start, end), max(start, end), "old"
 
     def _github_comment(self, comment_id) -> dict:
         comment = self._fetch(comment_id)

@@ -95,8 +95,8 @@ out. A path that conflicts in the rebuild is compared from `R` itself instead (i
 changes may show in it; without a shared base (`old_base` null) every path of the pull request is compared from `R`.
 It is recomputed on every load, as `B` and `H` move. Its new side is `H`, so comments there behave as on "All
 changes" (they project, and in PR mode can be GitHub comments, 10.2); its old side is the version reviewed, which no
-other view shows: comments there stay in this view, and a GitHub comment written there goes to GitHub at the place
-those lines held at the head (10.2).
+other view shows: comments there stay in this view, and a GitHub comment written there goes on those lines at the
+head while they are all still there, else on the removed content as the base has it (10.2).
 
 **Range spec grammar** (`--range SPEC` or `-n N`):
 
@@ -1332,11 +1332,15 @@ lines and their context), so `github_target` puts a GitHub comment there:
 * Refused when the rows found no longer read as the comment's snippet (409): "All changes" anchors keep their line
   numbers across a reload, so after the pull request head moved the line under one may be another line now.
 * `kind=line` on `since` (2.1), new side: its lines are `range.head`'s, so they stay. Its old side is the version
-  reviewed, which the pull request no longer has, so each end is carried through that view's diff to the head: a line
-  that stayed to its own row, a removed or changed one to the row that took the place of its change (the first row
-  after it, else the last one before it). The rows must still read as the snippet in that view (409 otherwise), the
-  file must still exist at the head, and the result is a `RIGHT` comment, which `github_target` marks with
-  `carried_from` (`{"side": "old", "start_line", "line"}`) and `ccr gh-post --dry-run` names.
+  reviewed; its rows must still read as the snippet in that view (409 otherwise). When none of its lines was removed
+  since, they are all still at the head: each end goes to its row there (`RIGHT`). A comment that takes in a removed
+  line goes on the removed content instead, which the pull request diff shows on its old side as far as the base has
+  it: each end is mapped with `map_line` to `range.base` and must be a row of that side (`LEFT`); an end that is not,
+  such as a line of the pull request's own, falls back to the first (last) removed line. A removed line the pull
+  request had added itself is in neither side of that diff, and GitHub takes a pending comment only on the diff of
+  the review's commit, the head: refused (*"line 9 of tests/test_calc.py as you reviewed it was added by the pull
+  request and is gone from it now, …"*). `github_target` marks such a comment with `carried_from` (`{"side": "old",
+  "start_line", "line", "to": "head"|"base"}`), and `ccr gh-post --dry-run` says where it went.
 * Refused, with a message saying why: other anchor kinds, `worktree`, outdated anchors, a review without a base, and
   each failed rule above (*"src/app.py:10 (new side) is not in the pull request diff, and GitHub takes comments only
   on the lines that diff shows"*, *"line 2 of notes.txt is changed again later in the pull request, so its diff has

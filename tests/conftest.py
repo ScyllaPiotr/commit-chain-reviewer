@@ -333,6 +333,7 @@ CALC_DIVIDE_CHECKED = ["", "", "def divide(a, b):", "    if b == 0:", "        r
 SHARED_FILLER = ["# filler %d" % i for i in range(1, 7)]
 TESTS_ADD = ["from calc import add, divide", "", "", "def test_add():", "    assert add(1, 2) == 3"]
 TESTS_DIVIDE = ["", "", "def test_divide():", "    assert divide(6, 3) == 2"]
+TESTS_DIVIDE_FLOAT = ["", "", "def test_divide():", "    assert divide(6, 3) == 2.0"]  # a line the review saw, changed
 TESTS_DIVIDE_BY_ZERO = ["", "", "def test_divide_by_zero():", "    with pytest.raises(ZeroDivisionError):",
                         "        divide(1, 0)"]
 REVIEWED_AT = "2023-11-15T09:30:00Z"
@@ -349,7 +350,8 @@ class RereviewRepo:
     first line of ``src/calc.py``, far from the pull request's lines, so rebuilding the reviewed version on it is
     clean; ``base3`` also changes the line of ``src/shared.py`` the pull request changes, so that rebuild conflicts.
     ``v2`` (and ``v3``) differ from the reviewed version by a requested change (``divide`` checks for zero), a
-    change the review triggered (a test for it) and an unrelated one (``mul``).
+    change the review triggered (a test for it) and an unrelated one (``mul``); they also change a line the pull
+    request had added (``test_divide`` compares with ``2.0``).
     """
 
     def __init__(self, path: str, shas: dict):
@@ -391,7 +393,7 @@ def build_rereview_repo(path) -> RereviewRepo:
                                         "src/calc.py": _lines(upstream_head, CALC_ADD_MUL)})
     mul_changed = CALC_ADD_MUL[:-1] + ["    return a * b if b else 0"]
     reworked = {"src/calc.py": _lines(upstream_head, mul_changed, CALC_DIVIDE_CHECKED),
-                "tests/test_calc.py": _lines(TESTS_ADD, TESTS_DIVIDE, TESTS_DIVIDE_BY_ZERO)}
+                "tests/test_calc.py": _lines(TESTS_ADD, TESTS_DIVIDE_FLOAT, TESTS_DIVIDE_BY_ZERO)}
     b.git("checkout", "-q", "-b", "v2")
     shas["v2"] = commit("Add divide", dict(reworked, **{"src/shared.py": shared("fast", 20)}))
     b.git("checkout", "-q", "main")
