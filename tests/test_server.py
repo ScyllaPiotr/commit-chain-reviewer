@@ -768,3 +768,13 @@ def test_flag_routes(rereview_repo):
         assert cleared.status == 200 and cleared.json["removed"] == 2 and srv.get("/api/flags").json["flags"] == []
     finally:
         srv.close()
+
+
+def test_github_lines_route(live):
+    sha = live.repo.sha(THREE_HUNKS)
+    assert live.get("/api/commits/%s/github-lines?path=src/app.py" % sha).status == 409, "outside PR mode"
+    live.post("/api/pr", {"url": "o/r#7"})
+    assert live.get("/api/commits/%s/github-lines" % sha).status == 400
+    assert live.get("/api/commits/%s/github-lines?path=nope" % sha).status == 404
+    known = live.get("/api/commits/%s/github-lines?path=src/app.py" % sha)
+    assert known.status == 200 and set(known.json) == {"file", "old", "new"}

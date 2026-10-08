@@ -165,6 +165,7 @@
     loadedOnce: false, polling: false, pollSeq: 0, pollAbort: null, pollRole: null, disconnectedSince: null,
     rangeAnchorSha: null, inflight: new Set(), hoverThread: null, projectedFor: null,
     flags: { head: null, flags: [], views: {} }, flagCursor: { view: null, index: -1 },
+    githubLines: new Map(),
   };
   window.ccrState = state;
 
@@ -846,6 +847,7 @@
     observeThreads(card);
     restoreSelectionClasses(card);
     applyFlags(card);
+    loadGithubLines(card);
   }
 
   function rerenderBody(card) {
@@ -857,6 +859,48 @@
     observeThreads(card);
     restoreSelectionClasses(card);
     applyFlags(card);
+    loadGithubLines(card);
+  }
+
+  /* ---- where GitHub takes no comment (PR mode, spec 10.2) */
+
+  /** Why a GitHub comment cannot go on a line or file anchor, from GET /api/commits/{view}/github-lines; null when it
+   *  can, or while that is not known yet (the server checks again when the comment is written). */
+  function githubWhyNot(a) {
+    if (!a || !['line', 'file'].includes(a.kind)) return null;
+    const known = state.githubLines.get(`${a.commit}|${a.path}`);
+    if (!known || known instanceof Promise) return null;
+    return a.kind === 'file' ? known.file : known[a.side][String(a.line)] || null;
+  }
+
+  function loadGithubLines(card) {
+    if (!prMode() || commentsDisabled()) return;
+    const sha = state.viewSha; const path = card.dataset.path; const key = `${sha}|${path}`;
+    if (state.githubLines.has(key)) { applyGithubLines(card); return; }
+    state.githubLines.set(key, api(`/api/commits/${encodeURIComponent(sha)}/github-lines?path=${encodeURIComponent(path)}`)
+      .then((known) => {
+        state.githubLines.set(key, known);
+        const shown = state.viewSha === sha ? cardFor(path) : null;
+        if (shown) applyGithubLines(shown);
+      })
+      .catch(() => state.githubLines.delete(key)));
+  }
+
+  /** Grey out a card's GH comment buttons (the file's, and the gutter's where it sits) where GitHub takes none. */
+  function applyGithubLines(card) {
+    const path = card.dataset.path;
+    const file = card.querySelector('.btn-comment-file[data-intent="github"]');
+    if (file) setGithubWhyNot(file, githubWhyNot({ kind: 'file', commit: state.viewSha, path }), 'GH comment on this file, for your pending review');
+    const gutter = card.querySelector('.btn-add-comment[data-intent="github"]');
+    if (gutter && gutter.dataset.line) {
+      setGithubWhyNot(gutter, githubWhyNot({ kind: 'line', commit: state.viewSha, path, side: gutter.dataset.side, line: gutter.dataset.line }), GUTTER_BUTTONS.github.label);
+    }
+  }
+
+  function setGithubWhyNot(btn, why, title) {
+    btn.classList.toggle('is-disabled', Boolean(why));
+    btn.setAttribute('aria-disabled', why ? 'true' : 'false');
+    btn.title = why || title;
   }
 
   /* ==================================================================== flags (re-review, spec 2.7) */
@@ -1402,6 +1446,9 @@
       if (moved) btn.classList.remove('is-open');
       btn.classList.toggle('is-visible', Boolean(show));
       btn.classList.toggle('has-draft', hasDraftFor(key, btn.dataset.intent || null));
+      if (btn.dataset.intent === 'github') {
+        setGithubWhyNot(btn, githubWhyNot({ kind: 'line', commit: state.viewSha, path: card.dataset.path, side, line }), GUTTER_BUTTONS.github.label);
+      }
       if (btn.parentElement !== cell) cell.appendChild(btn);
     }
   }
@@ -2004,7 +2051,7 @@
     if (entry.mode === 'reply') return takesGitHubReply(state.comments.get(entry.rootId)) ? (entry.intent === 'github' ? 'github' : 'question') : null;
     if (entry.mode !== 'new') return null;
     const kind = entry.anchor && entry.anchor.kind;
-    return (kind === 'line' || kind === 'file') && entry.intent === 'github' ? 'github' : 'question';
+    return (kind === 'line' || kind === 'file') && entry.intent === 'github' && !githubWhyNot(entry.anchor) ? 'github' : 'question';
   }
 
   function editorHtml(key) {
@@ -2022,7 +2069,11 @@
     const placeholder = github ? `${what}, posted verbatim to your pending review once Claude has checked it (Markdown)…`
       : intent === 'question' ? 'Ask Claude (Markdown)…' : reply ? 'Reply (Markdown)…' : 'Leave a comment (Markdown)…';
     const kind = entry.anchor && entry.anchor.kind;
-    const intentButton = (name, text) => `<button type="button" class="intent-btn${intent === name ? ' is-active' : ''}" data-intent="${name}" aria-pressed="${intent === name}">${text}</button>`;
+    const whyNot = entry.mode === 'new' ? githubWhyNot(entry.anchor) : null;
+    const intentButton = (name, text) => {
+      const off = name === 'github' && whyNot;
+      return `<button type="button" class="intent-btn${intent === name ? ' is-active' : ''}${off ? ' is-disabled' : ''}" data-intent="${name}" aria-pressed="${intent === name}"${off ? ` aria-disabled="true" title="${esc(whyNot)}"` : ''}>${text}</button>`;
+    };
     const intentSwitch = intent && (reply || kind === 'line' || kind === 'file')
       ? `<div class="editor-intent" role="group" aria-label="What this comment is">${intentButton('question', 'Ask AI')}${intentButton('github', what)}</div>` : '';
     let info = '';
@@ -2483,7 +2534,7 @@
   async function fullReinit() {
     stopPolling();
     state.startedAt = null;
-    state.diffs.clear(); state.fileText.clear(); state.hl.clear();
+    state.diffs.clear(); state.fileText.clear(); state.hl.clear(); state.githubLines.clear();
     state.comments.clear(); state.threadsByKey.clear(); state.threadOrder = []; state.knownIds = new Set(); state.projectedFor = null;
     toast('Server restarted — reloading the review', 'info');
     await initialLoad();
@@ -2493,7 +2544,7 @@
   async function reloadCurrentView() {
     const main = $('#main');
     const top = main.scrollTop;
-    state.diffs.clear(); state.fileText.clear(); state.hl.clear();
+    state.diffs.clear(); state.fileText.clear(); state.hl.clear(); state.githubLines.clear();
     if (state.compare) {
       try { await loadCompare(state.compare.base, state.compare.head); } catch (e) { state.compare = null; }
     }
@@ -2977,6 +3028,7 @@
     const hit = (sel) => el.closest(sel);
     let b;
     if ((b = hit('.editor-tab'))) { showEditorTab(b.closest('form.comment-editor'), b.dataset.tab); return; }
+    if ((b = hit('.is-disabled'))) { e.preventDefault(); if (b.title) toast(b.title, 'info'); return; }
     if ((b = hit('.intent-btn'))) { setEditorIntent(b.closest('form.comment-editor'), b.dataset.intent); return; }
     if ((b = hit('.fmt-btn'))) { applyFormat(b.closest('form.comment-editor').querySelector('textarea'), b.dataset.fmt); return; }
     if ((b = hit('.btn-fork'))) { e.preventDefault(); openFork(b, e); return; }

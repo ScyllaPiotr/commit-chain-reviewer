@@ -75,6 +75,15 @@ SINCE = "since"  # "Since your last review": what the head changed since a revie
 COMPARE_PREFIX = "compare:"
 SNIPPET_CUT_MARK = "…"
 UNKNOWN_LOCATION = {"path": None, "line": None, "status": "unknown"}
+# why a line takes no GitHub comment, as the page says it before one is written (10.2)
+WHY_GONE = ("This line is no longer in the pull request: it came with the pull request and was removed after your "
+            "review, so GitHub has no line for a comment on it")
+WHY_NOT_IN_DIFF = "This line is not in the pull request diff, and GitHub takes comments only on the lines that diff shows"
+WHY_CHANGED_LATER = ("This line is changed again later in the pull request, so its diff has no place for it; comment on "
+                     "it in All changes")
+WHY_UNCOMMITTED = "Uncommitted changes are not part of the pull request"
+WHY_NO_BASE = "The review has no base commit, so it is not the diff of a pull request"
+WHY_FILE = "This file is not part of the pull request diff"
 NO_SINCE = "the Since your last review view is not open (start ccr with --since REV)"
 NO_PR = "this review is not linked to a GitHub pull request (start ccr with --pr URL)"
 GITHUB_LOCAL = {"status": "local"}
@@ -1509,14 +1518,8 @@ class ReviewStore:
         combined = _find_file(self._view_diff(COMBINED, False), since["path"])
         if combined is None:
             raise StoreError("%s is not part of the pull request diff" % since["path"])
-        base_path = combined["old_path"] or combined["path"]
         shown = {number for number, _ in _side_rows(combined, "old")}
-
-        def in_base(line):
-            mapped = self._map(since["old_rev"], data["range"]["base"], since["old_path"] or since["path"], line)
-            ok = mapped and mapped["status"] in ("same", "moved") and mapped["path"] == base_path
-            return mapped["line"] if ok and mapped["line"] in shown else None
-
+        in_base = partial(self._base_line, since, combined, shown, data)
         start = in_base(first) or in_base(removed[0])
         end = in_base(last) or in_base(removed[-1])
         if start is None or end is None:
@@ -1525,6 +1528,69 @@ class ReviewStore:
                              "so the pull request diff no longer has it, and GitHub takes a pending comment only on "
                              "that diff; comment on the file instead, or ask Claude" % (gone, anchor["path"]))
         return combined["path"], min(start, end), max(start, end), "old"
+
+    def _base_line(self, since: dict, combined: dict, shown: set, data: dict, line: int):
+        """The base's line a line of the version reviewed is, when the pull request diff shows it (``shown``: the old
+        side's rows of the file in "All changes"), else None."""
+        mapped = self._map(since["old_rev"], data["range"]["base"], since["old_path"] or since["path"], line)
+        ok = mapped and mapped["status"] in ("same", "moved") and mapped["path"] == (combined["old_path"] or combined["path"])
+        return mapped["line"] if ok and mapped["line"] in shown else None
+
+    def github_lines(self, commit, path) -> dict:
+        """Where in a file of a view a GitHub comment cannot go (10.2), so the page can say so before one is written:
+        ``{"file": why|None, "old": {line: why}, "new": {line: why}}`` over the rows the view's diff shows.
+
+        It applies the rules of ``github_target`` to each row as a one-line comment; a range is checked when written.
+        """
+        if self.pr is None:
+            raise StoreError(NO_PR, 409)
+        with self._lock:
+            data = self._require_data()
+            view = self._resolve_view(commit)
+        file_diff = self._anchor_file(view, path)
+        rows = {side: [number for number, _ in _side_rows(file_diff, side)] for side in SIDES}
+        blocked = {"file": None, "old": {}, "new": {}}
+        if view == WORKTREE or data["range"]["base"] is None:
+            why = WHY_UNCOMMITTED if view == WORKTREE else WHY_NO_BASE
+            return {"file": why, "old": dict.fromkeys(rows["old"], why), "new": dict.fromkeys(rows["new"], why)}
+        combined_diff = self._view_diff(COMBINED, False)
+        if _find_file(combined_diff, file_diff["path"]) is None:
+            blocked["file"] = WHY_FILE
+        if view == COMBINED:
+            return blocked
+        shown = {}
+
+        def placed(at_path, side, line) -> bool:
+            if (at_path, side) not in shown:
+                found = _find_file(combined_diff, at_path)
+                shown[(at_path, side)] = {number for number, _ in _side_rows(found, side)} if found else set()
+            return line in shown[(at_path, side)]
+
+        if view == SINCE:
+            combined = _find_file(combined_diff, file_diff["path"])
+            base_rows = {number for number, _ in _side_rows(combined, "old")} if combined else set()
+            for row in (r for hunk in file_diff["hunks"] for r in hunk["lines"]):
+                if row["n"] is not None and not placed(file_diff["path"], "new", row["n"]):
+                    blocked["new"][row["n"]] = WHY_NOT_IN_DIFF
+                if row["o"] is None:
+                    continue
+                if row["n"] is not None:  # the version reviewed has it, and so does the head
+                    if not placed(file_diff["path"], "new", row["n"]):
+                        blocked["old"][row["o"]] = WHY_NOT_IN_DIFF
+                elif combined is None or self._base_line(file_diff, combined, base_rows, data, row["o"]) is None:
+                    blocked["old"][row["o"]] = WHY_GONE
+            return blocked
+        for side in SIDES:
+            anchor = {"commit": view, "path": file_diff["path"], "side": side}
+            for line in rows[side]:
+                try:
+                    at_path, at_line = self._github_line(anchor, data, line)
+                except StoreError:
+                    blocked[side][line] = WHY_CHANGED_LATER
+                    continue
+                if not placed(at_path, side, at_line):
+                    blocked[side][line] = WHY_NOT_IN_DIFF
+        return blocked
 
     def _github_comment(self, comment_id) -> dict:
         comment = self._fetch(comment_id)

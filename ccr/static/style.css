@@ -432,6 +432,8 @@ table.diff tr.threads .thread + .thread, table.diff tr.threads .thread + .editor
 }
 .btn-add-comment.is-visible, tr.line:hover .btn-add-comment, tr.line:focus-within .btn-add-comment, tr.line.is-selected .btn-add-comment { display: inline-flex; }
 .btn-add-comment:hover { transform: scale(1.1); }
+/* PR mode: where GitHub takes no comment, GH comment stays visible but inactive, saying why on hover */
+.btn-add-comment.is-disabled, .hdr-btn.is-disabled, .intent-btn.is-disabled { opacity: .45; cursor: not-allowed; transform: none; }
 .btn-add-comment.is-parked { display: none !important; }
 /* PR mode: the [+] (.btn-fork) opens, hovered or clicked, into a question [Ask AI] where it was and a GitHub comment
    [GH comment] right of it; it closes on another line. The row under the pointer, on that side, turns grey. */

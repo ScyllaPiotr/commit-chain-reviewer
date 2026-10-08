@@ -211,7 +211,8 @@ def test_browser_since_your_last_review(live_since, tmp_path):
     assert report["consoleErrors"] == [] and report["ok"] is True and report["exit_code"] == 0, pretty
     assert [s["name"] for s in report["steps"]] == [
         "Since your last review is a group of its own", "open Since your last review",
-        "the reviewed side takes questions and GH comments", "flagged lines carry a stripe and ⚑ with the reason",
+        "the reviewed side takes questions and GH comments", "GH comment is inactive where GitHub has no line",
+        "flagged lines carry a stripe and ⚑ with the reason",
         "Next ⚑ steps through the flags", "a flag shows in the commit that last changed its line",
         "flags made on an earlier head are hidden"], pretty
     assert all(flag["stale"] for flag in live_since.store.flags()["flags"])

@@ -1829,3 +1829,51 @@ def test_a_line_of_the_old_side_is_placed_where_it_was_on_the_new_side():
     assert _head_line(file_diff, 11) == 9, "a replaced line: its first replacement"
     assert _head_line(file_diff, 21) == 19, "removed at the end: the one before it"
     assert [_head_line(file_diff, n) for n in (1, 7, 15)] == [1, 5, 14], "outside the hunks: shifted"
+
+
+def _github_lines_agree(store, views):
+    """``github_lines`` blocks a row exactly when a one-line GitHub comment there would be refused."""
+    checked = 0
+    for view in views:
+        for f in store.commit_diff(view, full=True)["files"]:
+            if f["binary"] or f.get("too_large"):
+                continue
+            blocked = store.github_lines(view, f["path"])
+            for side in ("old", "new"):
+                for line, _ in [(n, t) for hunk in f["hunks"] for n, t in
+                                [(r["o" if side == "old" else "n"], r["s"]) for r in hunk["lines"]] if n is not None][:400]:
+                    try:
+                        store._github_target({"anchor": line_anchor(view, f["path"], line, side), "outdated": False,
+                                              "snippet": ""})
+                        refused = None
+                    except StoreError as exc:
+                        refused = str(exc)
+                    assert (line in blocked[side]) == (refused is not None), (view, f["path"], side, line, refused)
+                    checked += 1
+    return checked
+
+
+def test_github_lines_say_where_a_github_comment_cannot_go(fixture_repo, pr_store):
+    views = [c["sha"] for c in pr_store.review()["commits"] if c["kind"] in ("commit", "combined")]
+    assert _github_lines_agree(pr_store, views) > 500
+    assert any(pr_store.github_lines(view, path)["new"] for view in views
+               for path in [f["path"] for f in pr_store.commit_diff(view)["files"]]), "some rows have no place on GitHub"
+    worktree = pr_store.github_lines(WORKTREE, "README.md")
+    assert worktree["file"] == "Uncommitted changes are not part of the pull request" and worktree["new"]
+    assert pr_store.github_lines(COMBINED, "src/app.py") == {"file": None, "old": {}, "new": {}}
+    with pytest.raises(NotFoundError):
+        pr_store.github_lines(fixture_repo.sha(THREE_HUNKS), "no/such/file")
+
+
+def test_github_lines_of_since_your_last_review(rereview_repo):
+    r = rereview_repo
+    store = since_store(r, r.base2, r.v2)
+    with pytest.raises(StoreError, match="not linked to a GitHub pull request"):
+        store.github_lines(SINCE, "src/calc.py")
+    store.set_pr(PR_URL)
+    assert _github_lines_agree(store, [SINCE]) > 20
+    blocked = store.github_lines(SINCE, "tests/test_calc.py")
+    assert blocked == {"file": None, "new": {}, "old": {9: "This line is no longer in the pull request: it came with the "
+                                                          "pull request and was removed after your review, so GitHub "
+                                                          "has no line for a comment on it"}}
+    store.close()

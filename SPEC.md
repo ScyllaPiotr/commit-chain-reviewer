@@ -601,6 +601,7 @@ and `reviewed`); `path` must be non-empty, relative, NUL-free, without
 | GET | `/api/events?since=N&timeout=S` | long-poll: `state()` + `"changed": true` as soon as `version > N` **or `since > version`** (client from another server incarnation) or `stopping`; `changed: false` after `S` seconds (cap 30, default 25). Records `ui.last_seen` for non-CLI agents. |
 | GET | `/api/commits/{sha}?full=1&ws=ignore` | CommitDiff (2.3); `sha` = listed sha / short sha / `combined` / `worktree` / `since`; 404 unknown; 503 `{"error":"loading"}` while loading |
 | GET | `/api/commits/{sha}/file?path=P&ws=ignore` | one **untrimmed** FileDiff (path, then old_path); 404 |
+| GET | `/api/commits/{sha}/github-lines?path=P` | PR mode: where a GitHub comment cannot go in that file of that view, `{"file": why\|null, "old": {line: why}, "new": {line: why}}` over the rows its diff shows, by the rules of 10.2 for a one-line comment; 409 outside PR mode |
 | GET | `/api/compare?base=X&head=Y&ws=ignore` | CommitDiff with `sha: "compare:<X10>..<Y10>"`, `kind: "compare"`, `subject: "Compare …"` |
 | GET | `/api/file?rev=R&path=P` | `{"rev","path","content","lines","truncated_lines"}`; 400 bad rev/path; 403 escape; 404 missing/not a blob; 413 too large; 415 binary |
 | GET | `/api/comments?state=&round=&resolved=&author=&commit=&path=&outdated=include|exclude|only&locate=1&project=<view>` | `{"version","generation","now","comments":[…]}`. With `project` (a listed sha, `combined` or `worktree`; 404 otherwise) every comment carries `view_anchor` — the anchor to render it at **in that view** (its own anchor when native; a line mapped with `map_line` between the two views' revisions for line comments made elsewhere; the same path for file comments; `null` for other views' commit-level comments and unmappable lines; review anchors as-is) — and `projected` (true when it came from another view). Replies carry their root's `view_anchor`. |
@@ -1212,7 +1213,10 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
   `diff_since`), `test_store.py` (the view, its comments and projections, the old side refused for GitHub, the reload
   that conflicts, closing it, persistence, no shared base, the schema-3 migration), `test_server.py` (`/api/since`),
   `test_cli.py` (`start --since`, also on reuse) and `test_e2e.py` (the driver's `since` scenario: the group of its
-  own with the review's date and time, the header, and the reviewed side taking questions and GH comments). Flags (2.7):
+  own with the review's date and time, the header, the reviewed side taking questions and GH comments, and *GH
+  comment* inactive, with its reason, on a line the pull request added and removed since). `test_store.py` also
+  checks that `github_lines` blocks a row exactly when `github_target` refuses a one-line comment there, over every
+  row of every view. Flags (2.7):
   `test_gitx.py` (`blame_lines`), `test_store.py` (their places, a commit's flag carried to the head, the checks, going
   stale when the head moves), `test_server.py` and `test_cli.py` (`flag`, `flags`, `--clear`), and the `since`
   scenario (stripes on both edges and ⚑ with the reason in unified and split view, the counts, *⚑ Next*, the flag in the commit that
@@ -1408,7 +1412,11 @@ and *GH comment*; the commit and whole-review buttons read *Ask AI about this co
 pull request*. A new-comment editor on a line or a file has an *Ask AI | GH comment* switch (`.editor-intent`)
 beside its tabs, which keeps the text; writing a GitHub comment it carries `data-intent="github"`, the label **Add
 GH comment** and the hint *posted verbatim to your pending review once Claude has checked it*, and a question editor
-is labelled **Ask AI**. A draft remembers which of the two it was written as (`ccr:draft-intent:<key>`), so its dot
+is labelled **Ask AI**. Where GitHub would refuse a GitHub comment (10.2), *GH comment* stays visible but inactive
+(`.is-disabled`, `aria-disabled`) and says why on hover, and a click shows that reason as a toast: in the gutter, in
+the editor's switch and in the file header. The page learns it per file and view from `GET
+/api/commits/{view}/github-lines?path=P` once the card renders; rows it does not cover (expanded context) stay active
+and are checked when written. A draft remembers which of the two it was written as (`ccr:draft-intent:<key>`), so its dot
 shows on the matching button. A thread's Reply, in its foot and among a comment's actions, reads **Ask AI**, with
 **GH reply** beside it on every thread that takes GitHub replies (10.5: not on a commit, the whole pull request or a
 review body); each opens the reply editor as that kind (or switches

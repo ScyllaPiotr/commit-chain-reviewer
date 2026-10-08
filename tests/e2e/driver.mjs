@@ -555,6 +555,8 @@ export const SINCE_AT = '2023-11-15T09:30:00Z';
 /** The reasons of the two flags tests/test_e2e.py makes before the `since` scenario runs. */
 export const MUL_REASON = 'Not asked for: mul now returns 0 when b is 0';
 export const REVIEWED_REASON = 'As reviewed: mul without the shortcut';
+/** Why a line the pull request added and removed since takes no GitHub comment (mirrors WHY_GONE in ccr/store.py). */
+export const GONE_REASON = 'This line is no longer in the pull request: it came with the pull request and was removed after your review, so GitHub has no line for a comment on it';
 
 /** PR mode (spec section 10) against the same fixture, linked to PR_URL: questions for Claude and GitHub comments. */
 export async function runPrScenario(page, url) {
@@ -890,7 +892,7 @@ export async function runSinceScenario(page, url) {
 
   await runner.step('open Since your last review', async () => {
     await page.click('#commit-list .commit-item[data-sha="since"]');
-    await page.waitFor(`document.querySelector('#commit-list .commit-item[data-sha="since"]').classList.contains('is-selected') && document.querySelector(${JSON.stringify(card + '[data-rendered="1"] table.diff')})`);
+    await page.waitFor(`document.querySelector('#commit-list .commit-item[data-sha="since"]').classList.contains('is-selected') && document.querySelector('#commit-header .subject').textContent.trim() === 'Since your last review' && document.querySelector(${JSON.stringify(card + '[data-rendered="1"] table.diff')})`);
     const header = await page.evaluate(`(() => { const h = document.querySelector('#commit-header');
       return { subject: h.querySelector('.subject').textContent.trim(), tag: h.querySelector('.kind-tag').textContent,
         explain: h.querySelector('.explain').textContent, conflicts: Boolean(h.querySelector('.since-conflicts')),
@@ -929,6 +931,36 @@ export async function runSinceScenario(page, url) {
     const replies = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(card + ' .thread')})].find((t) => t.textContent.includes('Why did mul change?')).querySelectorAll('.thread-foot .btn-reply').length`);
     if (replies !== 2) throw new Error(`the question thread on the version reviewed offers ${replies} reply buttons`);
     return 'question and GH comment';
+  });
+
+  await runner.step('GH comment is inactive where GitHub has no line', async () => {
+    const tests = '.file-card[data-path="tests/test_calc.py"]';
+    const gone = `${tests} tr.line[data-o="9"]`;
+    const kept = `${tests} tr.line[data-n="12"]`;
+    const github = (row) => `${row} .btn-add-comment[data-intent="github"]`;
+    const state = (row) => `(() => { const b = document.querySelector(${JSON.stringify(github(row))}); return b && { off: b.classList.contains('is-disabled'), aria: b.getAttribute('aria-disabled'), title: b.title }; })()`;
+    await page.hover(gone + ' td.code');
+    await page.waitFor(`(() => { const k = ccrState.githubLines.get('since|tests/test_calc.py'); return k && !(k instanceof Promise); })()`, { label: 'where GitHub takes comments, known' });
+    await page.hover(gone + ' td.code');
+    await page.hover(gone + ' .btn-fork');
+    await page.waitFor(isShown(github(gone)), { label: '[+] open on the removed line' });
+    const off = await page.evaluate(state(gone));
+    if (!off.off || off.aria !== 'true' || off.title !== GONE_REASON) throw new Error('removed line: ' + JSON.stringify(off));
+    await page.click(github(gone));
+    await page.waitFor(`[...document.querySelectorAll('#toasts .toast')].some((t) => t.textContent.includes('This line is no longer in the pull request'))`, { label: 'the reason as a toast' });
+    if (await page.evaluate(`Boolean(document.querySelector('tr.editor'))`)) throw new Error('an editor opened for GitHub on a line GitHub does not have');
+    await page.click(gone + ' .btn-add-comment[data-intent="question"]');
+    await page.waitFor(`document.querySelector('tr.editor form.comment-editor .intent-btn[data-intent="github"]')`, { label: 'question editor' });
+    const switchOff = await page.evaluate(`(() => { const b = document.querySelector('tr.editor .intent-btn[data-intent="github"]'); return { off: b.classList.contains('is-disabled'), title: b.title }; })()`);
+    if (!switchOff.off || switchOff.title !== GONE_REASON) throw new Error('editor switch: ' + JSON.stringify(switchOff));
+    await page.click('tr.editor .btn-cancel-comment');
+    await page.waitFor(`!document.querySelector('tr.editor')`, { label: 'editor closed' });
+    await page.hover(kept + ' td.code');
+    await page.hover(kept + ' .btn-fork');
+    await page.waitFor(isShown(github(kept)), { label: '[+] open on a line of the head' });
+    const on = await page.evaluate(state(kept));
+    if (on.off || on.aria !== 'false') throw new Error('line of the head: ' + JSON.stringify(on));
+    return 'inactive on old:9, with the reason';
   });
 
   const flagColor = `(() => { const p = document.createElement('span'); p.style.color = 'var(--flag)'; document.body.appendChild(p); const c = getComputedStyle(p).color; p.remove(); return c; })()`;

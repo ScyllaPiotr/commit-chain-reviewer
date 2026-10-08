@@ -440,6 +440,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             route = lambda: self._commit(parts[1], query)
         elif depth == 3 and head == "commits" and parts[2] == "file" and method == "GET":
             route = lambda: self._commit_file(parts[1], query)
+        elif depth == 3 and head == "commits" and parts[2] == "github-lines" and method == "GET":
+            route = lambda: self._github_lines(parts[1], query)
         elif depth == 2 and head == "comments" and method == "PATCH":
             route = lambda: self._patch_comment(parts[1], body)
         elif depth == 2 and head == "comments" and method == "DELETE":
@@ -520,6 +522,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not path:
             raise HttpError(400, "path is required")
         self._send_json(200, self.server.store.file_diff(ref, path, ws_ignore=_first(query, "ws") == "ignore"))
+
+    def _github_lines(self, ref: str, query: dict) -> None:
+        path = _first(query, "path")
+        if not path:
+            raise HttpError(400, "path is required")
+        self._send_json(200, self.server.store.github_lines(ref, path))
 
     def _compare(self, query: dict) -> None:
         head = _first(query, "head")
