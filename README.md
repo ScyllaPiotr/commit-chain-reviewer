@@ -26,13 +26,23 @@ buttons, and so do the threads that come from GitHub:
 * **Ask AI**: a question for Claude, answered in the thread. Nothing goes to GitHub.
 * **GH comment**, or **GH reply** in a GitHub thread: a message for the pull request. When you submit, Claude checks
   it against the code and posts it verbatim into your pending GitHub review, or replies with what is wrong with it.
-  Claude answers your questions first, so you can read the answers while it checks the GitHub comments.
+  Claude answers your questions first, so you can read the answers while it checks the GitHub comments. Where
+  GitHub takes no comment, for example on a line outside the pull request diff, the button is greyed out and says
+  why when you hover over it.
 
 The pull request's discussion on GitHub comes in too, so you can ask Claude about a GitHub thread or answer it on
 the spot, in that same thread. The background colour tells the two dialogues apart: **blue** for yours with Claude,
 **grey** for the messages from and to GitHub, both the ones that came from there and yours, posted or still a draft.
 The editor takes the colour of what you are writing. Submitting the review, with its verdict, stays yours, on
 GitHub.
+
+If you reviewed the pull request before, ccr also opens **Since your last review**, above All changes, with the
+date of that review: exactly what the author changed since then. It holds even after a rebase, because what the new
+base brought in is left out. Its left side is the version you reviewed. A GH comment on a line that is gone goes on
+the removed code, wherever the pull request diff still shows it.
+
+Claude can mark lines that need your closer look: an orange stripe on both edges of each line, and a ⚑ whose tooltip
+says why. **⚑ Next** steps through them, and the commit list and the file tree count them.
 
 ![A GitHub thread on grey holding a question for Claude and its answer on blue, then a GH reply draft on grey; the Ask AI and GH comment buttons on a line](docs/screenshot-pull-request.png)
 

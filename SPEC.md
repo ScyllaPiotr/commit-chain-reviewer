@@ -1188,7 +1188,8 @@ separate git worktree, start ccr with `--repo` on that worktree; never `ccr stop
 
 **PR mode** (section 10): the same loop on someone else's pull request. The agent fetches the pull request head
 into a worktree of its own, starts ccr there with `--range <merge base>..HEAD --pr <url>` and the pull request
-body as the cover letter, and changes no code: it answers a round's questions first, in one `ccr reply --batch`,
+body as the cover letter, plus `--since <commit> --since-at <time>` when the user's newest submitted review of it
+(from `gh api graphql`) is on another commit than the head, and changes no code: it answers a round's questions first, in one `ccr reply --batch`,
 so the user reads them while it checks the GitHub comments, posts the sound ones with `ccr gh-post`, replies to the
 others in a second batch, and never submits the GitHub review.
 

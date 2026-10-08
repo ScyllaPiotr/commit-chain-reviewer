@@ -229,12 +229,27 @@ there only when the user approved exactly that text ("Your wording, on the user'
    `BASE` must be the merge base GitHub's "Files changed" uses — `ccr gh-post` refuses to post otherwise.
 2. The cover letter is the pull request body verbatim, followed by one line
    `PR: <url> by @<author> (the cover letter above is the PR body, verbatim)`.
-3. `ccr start --repo "$REPO" --range "$BASE..HEAD" --pr <url> --cover "$SCRATCH/ccr-cover.md"` prints
-   `ccr: pr <url> (<owner/repo#N>): questions for Claude, GitHub comments for your pending review` before the URL.
+3. When the user reviewed this pull request before, ccr shows what changed since. Find their newest review:
+
+   ```sh
+   gh api graphql -F owner=<owner> -F repo=<repo> -F number=<N> -f query='
+     query($owner: String!, $repo: String!, $number: Int!) {
+       viewer { login }
+       repository(owner: $owner, name: $repo) { pullRequest(number: $number) {
+         reviews(last: 100) { nodes { state submittedAt author { login } commit { oid } } } } } }'
+   ```
+
+   Take the viewer's newest review that is not `PENDING`. When its `commit.oid` is not the pull request head, fetch
+   that commit (`git -C "$CLONE" fetch <remote> <oid>`; GitHub still serves a commit a force-push dropped) and add
+   `--since <oid> --since-at <submittedAt>` to the `ccr start` below. No such review, or one on the head: no `--since`.
+4. `ccr start --repo "$REPO" --range "$BASE..HEAD" --pr <url> --cover "$SCRATCH/ccr-cover.md" [--since …]` prints
+   `ccr: pr <url> (<owner/repo#N>): questions for Claude, GitHub comments for your pending review` before the URL,
+   and with `--since` also `ccr: since your last review of <sha> (<time>): N files changed`.
    Then `ccr gh-sync --repo "$REPO"` mirrors the pull request's review threads and review bodies into ccr (read
    only). Hand over the URL as in step 1.4 and add: "**Ask AI** asks me, also in a thread; **GH comment** drafts a
    comment for your pending GitHub review, and **GH reply** a reply in a GitHub thread; you submit that review on
-   GitHub."
+   GitHub." With `--since`, add: "**Since your last review**, above All changes, shows only what the author changed
+   since your review of <date>; what a rebase brought in is left out."
 
 ### Every round
 
@@ -446,6 +461,8 @@ with an unresolved, non-outdated root that is exactly what `--unanswered` select
 | Re-anchor a thread | `ccr move --repo "$REPO" <id> --commit <sha> [--path P [--line N]]` |
 | Pick up new commits | `ccr reload --repo "$REPO"` |
 | PR mode: link the review to a pull request | `ccr start --repo "$REPO" --range "$BASE..HEAD" --pr <url>` |
+| PR mode: what changed since the user's last review | `ccr start … --since <reviewed commit> --since-at <submittedAt>` |
+| Point at lines that need a closer look (⚑) | `ccr flag --repo "$REPO" --path P --line N [--start-line M] [--side old] [--commit VIEW] "why"` (view: `since` by default) · `ccr flags` · `ccr flag --clear` |
 | PR mode: mirror GitHub's review threads and review bodies | `ccr gh-sync --repo "$REPO"` |
 | PR mode: where a GitHub comment would go | `ccr gh-post --repo "$REPO" --dry-run <id>` |
 | PR mode: post GitHub comments to the pending review | `ccr gh-post --repo "$REPO" <id>…` |
