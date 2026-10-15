@@ -106,12 +106,13 @@ def test_browser_review_flow(live, tmp_path):
     assert report["consoleErrors"] == [], pretty
     assert report["ok"] is True and report["exit_code"] == 0, pretty
     expected_steps = ["load page", "hljs languages", "first render shows All changes", "cover letter and review comment",
-                      "click 2nd commit", "hover row and click [+]", "type and submit comment", "Write/Preview tabs, auto-grow and Cancel keeps draft",
+                      "click 2nd commit", "Ask AI on the file, the commit and the uncommitted changes", "gutter [+] opens into Ask AI",
+                      "type and submit comment", "the thread offers Ask AI", "Write/Preview tabs, auto-grow and Cancel keeps draft",
                       "thread projected into All changes", "toggle split view keeps thread",
                       "drag 3-line range and comment", "submit round from the top bar", "claude reply → toast + New dot",
                       "reload keeps token"]
     assert [s["name"] for s in report["steps"]] == expected_steps, pretty
-    assert len(report["screenshots"]) == 9 and all(os.path.getsize(p) > 1000 for p in report["screenshots"]), pretty
+    assert len(report["screenshots"]) == 10 and all(os.path.getsize(p) > 1000 for p in report["screenshots"]), pretty
 
     # -- the state the browser left on the server: the cover letter, and one round (rounds carry no verdict: the UI
     #    always sends "comment" and no summary) bundling three user comments — a whole-series comment and two line

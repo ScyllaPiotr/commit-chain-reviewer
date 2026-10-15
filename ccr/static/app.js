@@ -663,14 +663,13 @@
       // "All changes" gets only the whole-series button: a commit-level comment on the combined view would just
       // duplicate a review-level one.
       if (diff.kind !== 'combined') {
-        const label = diff.kind === 'worktree' ? 'Comment on the uncommitted changes'
-          : diff.kind === 'since' ? (prMode() ? 'Ask AI about these changes' : 'Comment on these changes')
-            : prMode() ? 'Ask AI about this commit' : 'Comment on this commit';
+        const label = diff.kind === 'worktree' ? 'Ask AI about the uncommitted changes'
+          : diff.kind === 'since' ? 'Ask AI about these changes' : 'Ask AI about this commit';
         meta += `<button type="button" id="btn-comment-commit" class="sm-btn" aria-label="${label}">💬 ${label}</button>`;
       }
       if (diff.kind === 'combined') {
         const [label, title] = prMode() ? ['Ask AI about the whole pull request', 'A question for Claude about the whole pull request, not tied to any commit']
-          : ['Comment on the whole series', 'A review-level comment about the whole series, not tied to any commit'];
+          : ['Ask AI about the whole series', 'A comment for Claude about the whole series, not tied to any commit'];
         meta += `<button type="button" id="btn-comment-review" class="sm-btn" aria-label="${label}" title="${title}">💬 ${label}</button>`;
       }
     }
@@ -763,13 +762,13 @@
     </div>`;
   }
 
-  /** The file header's comment button; PR mode forks it into a question for Claude and a GitHub comment. */
+  /** The file header's comment buttons: a question for Claude, and in PR mode a GitHub comment beside it. */
   function fileCommentButtonsHtml(f) {
     const key = `file:${state.viewSha}|${f.path}`;
     const dot = (intent) => (hasDraftFor(key, intent) ? ' has-draft' : '');
-    if (!prMode()) return `<button type="button" class="hdr-btn btn-comment-file${dot(null)}" aria-label="Comment on this file" title="Comment on this file">💬</button>`;
-    return `<button type="button" class="hdr-btn btn-comment-file${dot('question')}" data-intent="question" aria-label="Ask AI about this file" title="Ask AI about this file">Ask AI</button>`
-      + `<button type="button" class="hdr-btn btn-comment-file${dot('github')}" data-intent="github" aria-label="GH comment on this file" title="GH comment on this file, for your pending review">GH comment</button>`;
+    const ask = `<button type="button" class="hdr-btn btn-comment-file${dot('question')}" data-intent="question" aria-label="Ask AI about this file" title="Ask AI about this file">Ask AI</button>`;
+    if (!prMode()) return ask;
+    return ask + `<button type="button" class="hdr-btn btn-comment-file${dot('github')}" data-intent="github" aria-label="GH comment on this file" title="GH comment on this file, for your pending review">GH comment</button>`;
   }
 
   function fileNoteHtml(f) {
@@ -1251,7 +1250,7 @@
     const source = expansionSource(f);
     let oi = 0; let ni = 0;
     const cols = view === 'split' ? '<col class="c-num"><col class="c-code"><col class="c-num"><col class="c-code">' : '<col class="c-num"><col class="c-num"><col class="c-marker"><col class="c-code">';
-    const forked = prMode() && !commentsDisabled(); // PR mode tints the hovered line for its [+] (7.3)
+    const forked = !commentsDisabled(); // the hovered line is tinted for its [+] (7.3)
     const parts = [`<table class="diff${forked ? ' has-fork' : ''}" data-view="${view}"><colgroup>${cols}</colgroup><tbody>`];
     for (let hi = 0; hi <= f.hunks.length; hi++) {
       parts.push(hunkRowHtml(f, hi, source));
@@ -1404,11 +1403,11 @@
 
   /* ==================================================================== 4. gutter [+] and selection */
 
-  /** The gutter button(s): one [+], or in PR mode a [+] that opens, when hovered or clicked, into a question for
-   *  Claude [Ask AI] and a GitHub comment [GH comment]. */
+  /** The gutter buttons: a [+] that opens, when hovered or clicked, into a question for Claude [Ask AI] and, in PR
+   *  mode, a GitHub comment [GH comment]. */
   const GUTTER_BUTTONS = {
-    plain: { intent: null, text: '+', label: 'Add comment' },
-    fork: { intent: null, fork: true, text: '+', label: 'Comment on this line: Ask AI or GH comment' },
+    fork: { intent: null, fork: true, text: '+', label: 'Comment on this line: Ask AI' },
+    prFork: { intent: null, fork: true, text: '+', label: 'Comment on this line: Ask AI or GH comment' },
     question: { intent: 'question', text: 'Ask AI', label: 'Ask AI about this line' },
     github: { intent: 'github', text: 'GH comment', label: 'GH comment on this line, for your pending review' },
   };
@@ -1417,7 +1416,8 @@
     const body = card.querySelector('.diff-body');
     for (const old of card.querySelectorAll('.btn-add-comment')) old.remove();
     if (commentsDisabled() || !body.querySelector('table.diff')) return;
-    for (const spec of prMode() ? [GUTTER_BUTTONS.github, GUTTER_BUTTONS.question, GUTTER_BUTTONS.fork] : [GUTTER_BUTTONS.plain]) {
+    const specs = prMode() ? [GUTTER_BUTTONS.github, GUTTER_BUTTONS.question, GUTTER_BUTTONS.prFork] : [GUTTER_BUTTONS.question, GUTTER_BUTTONS.fork];
+    for (const spec of specs) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = spec.fork ? 'btn-add-comment btn-fork is-parked' : 'btn-add-comment is-parked';
@@ -1429,8 +1429,8 @@
     }
   }
 
-  /** Move a card's shared gutter button(s) into the number cell for (row, side); the PR-mode [+] closes again
-   *  on another line. */
+  /** Move a card's shared gutter buttons into the number cell for (row, side); the [+] closes again on another
+   *  line. */
   function placeGutterButton(row, side, show) {
     const card = row.closest('.file-card');
     const buttons = card ? card.querySelectorAll('.btn-add-comment') : [];
@@ -1456,7 +1456,7 @@
   /** Where and when hovering opened a [+]: a click right there belongs to the [+], not to the [Ask AI] now under it. */
   let forkOpened = null;
 
-  /** Open the PR-mode [+] into [Ask AI] and [GH comment] where it is. */
+  /** Open the [+] into [Ask AI], and in PR mode [GH comment], where it is. */
   function openFork(fork, e) {
     if (fork.classList.contains('is-open')) return;
     for (const btn of fork.closest('.file-card').querySelectorAll('.btn-add-comment')) btn.classList.add('is-open');
@@ -1985,12 +1985,12 @@
     return tags.join('');
   }
 
-  /** A thread's reply buttons: [Reply], or in PR mode [Ask AI] and, where a thread takes them, [GH reply]. */
-  function replyButtonsHtml(root, cls, plainLabel) {
+  /** A thread's reply buttons: [Ask AI] and, in PR mode where a thread takes them, [GH reply]. */
+  function replyButtonsHtml(root, cls) {
     const key = `reply:${root.id}`;
-    const buttons = !prMode() ? [[null, 'Reply', plainLabel]] : [['question', 'Ask AI', 'Ask AI about this thread']]
+    const buttons = [['question', 'Ask AI', 'Ask AI about this thread']]
       .concat(takesGitHubReply(root) ? [['github', 'GH reply', 'GH reply in this thread, for your pending review']] : []);
-    return buttons.map(([intent, text, label]) => `<button type="button" class="${cls}${cls === 'btn-reply' && hasDraftFor(key, intent) ? ' has-draft' : ''}"${intent ? ` data-intent="${intent}"` : ''} aria-label="${label}">${text}</button>`).join('');
+    return buttons.map(([intent, text, label]) => `<button type="button" class="${cls}${cls === 'btn-reply' && hasDraftFor(key, intent) ? ' has-draft' : ''}" data-intent="${intent}" aria-label="${label}">${text}</button>`).join('');
   }
 
   function commentHtml(c, root) {
@@ -2004,7 +2004,7 @@
         <div class="comment-actions" role="group" aria-label="Comment actions">
           ${isMirrored(c) || (isPosted(c) && c.github.github_state === 'SUBMITTED') ? '' : '<button type="button" class="act-edit" aria-label="Edit comment">Edit</button>'}
           ${fromGitHub ? '' : '<button type="button" class="act-delete" aria-label="Delete comment">Delete</button>'}
-          ${replyButtonsHtml(root ? c : rootOf(c), 'act-reply', 'Reply to thread')}
+          ${replyButtonsHtml(root ? c : rootOf(c), 'act-reply')}
           ${root ? `<button type="button" class="act-resolve" aria-label="${c.resolved ? 'Unresolve' : 'Resolve'} thread">${c.resolved ? 'Unresolve' : 'Resolve'}</button>` : ''}
         </div>
       </div>
@@ -2033,7 +2033,7 @@
       inner = a.kind === 'line' && a.start_line ? `<div class="range-note">Lines ${esc(a.start_line)}–${esc(a.line)} (${esc(a.side)} side)</div>` : '';
       inner += members.map((c) => commentHtml(c, c.id === rootId)).join('');
       if (!commentsDisabled()) {
-        inner += `<div class="thread-foot">${replyButtonsHtml(root, 'btn-reply', 'Reply')}
+        inner += `<div class="thread-foot">${replyButtonsHtml(root, 'btn-reply')}
           <button type="button" class="btn-resolve-thread" aria-label="${root.resolved ? 'Unresolve' : 'Resolve'} thread">${root.resolved ? 'Unresolve' : 'Resolve'}</button>
           ${root.resolved || isQuiet(root) ? '<button type="button" class="link-btn btn-hide-resolved">Hide</button>' : ''}</div>`;
       }

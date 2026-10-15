@@ -9,10 +9,11 @@ reads every comment from the command line and answers in the same threads. There
 When Claude has made a change, ask it to show you the code, or run `/review-commit-series main..HEAD`. It starts
 ccr on the commits with a cover letter describing the change and hands you a URL.
 
-Comment as you would on GitHub, then click **Submit**: your comments become a round. Claude takes the whole round,
-fixes the code in new fixup commits, answers every thread, citing the commit with the fix or asking back, and the
-page updates by itself. Repeat until you have nothing left to say. The cover letter becomes the pull-request
-description.
+Comment as you would on GitHub, with **Ask AI**: hovering the **+** by a line opens it, and files, commits, the
+change as a whole and threads have it too. Then click **Submit**: your comments become a round. Claude takes the
+whole round, fixes the code in new fixup commits, answers every thread, citing the commit with the fix or asking
+back, and the page updates by itself. Repeat until you have nothing left to say. The cover letter becomes the
+pull-request description.
 
 ![A commit under review: a question Claude answers by asking back, and a resolved thread linking the fixup commit](docs/screenshot-own-commits.png)
 

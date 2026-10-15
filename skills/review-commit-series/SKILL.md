@@ -41,8 +41,8 @@ snippet and a `→ HEAD path:line` location.
    uncommitted work shows up as the "Uncommitted changes" pseudo-commit.
 3. Write the **cover letter** — the description of the whole change, like a pull-request body — to a
    scratch file (e.g. `$TMPDIR/ccr-cover.md`): what the change does, why, how it is split into commits,
-   what to look at first, open questions. The user can comment on it as a whole ("Comment on the whole
-   change") and it is the first thing they see under **All changes**. Then start:
+   what to look at first, open questions. The user can comment on it as a whole ("Ask AI about the whole
+   series") and it is the first thing they see under **All changes**. Then start:
 
    ```sh
    ccr start --repo "$REPO" --range main..HEAD [--worktree] --cover "$TMPDIR/ccr-cover.md"

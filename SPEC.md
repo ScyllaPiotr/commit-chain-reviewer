@@ -656,7 +656,7 @@ Linked git worktrees are separate sessions (different realpath). Default port: `
   `--cover FILE` sets the cover letter (also on reuse). `--pr URL` (or `OWNER/REPO#N`) links the review to a pull
   request (section 10; also on reuse; an unparsable value exits 1 before anything starts) and adds the line
   `ccr: pr <url> (<owner/repo#N>): questions for Claude, GitHub comments for your pending review` before the URL. `ccr cover (TEXT | --file F | -)` sets/replaces it on a running
-  review. The cover letter is shown above "All changes" in the UI with a *Comment on the whole series* button
+  review. The cover letter is shown above "All changes" in the UI with an *Ask AI about the whole series* button
   (anchor `kind=review`), and `ccr export --md` prints it under `## Cover letter`. `--since REV` opens "Since your
   last review" (2.1; also on reuse) from the commit an earlier review was submitted on, `--since-at TIME` (UTC,
   `2026-10-07T12:34:56Z`) says when; a commit the repository lacks, a bad time or `--since-at` alone exit 1 before
@@ -887,18 +887,18 @@ tabs/browsers.
 ┌──────────────────────────────────────────────────────────────────────────────────────────────┐
 │ ⎇ repo · branch   main..HEAD · 7 commits · +worktree   [Unified] [Wrap] [Hide ws] [☾] [⟳] [Submit ●3] │
 ├────────────┬─────────────────────────────────────────────────────────────────────────────────┤
-│ COMMITS    │ Header card: subject · body · author · date · sha (copy) · +40 −12  [💬 comment]  │
-│ ● All      │ ┌ src/fetcher.py  M  +10 −2                                          [💬] [▾] ┐ │
+│ COMMITS    │ Header card: subject · body · author · date · sha (copy) · +40 −12  [💬 Ask AI …] │
+│ ● All      │ ┌ src/fetcher.py  M  +10 −2                                     [Ask AI] [▾] ┐ │
 │ ○ 9fceb02 •│ │ @@ -10,7 +10,9 @@ def foo(self):                       [⤒ 20] [expand all] [⤓ 20]│
 │ ○ 1a2b3c4  │ │ 10  10     x = 1                                                           │ │
 │ ○ …        │ │ 11        - y = 2                                                    [+]   │ │
 │ ○ Worktree │ │     11    + y = 3                                                          │ │
 │────────────│ │ ┌ thread ─────────────────────────────────────────────────────────────┐    │ │
-│ FILES  [🔍]│ │ │ U user · 2 min ago · Pending          [Edit][Delete][Reply][Resolve]│    │ │
+│ FILES  [🔍]│ │ │ U user · 2 min ago · Pending         [Edit][Delete][Ask AI][Resolve]│    │ │
 │ ▾ src/ccr  │ │ │ Why not use the existing backoff helper?                            │    │ │
 │   fetcher  │ │ │ C Claude · 1 min ago · New                                          │    │ │
 │   other    │ │ │ Good catch — switched to `backoff.retry()` in 1a2b3c4.              │    │ │
-│ ▾ tests    │ │ │ [Reply] [Resolve]                                                   │    │ │
+│ ▾ tests    │ │ │ [Ask AI] [Resolve]                                                  │    │ │
 └────────────┴─┴─┴────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -934,7 +934,8 @@ verdict — then toast *"Round N submitted · K comments"*, errors as a red toas
 **Main pane** (`#main` is the **only** vertical scroller; `body`, `.file-card`, `.diff-body` keep `overflow-y: visible`):
 
 * *Header card*: subject (h1), body (`pre-wrap`), author + relative date (title = absolute), sha click-to-copy,
-  parents (merges), stats, `#btn-comment-commit`. Pseudo-commits explain what they are (range / "vs HEAD" / for
+  parents (merges), stats, `#btn-comment-commit` (*💬 Ask AI about this commit*, *… about the uncommitted changes*,
+  *… about these changes*). Pseudo-commits explain what they are (range / "vs HEAD" / for
   "Since your last review", tagged *Re-review*: the review it starts from, the base the version reviewed was rebuilt
   on and the head, plus a `.since-conflicts` note naming the paths compared with the reviewed commit itself; with no
   files *"Nothing changed since your last review"*).
@@ -946,12 +947,13 @@ verdict — then toast *"Round N submitted · K comments"*, errors as a red toas
   ones raise `#banner-flags` (*"N flagged changes were marked on an earlier head of the pull request, so they are
   hidden: run /re-review again"*).
   The **All changes** header additionally shows the cover letter (`#cover-letter`, safe Markdown; *"No cover letter"*
-  hint when empty), `#btn-comment-review` (*Comment on the whole series*, anchor `kind=review`) and a muted `#outdated-note`
+  hint when empty), `#btn-comment-review` (*Ask AI about the whole series*, anchor `kind=review`) and a muted `#outdated-note`
   (*"N comments are anchored to commits that left the series (see `ccr comments --outdated`)"*, hidden at 0); review-level
   threads render in `#commit-header .thread-block[data-key-host=review]` under the cover letter. Empty
   commit → *"This commit has no file changes"*. Compare view → `#banner-compare` *"Compare view — comments are disabled"*.
 * *File card* (`.file-card[data-path]`): sticky `.file-header` (`position: sticky; top: 0` inside `#main`) with path
-  (renames `old → new`), status badge, mode-change note, `+N −M`, thread count, `.btn-comment-file`, `.btn-collapse`
+  (renames `old → new`), status badge, mode-change note, `+N −M`, thread count, `.btn-comment-file` (*Ask AI*; PR
+  mode adds *GH comment*, 10.4), `.btn-collapse`
   (chevron; `state.collapsedFiles`), copy path.
   Binary → *"Binary file not shown"*; `too_large` → *"Large diff hidden (N lines) — [Load anyway]"* (fetches
   `/api/commits/{sha}/file?path=`; spinner; disabled while loading); no hunks (mode-only / `ws_only`) → note.
@@ -1006,15 +1008,19 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
   `renderCode(tokens, ranges)` splits segments at range boundaries and wraps changed pieces in `<span class="wd">`
   (`--diff-add-strong` / `--diff-del-strong`). A `cr: true` line shows a dim `␍` glyph (class `cr`) at the end; `trunc`
   lines append ` … [truncated]`.
-* **Gutter [+]**: one shared `<button class="btn-add-comment" aria-label="Add comment">` per rendered file; a delegated
-  `pointerover` moves it into the hovered row's target number cell and shows it: unified → `td.num.new` for ctx/add rows,
-  `td.num.old` for del rows; split → the number cell of the side under the pointer. Also shown on `:focus-within` and
-  on `tr.line.is-selected`. Hidden in compare view. `td.num{position:relative}`; the button is absolutely positioned
-  overlapping the code edge. In PR mode it is `.btn-fork`, a `[+]` that opens (`.is-open` on the card's buttons)
-  into *Ask AI* where it was and *GH comment* right of it when it is hovered or clicked, and closes when the buttons
-  move to another line; a click at the spot where hovering opened it, within 600 ms, does not reach the *Ask AI* now
-  under the pointer. The table carries `has-fork` there, and the row under the pointer — in split view only its
-  cells on the side under the pointer — is tinted `--line-hover` grey (the yellow of selected rows wins). Click → `openEditor(rangeAnchor if a selection ends on this row else rowAnchor)`.
+* **Gutter [+]**: one shared set of `button.btn-add-comment` per rendered file: `.btn-fork`, a `[+]` (*Comment on
+  this line: Ask AI*; in PR mode *… Ask AI or GH comment*), and *Ask AI* (`[data-intent="question"]`), in PR mode
+  also *GH comment* (`[data-intent="github"]`, 10.4). A delegated `pointerover` moves them into the hovered row's
+  target number cell and shows the `[+]`: unified → `td.num.new` for ctx/add rows, `td.num.old` for del rows; split →
+  the number cell of the side under the pointer. Also shown on `:focus-within` and on `tr.line.is-selected`. Hidden
+  in compare view. `td.num{position:relative}`; the buttons are absolutely positioned overlapping the code edge. The
+  `[+]` opens (`.is-open` on the card's buttons) into *Ask AI* where it was, and in PR mode *GH comment* right of it,
+  when it is hovered or clicked, and closes when the buttons move to another line; a click at the spot where
+  hovering opened it, within 600 ms, does not reach the *Ask AI* now under the pointer. The table carries `has-fork`
+  while comments are enabled, and the row under the pointer — in split view only its cells on the side under the
+  pointer — is tinted `--line-hover` grey (the yellow of selected rows wins). *Ask AI* (or *GH comment*) →
+  `openEditor(rangeAnchor if a selection ends on this row else rowAnchor)`; outside PR mode that is the plain
+  comment editor (7.4).
   **Side rule**: unified ctx rows anchor to `new` via `[+]`; clicking the *old* number cell of a ctx row (or the left
   `[+]` in split) anchors to `old`; del → old; add → new.
 * **Selection & ranges** (single-sided): Pointer Events. `pointerdown` (button 0) on a `td.num[data-line]`:
@@ -1023,8 +1029,9 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
   the end is the row's line on `state.sel.side` (rows lacking a line on that side are skipped); autoscroll `#main` by
   12 px/frame when within 40 px of its edge. `pointerup` finalises (normalise start ≤ end); `Esc` cancels; Shift+click
   on a `td.num` extends. Plain click selects one line and writes the hash with `history.replaceState`. Rows in the
-  range get `in-range`; the single selected line `is-selected`. `[+]` on the end row or `c` opens the editor with
-  `start_line` when the range spans > 1 line. Clicking a code cell, `Esc`, or switching commit clears the selection.
+  range get `in-range`; the single selected line `is-selected`. *Ask AI* of the `[+]` on the end row or `c` opens
+  the editor with `start_line` when the range spans > 1 line. Clicking a code cell, `Esc`, or switching commit
+  clears the selection.
 * **Threads** attach to a row by anchor key (7.8): for every row attach threads keyed `(new, n)` if `n` and `(old, o)` if
   `o` (old-side first). Ranges render under the **end** line; hovering the thread adds `in-range` to rows start..end.
   Threads whose row does not exist in the rendered table (drifted combined/worktree anchors, `ws_only`, too_large) go
@@ -1054,7 +1061,7 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
   `state.openEditors: Map<key, {mode: 'new'|'reply'|'edit', id?}>` — every re-render (view toggle, expansion,
   reconciliation) recreates editor rows from this map, so editors are never lost. Drafts `localStorage['ccr:draft:'+k]`
   (k = anchor key | `reply:<rootId>` | `edit:<id>`), debounced 300 ms, deleted on success or when cancelled empty; a
-  `[+]`/Reply control whose key has a draft shows a dot.
+  `[+]`, *Ask AI* or other comment button whose key has a draft shows a dot.
 * **Thread** (`.thread[data-thread-id]`): comments with avatar (U / C robot; distinct colours), author, relative time
   (title = absolute, using server `now` offset), tags: `Pending` (title *"Not yet part of a submitted round — Claude can
   already read it with ccr comments"*), `R<n>`, `edited` (when `updated_at > created_at`), `moved`, `New` (7.5). Body =
@@ -1062,7 +1069,8 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
   when the trimmed, control-stripped URL matches `/^https?:\/\//i` → `<a target=_blank rel="noopener noreferrer">`,
   `- ` lists, `> ` quotes, line breaks; everything escaped first; no autolinks). 7–40 hex tokens matching a listed sha
   render as links selecting that commit. Actions (visible on hover/focus-within/selected): Edit, Delete (confirm; a
-  root with replies says *"This also deletes N replies"* and sends `?cascade=1`), Reply, Resolve/Unresolve (root).
+  root with replies says *"This also deletes N replies"* and sends `?cascade=1`), *Ask AI* (a reply, as in the
+  thread's foot beside Resolve), Resolve/Unresolve (root).
   Resolved threads collapse to *"✓ Resolved · N comments — Show"* unless they contain unseen comments.
 * **Counts** come from one `deriveCounts()` pass over `state.comments` after every `applyComments`: per commit and
   per `commit|path` `{threads, pending, unresolved}` over non-outdated roots; the Submit badge counts pending **comments**.
@@ -1105,8 +1113,8 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
   shortcut is **off by default** behind `const KEYBOARD_SHORTCUTS = false` at the top of `app.js` (the handlers stay in
   `onKeyDown`); set to `true`, and with focus outside input/textarea/contenteditable: `j`/`k` next/prev file header
   (`state.currentFile` maintained by a throttled scroll handler), `]`/`[` commits, `n`/`p` next/prev thread in the current
-  view (document order, expanding resolved, skipping orphans; the current thread gets a focus outline and `c` opens Reply
-  on it), `Shift+N`/`Shift+P` next/prev **unresolved** thread across the chain (switching commit), `c` comment on the
+  view (document order, expanding resolved, skipping orphans; the current thread gets a focus outline and `c` opens a
+  reply on it), `Shift+N`/`Shift+P` next/prev **unresolved** thread across the chain (switching commit), `c` comment on the
   selected line/range, `x` collapse/expand current file, `u` view mode, `w` wrap, `Esc` clears the selection, then the
   thread focus. Ends → toast *"No more threads"*.
 * **Submit** (`#btn-submit`, top bar): POST `/api/submit` `{verdict: "comment", summary: ""}` bundles every pending comment
@@ -1133,11 +1141,11 @@ resembles GitHub dark-dimmed. `prefers-reduced-motion` disables animations. Focu
 | Commit list | `#commit-list .commit-item[data-sha]` (`.is-selected`, `.is-range`, `.is-new`, `.commit-badge`, `.badge-flag`; `.is-since` + `li.commit-sep`, `.since-at`) |
 | File tree | `#file-tree .tree-folder[data-dir]`, `.tree-file[data-path]`, `#file-filter`, `#filter-status` (main pane: *"N of M files — clear"*) |
 | Header | `#commit-header .subject`, `.sha-copy`, `#btn-comment-commit`, `#commit-header .thread-block[data-key-host="commit"]`; combined view only: `#outdated-note` (hidden at 0), `#cover-letter` (`.cover-body` rendered Markdown, or `.is-empty` with the *"No cover letter"* hint), `#btn-comment-review`, `#commit-header .thread-block[data-key-host="review"]` |
-| File card | `.file-card[data-path][data-rendered="0|1"]` → `.file-header` (`.file-path`, `.status-badge`, `.btn-comment-file` — in PR mode two, `[data-intent="question"]` and `[data-intent="github"]` —, `.btn-collapse`), `.diff-body`, `.file-card.is-collapsed` |
+| File card | `.file-card[data-path][data-rendered="0|1"]` → `.file-header` (`.file-path`, `.status-badge`, `.btn-comment-file[data-intent="question"]` (*Ask AI*), in PR mode also `[data-intent="github"]`, `.btn-collapse`), `.diff-body`, `.file-card.is-collapsed` |
 | Diff table | `table.diff[data-view]`; `tr.hunk` (`.btn-expand-up`, `.btn-expand-down`, `.btn-expand-all`); `tr.line.add|del|ctx[data-o][data-n][data-x]` (`.is-selected`, `.in-range`); `td.num.old|new[data-side][data-line]`, `td.num.empty`, `td.marker`, `td.code.old|new`, `td.code.empty`, `span.wd`, `span.cr` |
-| Gutter | `button.btn-add-comment[data-side][data-line]` (shared, moved into the hovered `td.num`); in PR mode two of them, `[data-intent="question"]` (*Ask AI*) and `[data-intent="github"]` (*GH comment*), moved together and shown once the PR-mode `[+]` (`.btn-fork`) opens |
+| Gutter | `button.btn-add-comment[data-side][data-line]` (shared, moved together into the hovered `td.num`): the `[+]` `.btn-fork`, and `[data-intent="question"]` (*Ask AI*), in PR mode also `[data-intent="github"]` (*GH comment*), shown once the `[+]` opens (`.is-open`) |
 | Editor | `tr.editor` / `div.editor-block` → `form.comment-editor[data-key][data-tab]` (`[data-intent="github"]` while it writes a GitHub comment; `.editor-head > .editor-tabs > .editor-tab[data-tab]`, in PR mode on a line or file `.editor-head > .editor-intent > .intent-btn[data-intent]`, `textarea`, `.md-preview`, `.btn-submit-comment`, `.btn-cancel-comment`) |
-| Thread | `tr.threads[data-key]` / `div.thread-block` → `.thread[data-thread-id]` (`.is-resolved`, `.has-new`) → `.comment[data-id][data-author]` (`.comment-meta` `.author .time .tag-pending .tag-round .tag-edited .tag-new .tag-moved`, `a.tag-from[data-sha]` on a projected root, PR mode: `.tag-question`, `.tag-github` / `a.tag-github.is-posted`, `.comment-body`, `.comment-actions` `.act-edit .act-delete .act-reply .act-resolve`), `button.btn-reply`, `button.btn-show-resolved` |
+| Thread | `tr.threads[data-key]` / `div.thread-block` → `.thread[data-thread-id]` (`.is-resolved`, `.has-new`) → `.comment[data-id][data-author]` (`.comment-meta` `.author .time .tag-pending .tag-round .tag-edited .tag-new .tag-moved`, `a.tag-from[data-sha]` on a projected root, PR mode: `.tag-question`, `.tag-github` / `a.tag-github.is-posted`, `.comment-body`, `.comment-actions` `.act-edit .act-delete .act-reply[data-intent] .act-resolve`), `button.btn-reply[data-intent]`, `button.btn-show-resolved` |
 | Flags (2.7) | `#flag-nav`, `tr.line.is-flagged`, `td.num.is-flagged`, `td.code.is-flagged`, `.flag-mark[title]`, `.tree-file .fcount`, `#banner-flags` |
 | Banners/toasts | `#banner-disconnected`, `#banner-compare`, `#banner-reloaded`, `#banner-flags`, `#toasts .toast.info|error|success`, `#notice-token` |
 | Readiness | `body[data-ready="1"]` after the first full render; `body[data-loading="1"]` while the server reports `loading` |
@@ -1272,10 +1280,13 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
 * `test_e2e.py` (skipped without `chromium-browser`/`chromium`/`google-chrome`): starts a server, runs
   `node tests/e2e/driver.mjs <url>` (CDP over Node's `WebSocket`) which: loads the page (token in `?t=`), waits for
   `body[data-ready]`, asserts every lang id from the section-3 table satisfies `hljs.getLanguage`, clicks the 2nd
-  commit, hovers a diff row and clicks the gutter `[+]`, types a comment, submits it (thread appears), types into another
-  editor, checks that it grows with its content (also after leaving the commit and coming back), that the Preview tab
-  renders it (`<code>`) and that Cancel keeps the draft, checks that `j` does nothing (shortcuts
-  off), toggles split view (thread still present, under its own side only), drags a 3-line range and comments, submits the round with `#btn-submit`,
+  commit, checks that the file, commit and uncommitted-changes buttons read *Ask AI* and open the plain editor,
+  hovers a diff row, opens the gutter `[+]` into its one button, *Ask AI* (a click where hovering opened it stays
+  with the `[+]`, the row is grey, another line closes it), clicks it, types a comment, submits it (thread appears,
+  its reply buttons read *Ask AI*), types into another editor, checks that it grows with its content (also after
+  leaving the commit and coming back), that the Preview tab renders it (`<code>`) and that Cancel keeps the draft,
+  checks that `j` does nothing (shortcuts off), toggles split view (thread still present, under its own side only),
+  drags a 3-line range and comments, submits the round with `#btn-submit`,
   then creates a claude reply via the API and asserts the toast + New dot, reloads the page and asserts the token
   survives (localStorage) — prints `{ok, steps:[…], consoleErrors:[…], screenshots:[paths]}`; the test asserts `ok`,
   zero console errors, and the API state (1 round with verdict `comment`, 3 user comments + the reply).
@@ -1407,18 +1418,18 @@ Nothing else on GitHub is submitted, edited or deleted.
 
 ### 10.4 UI
 
-With `review.pr` set the top bar shows `#pr-link`; the gutter `[+]` forks into *Ask AI* (a question) and *GH comment*
-(a GitHub comment, right of it) once the `[+]` is hovered or clicked (7.3); the file header's 💬 forks into *Ask AI*
-and *GH comment*; the commit and whole-review buttons read *Ask AI about this commit* and *Ask AI about the whole
-pull request*. A new-comment editor on a line or a file has an *Ask AI | GH comment* switch (`.editor-intent`)
-beside its tabs, which keeps the text; writing a GitHub comment it carries `data-intent="github"`, the label **Add
-GH comment** and the hint *posted verbatim to your pending review once Claude has checked it*, and a question editor
-is labelled **Ask AI**. Where GitHub would refuse a GitHub comment (10.2), *GH comment* stays visible but inactive
+With `review.pr` set the top bar shows `#pr-link`; the gutter `[+]` opens into *Ask AI* (a question) and *GH comment*
+(a GitHub comment, right of it) once the `[+]` is hovered or clicked (7.3); the file header has *GH comment* beside
+*Ask AI*; the whole-review button reads *Ask AI about the whole pull request*. A new-comment editor on a line or a
+file has an *Ask AI | GH comment* switch (`.editor-intent`) beside its tabs, which keeps the text; writing a GitHub
+comment it carries `data-intent="github"`, the label **Add GH comment** and the hint *posted verbatim to your pending
+review once Claude has checked it*, and a question editor is labelled **Ask AI**. Where GitHub would refuse a GitHub
+comment (10.2), *GH comment* stays visible but inactive
 (`.is-disabled`, `aria-disabled`) and says why on hover, and a click shows that reason as a toast: in the gutter, in
 the editor's switch and in the file header. The page learns it per file and view from `GET
 /api/commits/{view}/github-lines?path=P` once the card renders; rows it does not cover (expanded context) stay active
 and are checked when written. A draft remembers which of the two it was written as (`ccr:draft-intent:<key>`), so its dot
-shows on the matching button. A thread's Reply, in its foot and among a comment's actions, reads **Ask AI**, with
+shows on the matching button. A thread's **Ask AI**, in its foot and among a comment's actions (7.4), has
 **GH reply** beside it on every thread that takes GitHub replies (10.5: not on a commit, the whole pull request or a
 review body); each opens the reply editor as that kind (or switches
 the open one), and a collapsed thread's line has **Ask AI** too, which expands the thread for the question. Roots

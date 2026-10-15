@@ -7,7 +7,8 @@
  * Talks to Chromium over the DevTools protocol using Node's built-in WebSocket (Node >= 22, no
  * dependencies) and walks the review UI through the end-to-end scenario: load with the token in
  * `?t=`, grammar check, set a cover letter through the API and comment on the whole series from the
- * "All changes" header, select the second commit, comment on a hovered line via the gutter [+], type into
+ * "All changes" header, select the second commit, see the file, commit and uncommitted-changes buttons read
+ * Ask AI, open the gutter [+] of a hovered line into its one button, Ask AI, and comment through it, type into
  * an editor, watch it grow and switch to the Preview tab, cancel it (draft kept), see the line comment projected into
  * "All changes" with a "from <sha>" tag that leads back, check that single-key shortcuts are off, toggle split
  * view, drag a three-line range and comment on it, submit the pending comments as a round with the top-bar
@@ -260,6 +261,11 @@ const REMOVED = ['#drawer', '#drawer-backdrop', '#btn-review', '#btn-help', '#he
   '.file-header .viewed', '.other-views', '.btn-since-round', '.btn-discard-comment'];
 /** The colour of `var(--success)` as the browser reports it (the Submit button must be painted with it). */
 const SUCCESS_RGB = `(() => { const p = document.createElement('span'); p.style.color = 'var(--success)'; document.body.appendChild(p); const c = getComputedStyle(p).color; p.remove(); return c; })()`;
+/** Outside PR mode every Ask AI opens the plain comment editor, without the Ask AI | GH comment switch or a channel
+ *  colour: evaluates to the label of its submit button, or to what is wrong with it. */
+const OWN_EDITOR = (form) => `(() => { const f = document.querySelector(${JSON.stringify(form)}); if (!f) return 'no editor';
+  if (f.querySelector('.editor-intent') || f.dataset.intent || f.dataset.channel) return 'a PR-mode editor: ' + f.outerHTML.slice(0, 300);
+  return f.querySelector('.btn-submit-comment').textContent; })()`;
 
 /** The SPEC 9 scenario against the fixture repository (`main..feature --worktree`). */
 export async function runScenario(page, url) {
@@ -269,6 +275,15 @@ export async function runScenario(page, url) {
   const runner = new Runner(page, page.report);
   let commitSha = null;
   let filePath = null;
+  const isShown = (sel) => `(() => { const el = document.querySelector(${JSON.stringify(sel)}); return Boolean(el) && getComputedStyle(el).display !== 'none'; })()`;
+  /** Hover a row, open its gutter [+] into Ask AI and click that. */
+  const askAi = async (row) => {
+    const ask = row + ' .btn-add-comment[data-intent="question"]';
+    await page.hover(row + ' td.code');
+    if (!(await page.evaluate(isShown(ask)))) await page.hover(row + ' .btn-fork');
+    await page.waitFor(isShown(ask), { label: 'the [+] open into Ask AI' });
+    await page.click(ask);
+  };
 
   await runner.step('load page', async () => {
     await page.navigate(url);
@@ -299,7 +314,7 @@ export async function runScenario(page, url) {
     if (!submit.disabled || submit.label !== 'Submit' || !submit.zero || submit.unresolved) throw new Error('submit button state: ' + JSON.stringify(submit));
     if (submit.bg !== submit.green || submit.fg !== 'rgb(255, 255, 255)' || parseInt(submit.weight, 10) < 700) throw new Error('submit button style: ' + JSON.stringify(submit));
     const label = await page.evaluate(`document.querySelector('#btn-comment-review').textContent.trim()`);
-    if (!label.endsWith('Comment on the whole series')) throw new Error('review button label: ' + label);
+    if (!label.endsWith('Ask AI about the whole series')) throw new Error('review button label: ' + label);
     if (!(await page.evaluate(`document.querySelector('#outdated-note').hidden`))) throw new Error('outdated note shown without outdated comments');
     await page.shot('01-all-changes');
     return await page.evaluate(`document.querySelectorAll('#files .file-card').length + ' files'`);
@@ -319,6 +334,7 @@ export async function runScenario(page, url) {
     if (!(await page.evaluate(`document.activeElement && document.activeElement.tagName === 'TEXTAREA'`))) throw new Error('textarea not focused');
     const info = await page.evaluate(`document.querySelector('#commit-header form.comment-editor .anchor-info').textContent`);
     if (info !== 'whole series') throw new Error('anchor info: ' + info);
+    if (await page.evaluate(OWN_EDITOR('#commit-header form.comment-editor')) !== 'Add comment') throw new Error('not the plain comment editor');
     await page.type('Whole-series comment from the e2e driver.');
     await page.click('#commit-header form.comment-editor[data-key="review:"] .btn-submit-comment');
     await page.waitFor(`document.querySelector('#commit-header .thread-block[data-key-host="review"] .thread .comment[data-author="user"] .comment-body') && !document.querySelector('#commit-header form.comment-editor')`, { label: 'review thread rendered' });
@@ -359,15 +375,65 @@ export async function runScenario(page, url) {
     return `${hash.slice(0, 11)} ${filePath}; subject=` + (await page.evaluate(`document.querySelector('#commit-header .subject').textContent.trim()`));
   });
 
-  await runner.step('hover row and click [+]', async () => {
+  await runner.step('Ask AI on the file, the commit and the uncommitted changes', async () => {
+    const card = `.file-card[data-path="${filePath}"]`;
+    await page.waitFor(`document.querySelector(${JSON.stringify(`#commit-header .sha-copy[data-copy="${commitSha}"]`)}) && document.querySelector(${JSON.stringify(card + '[data-rendered="1"] table.diff')})`, { label: 'the 2nd commit rendered' });
+    const buttons = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(card + ' .file-header .btn-comment-file')})].map((b) => b.dataset.intent + ':' + b.textContent + ':' + b.title)`);
+    if (buttons.join(',') !== 'question:Ask AI:Ask AI about this file') throw new Error('file buttons: ' + buttons);
+    const fileForm = card + ' .thread-block[data-key-host="file"] form.comment-editor';
+    const commitForm = '#commit-header .thread-block[data-key-host="commit"] form.comment-editor';
+    const opened = [];
+    for (const [button, form, info] of [[card + ' .file-header .btn-comment-file', fileForm, 'file'], ['#btn-comment-commit', commitForm, 'commit']]) {
+      await page.click(button);
+      await page.waitFor(`document.querySelector(${JSON.stringify(form + ' textarea')})`, { label: info + ' editor' });
+      const editor = `${await page.evaluate(OWN_EDITOR(form))} / ${await page.evaluate(`document.querySelector(${JSON.stringify(form + ' .anchor-info')}).textContent`)}`;
+      if (editor !== 'Add comment / ' + info) throw new Error(`${info} editor: ${editor}`);
+      await page.click(form + ' .btn-cancel-comment');
+      await page.waitFor(`!document.querySelector(${JSON.stringify(form)})`, { label: info + ' editor closed' });
+      opened.push(info);
+    }
+    const commit = await page.evaluate(`document.querySelector('#btn-comment-commit').textContent`);
+    if (commit !== '💬 Ask AI about this commit') throw new Error('commit button: ' + commit);
+    await page.evaluate(`location.hash = '#worktree'`);
+    await page.waitFor(`(document.querySelector('#commit-header .kind-tag') || {}).textContent === 'Worktree'`, { label: 'Uncommitted changes shown' });
+    const worktree = await page.evaluate(`document.querySelector('#btn-comment-commit').textContent`);
+    if (worktree !== '💬 Ask AI about the uncommitted changes') throw new Error('uncommitted changes button: ' + worktree);
+    await page.evaluate(`location.hash = '#' + ${JSON.stringify(commitSha)}`);
+    await page.waitFor(`document.querySelector(${JSON.stringify(`#commit-header .sha-copy[data-copy="${commitSha}"]`)}) && document.querySelector(${JSON.stringify(card + '[data-rendered="1"] table.diff')})`, { label: 'back on the 2nd commit' });
+    return opened.join(', ') + '; ' + worktree;
+  });
+
+  await runner.step('gutter [+] opens into Ask AI', async () => {
     const row = `.file-card[data-path="${filePath}"] tr.line.add`;
+    const other = `.file-card[data-path="${filePath}"] tr.line.ctx`;
+    const plus = row + ' td.num.new .btn-fork';
+    const ask = row + ' td.num.new .btn-add-comment[data-intent="question"]';
     await page.hover(row + ' td.code');
-    await page.waitFor(`document.querySelector(${JSON.stringify(row)}).querySelector('td.num.new .btn-add-comment')`, { label: 'gutter [+] moved into the hovered row' });
-    await page.click(row + ' .btn-add-comment');
+    await page.waitFor(`${isShown(plus)} && !${isShown(ask)}`, { label: 'a closed [+] in the hovered row' });
+    const closed = await page.evaluate(`(() => { const b = document.querySelector(${JSON.stringify(plus)}); return { text: b.textContent, label: b.getAttribute('aria-label'), left: b.getBoundingClientRect().left }; })()`);
+    if (closed.text !== '+' || closed.label !== 'Comment on this line: Ask AI') throw new Error('closed [+]: ' + JSON.stringify(closed));
+    await page.click(plus); // hovering opens it, so the click right there stays with the [+]
+    await page.waitFor(`${isShown(ask)} && !${isShown(plus)}`, { label: 'the [+] opened into Ask AI' });
+    if (await page.evaluate(`Boolean(document.querySelector('tr.editor'))`)) throw new Error('the click on [+] went to Ask AI, which took its place');
+    await page.hover(row + ' td.code'); // off the button (a hovered one grows), still on the line: it stays open
+    const open = await page.evaluate(`(() => { const r = document.querySelector(${JSON.stringify(row)}); const b = r.querySelector('.btn-add-comment[data-intent="question"]');
+      const tint = (sel) => getComputedStyle(document.querySelector(sel).querySelector('td.code')).backgroundImage !== 'none';
+      return { shown: [...r.querySelectorAll('.btn-add-comment')].filter((x) => getComputedStyle(x).display !== 'none').map((x) => x.textContent).join(','),
+        label: b.getAttribute('aria-label'), left: b.getBoundingClientRect().left, clipped: b.scrollWidth > b.clientWidth,
+        buttons: r.closest('.file-card').querySelectorAll('.btn-add-comment').length, github: Boolean(document.querySelector('#main [data-intent="github"]')),
+        grey: tint(${JSON.stringify(row)}) && !tint(${JSON.stringify(other)}) }; })()`);
+    if (open.shown !== 'Ask AI' || open.label !== 'Ask AI about this line' || open.clipped || open.buttons !== 2 || open.github || !open.grey
+        || Math.abs(open.left - closed.left) > 4) throw new Error('open [+]: ' + JSON.stringify({ closed, open }));
+    await page.shot('02a-gutter-ask-ai');
+    await page.hover(other + ' td.code');
+    await page.waitFor(`${isShown(other + ' .btn-fork')} && !${isShown(other + ' .btn-add-comment[data-intent="question"]')}`, { label: 'closed again on another line' });
+    await askAi(row);
     await page.waitFor(`document.querySelector('tr.editor form.comment-editor textarea')`, { label: 'editor row' });
     if (!(await page.evaluate(`document.activeElement && document.activeElement.tagName === 'TEXTAREA'`))) throw new Error('textarea not focused');
     const key = await page.evaluate(`document.querySelector('tr.editor form.comment-editor').dataset.key`);
     if (key !== `line:${commitSha}|${filePath}|new|5`) throw new Error('unexpected editor key ' + key);
+    const editor = await page.evaluate(OWN_EDITOR('tr.editor form.comment-editor'));
+    if (editor !== 'Add comment') throw new Error('line editor: ' + editor);
     return key;
   });
 
@@ -381,15 +447,29 @@ export async function runScenario(page, url) {
     return 'pending badge=' + badge;
   });
 
+  await runner.step('the thread offers Ask AI', async () => {
+    const thread = 'tr.threads .thread';
+    const offers = await page.evaluate(`(() => { const t = document.querySelector(${JSON.stringify(thread)});
+      const list = (sel) => [...t.querySelectorAll(sel)].map((b) => b.dataset.intent + ':' + b.textContent + ':' + b.getAttribute('aria-label')).join(',');
+      return list('.thread-foot .btn-reply') + ' / ' + list('.comment-actions .act-reply'); })()`);
+    if (offers !== 'question:Ask AI:Ask AI about this thread / question:Ask AI:Ask AI about this thread') throw new Error('reply buttons: ' + offers);
+    const form = thread + ' form.comment-editor[data-mode="reply"]';
+    await page.click(thread + ' .thread-foot .btn-reply');
+    await page.waitFor(`document.querySelector(${JSON.stringify(form + ' textarea')})`, { label: 'reply editor' });
+    const editor = await page.evaluate(OWN_EDITOR(form));
+    if (editor !== 'Reply') throw new Error('reply editor: ' + editor);
+    await page.click(form + ' .btn-cancel-comment');
+    await page.waitFor(`!document.querySelector(${JSON.stringify(form)})`, { label: 'reply editor closed' });
+    return offers;
+  });
+
   await runner.step('Write/Preview tabs, auto-grow and Cancel keeps draft', async () => {
     // SPEC 7.4: the editor shows one of the Write and Preview tabs at a time (Preview renders the same safe Markdown as
     // comment bodies), the textarea grows with its content, and Cancel keeps the text as a draft (dot on the [+]);
     // cancelling an emptied editor drops it. There is no Discard button any more.
     const row = `.file-card[data-path="${filePath}"] tr.line.ctx`;
     const text = 'Draft with `code` and **bold**' + '\nand a tail line'.repeat(8);
-    await page.hover(row + ' td.code');
-    await page.waitFor(`document.querySelector(${JSON.stringify(row)}).querySelector('td.num.new .btn-add-comment')`, { label: 'gutter [+] on the context row' });
-    await page.click(row + ' .btn-add-comment');
+    await askAi(row);
     await page.waitFor(`document.querySelector('tr.editor form.comment-editor textarea')`, { label: 'editor row' });
     const key = await page.evaluate(`document.querySelector('tr.editor form.comment-editor').dataset.key`);
     const measure = `(() => { const ta = document.querySelector('tr.editor textarea');
@@ -415,8 +495,8 @@ export async function runScenario(page, url) {
     await page.waitFor(`!document.querySelector('tr.editor')`, { label: 'editor closed' });
     if ((await page.evaluate(`localStorage.getItem(${JSON.stringify('ccr:draft:' + key)})`)) !== text) throw new Error('draft not kept on Cancel');
     await page.hover(row + ' td.code');
-    await page.waitFor(`document.querySelector(${JSON.stringify(row)}).querySelector('.btn-add-comment.has-draft')`, { label: 'draft dot on [+]' });
-    await page.click(row + ' .btn-add-comment');
+    await page.waitFor(`document.querySelector(${JSON.stringify(row)}).querySelector('.btn-fork.has-draft') && document.querySelector(${JSON.stringify(row)}).querySelector('.btn-add-comment[data-intent="question"].has-draft')`, { label: 'draft dot on [+] and Ask AI' });
+    await askAi(row);
     await page.waitFor(`document.querySelector('tr.editor textarea') && document.querySelector('tr.editor textarea').value === ${JSON.stringify(text)}`, { label: 'draft restored' });
     const reopened = await page.evaluate(measure);
     if (reopened.h < grown.h) throw new Error(`reopened editor does not fit its draft: ${reopened.h} < ${grown.h}`);
@@ -437,7 +517,7 @@ export async function runScenario(page, url) {
     await page.waitFor(`!document.querySelector('tr.editor')`, { label: 'editor closed again' });
     if ((await page.evaluate(`localStorage.getItem(${JSON.stringify('ccr:draft:' + key)})`)) !== null) throw new Error('emptied draft not dropped');
     await page.hover(row + ' td.code');
-    await page.waitFor(`document.querySelector(${JSON.stringify(row)}).querySelector('.btn-add-comment:not(.has-draft)')`, { label: 'draft dot gone' });
+    await page.waitFor(`document.querySelector(${JSON.stringify(row)}).querySelector('.btn-fork') && !document.querySelector(${JSON.stringify(row)}).querySelector('.btn-add-comment.has-draft')`, { label: 'draft dot gone' });
     return key;
   });
 
@@ -494,9 +574,12 @@ export async function runScenario(page, url) {
     const hash = await page.evaluate('location.hash');
     if (!hash.endsWith(`:n${cells[0].line}-${cells[2].line}`)) throw new Error('range hash missing: ' + hash);
     await page.hover('#commit-header .subject'); // leaving the table re-parks the shared [+] (sticky-visible) on the range's end row
-    const plus = `.file-card[data-path="${filePath}"] tr.line.in-range .btn-add-comment.is-visible`;
-    await page.waitFor(`document.querySelector(${JSON.stringify(plus)})`, { label: '[+] parked on the range end row' });
-    await page.click(plus);
+    const plus = `.file-card[data-path="${filePath}"] tr.line.in-range .btn-fork.is-visible`;
+    await page.waitFor(isShown(plus), { label: '[+] parked on the range end row' });
+    await page.hover(plus);
+    const ask = `.file-card[data-path="${filePath}"] tr.line.in-range .btn-add-comment[data-intent="question"]`;
+    await page.waitFor(isShown(ask), { label: 'the parked [+] open into Ask AI' });
+    await page.click(ask);
     await page.waitFor(`document.querySelector('tr.editor form.comment-editor textarea')`, { label: 'range editor' });
     const info = await page.evaluate(`document.querySelector('tr.editor .anchor-info').textContent`);
     await page.type('Range comment over three lines.');
@@ -601,6 +684,9 @@ export async function runPrScenario(page, url) {
   await runner.step('click 2nd commit', async () => {
     await page.click('#commit-list .commit-item:nth-child(2)');
     await page.waitFor(`document.querySelector('#commit-list .commit-item:nth-child(2)').classList.contains('is-selected') && document.querySelector(${JSON.stringify(card + '[data-rendered="1"] table.diff')})`);
+    await page.waitFor(`document.querySelector('#btn-comment-commit')`, { label: 'the commit header' });
+    const label = await page.evaluate(`document.querySelector('#btn-comment-commit').textContent`);
+    if (label !== '💬 Ask AI about this commit') throw new Error('commit button: ' + label);
     return await page.evaluate(`document.querySelector('#commit-header .subject').textContent.trim()`);
   });
 
@@ -611,6 +697,8 @@ export async function runPrScenario(page, url) {
     const g = row(5) + ' td.num.new .btn-add-comment[data-intent="github"]';
     await page.waitFor(`${isShown(plus)} && !${isShown(q)} && !${isShown(g)}`, { label: 'a closed [+] in the hovered row' });
     const plusLeft = await page.evaluate(`document.querySelector(${JSON.stringify(plus)}).getBoundingClientRect().left`);
+    const plusLabel = await page.evaluate(`document.querySelector(${JSON.stringify(plus)}).getAttribute('aria-label')`);
+    if (plusLabel !== 'Comment on this line: Ask AI or GH comment') throw new Error('[+] label: ' + plusLabel);
     await page.hover(plus);
     await page.waitFor(`${isShown(q)} && ${isShown(g)} && !${isShown(plus)}`, { label: 'hovering [+] opens it' });
     await page.hover(row(5) + ' td.code'); // off the buttons (a hovered one grows), still on the line: it stays open
