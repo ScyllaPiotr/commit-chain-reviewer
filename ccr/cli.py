@@ -146,22 +146,25 @@ def _add_server_options(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_body_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("body", nargs="?", help="comment text ('-' reads stdin)")
+    parser.add_argument("body", nargs="?", help="the text ('-' reads stdin)")
     parser.add_argument("--file", metavar="F", help="read the text from a file ('-' = stdin)")
 
 
 def _add_anchor_options(parser: argparse.ArgumentParser, review: bool) -> None:
     if review:
         parser.add_argument("--review", action="store_true", help="comment on the whole review")
-    parser.add_argument("--commit", metavar="REV", required=not review)
+    parser.add_argument("--commit", metavar="REV", required=not review,
+                        help="a listed sha (full or short), combined, worktree or since")
     parser.add_argument("--path", metavar="P")
     parser.add_argument("--line", type=int, metavar="N")
-    parser.add_argument("--side", choices=("new", "old"), default="new")
-    parser.add_argument("--start-line", type=int, metavar="M", dest="start_line")
+    parser.add_argument("--side", choices=("new", "old"), default="new", help="old: a deleted line (default new)")
+    parser.add_argument("--start-line", type=int, metavar="M", dest="start_line",
+                        help="the first line of a range ending at --line")
 
 
 def build_parser() -> Parser:
-    parser = Parser(prog="ccr", description="Commit Chain Reviewer — a local code review UI for agentic workflows.")
+    parser = Parser(prog="ccr", description="Commit Chain Reviewer — a local code review UI for agentic workflows.",
+                    epilog="exit codes: 0 ok, 1 error, 2 wait timed out, 3 no running session")
     parser.add_argument("--version", action="version", version="ccr " + __version__)
     _add_global_options(parser, suppress=False)
     commands = parser.add_subparsers(dest="command", metavar="<command>")
@@ -180,16 +183,16 @@ def build_parser() -> Parser:
     serve.add_argument("--verbose", action="store_true", help="log every request")
     serve.add_argument("--db-force", action="store_true", dest="db_force", help="reuse a db created for another repo")
 
-    stop = add("stop", "export the review, shut the server down and remove the session files")
+    stop = add("stop", "export the review and shut the server down; the database stays a week")
     stop.add_argument("--all", action="store_true", help="stop every live session")
     stop.add_argument("--keep-db", action="store_true", dest="keep_db",
-                      help="keep the review database (the default: it goes a week after its last change)")
-    stop.add_argument("--purge", action="store_true", help="remove the review database, exports and logs now")
+                      help="with --purge, keep the review database")
+    stop.add_argument("--purge", action="store_true", help="remove the review database, the logs and every export now, this stop's too")
 
     add("status", "show the running session")
     add("sessions", "list every live session")
     logs = add("logs", "tail the server log")
-    logs.add_argument("-n", type=int, default=DEFAULT_LOG_LINES, metavar="N")
+    logs.add_argument("-n", type=int, default=DEFAULT_LOG_LINES, metavar="N", help="lines (default 50)")
     logs.add_argument("-f", action="store_true", dest="follow", help="follow the log")
     add("open", "open the UI in a browser")
 
@@ -204,7 +207,8 @@ def build_parser() -> Parser:
     which.add_argument("--all", action="store_true", help="every thread (default)")
     comments.add_argument("--unresolved", action="store_true")
     comments.add_argument("--unanswered", action="store_true",
-                          help="unresolved threads whose last comment is by user (and not posted to GitHub)")
+                          help="unresolved, not outdated threads whose last comment is the user's (a posted GitHub "
+                          "comment, not edited since, counts as answered)")
     comments.add_argument("--author", choices=COMMENT_AUTHORS)
     comments.add_argument("--commit", metavar="SHA")
     comments.add_argument("--path", metavar="P")
@@ -215,23 +219,27 @@ def build_parser() -> Parser:
     comments.add_argument("--no-snippets", action="store_true", dest="no_snippets")
 
     wait = add("wait", "block until the next review round (or any change with --any)")
-    wait.add_argument("--since-round", type=int, dest="since_round", metavar="N")
-    wait.add_argument("--since-version", type=int, dest="since_version", metavar="V")
-    wait.add_argument("--timeout", type=float, default=DEFAULT_WAIT_TIMEOUT, metavar="S", help="0 = forever")
+    wait.add_argument("--since-round", type=int, dest="since_round", metavar="N",
+                      help="return on a round after N (default: the round count now)")
+    wait.add_argument("--since-version", type=int, dest="since_version", metavar="V",
+                      help="with --any: return on a change after version V (default: now)")
+    wait.add_argument("--timeout", type=float, default=DEFAULT_WAIT_TIMEOUT, metavar="S", help="seconds (default 590; 0 = forever)")
     wait.add_argument("--any", action="store_true", dest="any_change", help="return on any change")
 
     reply = add("reply", "reply to a thread (or many with --batch)")
     reply.add_argument("id", nargs="?", help="thread (root comment) id")
     _add_body_options(reply)
     reply.add_argument("--resolve", action="store_true", help="resolve the thread after replying")
-    reply.add_argument("--as", dest="author", choices=AUTHORS, default=DEFAULT_CLI_AUTHOR)
+    reply.add_argument("--as", dest="author", choices=AUTHORS, default=DEFAULT_CLI_AUTHOR,
+                       help="the author (default claude)")
     reply.add_argument("--force", action="store_true", help="post even when an identical reply exists")
     reply.add_argument("--batch", metavar="FILE", help="JSON list or Markdown '## <id> [resolve]' sections ('-' = stdin)")
 
     comment = add("comment", "create a comment on the review, a commit, a file or a line")
     _add_anchor_options(comment, review=True)
     _add_body_options(comment)
-    comment.add_argument("--as", dest="author", choices=AUTHORS, default=DEFAULT_CLI_AUTHOR)
+    comment.add_argument("--as", dest="author", choices=AUTHORS, default=DEFAULT_CLI_AUTHOR,
+                         help="the author (default claude)")
     comment.add_argument("--github", action="store_true", help="a GitHub comment of PR mode (needs --as user)")
 
     add("resolve", "resolve threads").add_argument("ids", nargs="+", metavar="ID")
