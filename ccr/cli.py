@@ -187,7 +187,7 @@ def build_parser() -> Parser:
     stop.add_argument("--all", action="store_true", help="stop every live session")
     stop.add_argument("--keep-db", action="store_true", dest="keep_db",
                       help="with --purge, keep the review database")
-    stop.add_argument("--purge", action="store_true", help="remove the review database, the logs and every export now, this stop's too")
+    stop.add_argument("--purge", action="store_true", help="delete the review database, logs and exports now, this stop's too")
 
     add("status", "show the running session")
     add("sessions", "list every live session")
@@ -220,7 +220,7 @@ def build_parser() -> Parser:
 
     wait = add("wait", "block until the next review round (or any change with --any)")
     wait.add_argument("--since-round", type=int, dest="since_round", metavar="N",
-                      help="return on a round after N (default: the round count now)")
+                      help="return on a round after N (default: the count now)")
     wait.add_argument("--since-version", type=int, dest="since_version", metavar="V",
                       help="with --any: return on a change after version V (default: now)")
     wait.add_argument("--timeout", type=float, default=DEFAULT_WAIT_TIMEOUT, metavar="S", help="seconds (default 590; 0 = forever)")
@@ -270,14 +270,14 @@ def build_parser() -> Parser:
 
     add("gh-sync", "mirror the pull request's review threads and review bodies from GitHub")
 
-    gh_post = add("gh-post", "post GitHub comments and replies verbatim into your pending review, never submitting "
-                  "it; nothing is posted when the discussion changed on GitHub since the last sync")
+    gh_post = add("gh-post", "post GitHub comments and replies verbatim into your pending review (never submitted); "
+                  "posts nothing while GitHub has news since the last sync")
     gh_post.add_argument("ids", nargs="+", metavar="ID")
     gh_post.add_argument("--dry-run", action="store_true", dest="dry_run",
                          help="re-read the discussion, show where each comment would go and what it says; post nothing")
 
-    restore_cmd = add("restore", "fill the running review, still empty, from an export of `ccr stop` or "
-                      "`ccr export`; in PR mode with a GitHub sync around it")
+    restore_cmd = add("restore", "fill the running, still empty review from an export of `ccr stop` or "
+                      "`ccr export` (in PR mode, syncing with GitHub)")
     restore_cmd.add_argument("file", metavar="FILE", help="the export ('-' = stdin)")
     restore_cmd.add_argument("--dry-run", action="store_true", dest="dry_run",
                              help="check the export and show what it would restore; change nothing")
