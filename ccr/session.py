@@ -91,6 +91,10 @@ class NoSessionError(SessionError):
     """No live session for the repository (exit code 3); stale files were already removed."""
 
 
+class BusyServerError(SessionError):
+    """The recorded ``ccr serve`` is alive but did not answer in time (exit code 1); its record is kept."""
+
+
 class ApiError(Exception):
     """An HTTP error answer from the server: ``status`` and the ``{"error": …}`` message."""
 
@@ -333,12 +337,20 @@ def pick_port(key: str, explicit=None) -> int:
 # --------------------------------------------------------------------------- discovery
 
 def probe(record: dict):
-    """``/api/state`` of the recorded server, or None when the session is stale (pid dead, unreachable, 401)."""
+    """``/api/state`` of the recorded server, or None when the session is stale (pid dead, unreachable, 401).
+
+    A live ``ccr serve`` that does not answer in time is busy, not gone: :class:`BusyServerError` keeps its record.
+    """
     if not pid_alive(record.get("pid")):
         return None
     try:
         return Client(record["url"], record["token"]).get("/api/state")
-    except (URLError, SessionError):
+    except URLError as exc:
+        if isinstance(exc.reason, TimeoutError) and cmdline_is_ccr_serve(record["pid"]):
+            raise BusyServerError("the server for %s (pid %d) did not answer in time; try again"
+                                  % (record.get("repo"), record["pid"])) from None
+        return None
+    except SessionError:
         return None
     except ApiError as exc:
         if exc.status == 401:
@@ -384,7 +396,10 @@ def list_sessions() -> list:
         record = read_record(path)
         if record is None:
             continue
-        state = probe(record)
+        try:
+            state = probe(record)
+        except BusyServerError:
+            continue                                    # alive: neither listed nor removed
         if state is None:
             remove_record(path)
             continue

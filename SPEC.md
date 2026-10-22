@@ -403,8 +403,9 @@ never) stops a server no request reached for `S` s; long polls count.
 A session is keyed by the repository's realpath (`sha1[:16]`), so each linked worktree is its own. The session
 directory (`$CCR_SESSION_DIR`, default `~/.cache/ccr/sessions`, 0700) holds `<key>.json` (the record: pid, port,
 token, URL, …), `<key>.log`, `<key>.sqlite` (with its `.sqlite.lock`), the exports of `ccr stop`, and `<key>.lock`
-while a start runs. A command finding a stale record (dead pid, a failed connection or a 5 s timeout, a 401) deletes
-it and exits 3, listing the live sessions; `ccr start` starts a new server instead. The default port is `7700 + key %
+while a start runs. A command finding a stale record (dead pid, a failed connection, a 401) deletes it and exits 3,
+listing the live sessions; `ccr start` starts a new server instead. A live `ccr serve` that does not answer within
+5 s is busy, not stale: the command fails and the record stays. The default port is `7700 + key %
 300`, then the next 20 ports, then any free one; an explicit `--port` that is busy is an error.
 
 ### 6.2 Commands
@@ -433,7 +434,7 @@ it and exits 3, listing the live sessions; `ccr start` starts a new server inste
 * `ccr serve` runs the server in the foreground (also `--token T`, for tests, `--verbose`, `--db-force`); a token from
   the environment, as `ccr start` passes it, is shown redacted, so a started server's log never holds it.
 * `ccr stop` checks that the session's pid is the server's (else the record is stale: deleted, nothing signalled,
-  exit 3), writes `ccr export --md` and `--json` to `<session dir>/<key>-<time>.md|.json` (`ccr: exported to <path>`
+  exit 3; `--all` reports it and goes on with the others), writes `ccr export --md` and `--json` to `<session dir>/<key>-<time>.md|.json` (`ccr: exported to <path>`
   each; a failed export says `export skipped` and the stop goes on), asks the server to shut down, and SIGTERMs it
   after 5 s only if its command line is a `ccr serve`. The database stays; `--purge` deletes it, the logs and every
   export of the session, the two just written included (`--keep-db` keeps the database). Like `ccr start`, it then

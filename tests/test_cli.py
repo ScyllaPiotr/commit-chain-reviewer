@@ -401,6 +401,38 @@ def test_stale_session_file_is_removed(cli, ccr_session_dir):
     assert fresh["pid"] != record["pid"] and fresh["reused"] is False
 
 
+def test_a_busy_server_keeps_its_session_record(ccr_session_dir, monkeypatch, tmp_path):
+    """A live ccr serve that answers too slowly is not stale: its record must survive the probe."""
+    from ccr import session
+
+    paths = session.paths_for(str(tmp_path))
+    record = {"pid": os.getpid(), "port": 1, "url": "http://127.0.0.1:1/?t=x", "token": "x", "repo": str(tmp_path)}
+    session.write_record(paths, record)
+
+    def timed_out(self, path, timeout=None):
+        raise session.URLError(TimeoutError("timed out"))
+    monkeypatch.setattr(session.Client, "get", timed_out)
+    monkeypatch.setattr(session, "cmdline_is_ccr_serve", lambda pid: True)
+    with pytest.raises(session.BusyServerError, match="did not answer in time"):
+        session.find_live(str(tmp_path))
+    assert session.list_sessions() == [] and os.path.exists(paths.record), "neither listed nor removed"
+    monkeypatch.setattr(session, "cmdline_is_ccr_serve", lambda pid: False)
+    assert session.find_live(str(tmp_path)) is None and not os.path.exists(paths.record), "another process: stale"
+
+
+def test_stop_all_goes_past_a_stale_record(cli, ccr_session_dir):
+    record = cli.start("--range", "main..feature")
+    # a record that sorts first and reaches the same server under another pid: stale (pid mismatch)
+    ghost = dict(record, repo="/0-ghost", pid=os.getpid())
+    from ccr import session
+    session.write_record(session.paths_for(ghost["repo"]), ghost)
+    proc = cli.run("stop", "--all")
+    assert proc.returncode == 0, proc.stderr
+    assert "is stale (server pid mismatch); removed" in proc.stderr
+    assert "ccr: stopped %s" % record["repo"] in proc.stdout
+    assert wait_for(lambda: not pid_alive(record["pid"]))
+
+
 def test_wait_detects_a_vanished_server(cli, ccr_session_dir):
     record = cli.start("--range", "main..feature")
     proc = cli.popen("wait", "--timeout", "60")

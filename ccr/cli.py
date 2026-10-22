@@ -551,7 +551,12 @@ def cmd_stop(args) -> int:
     else:
         targets = [session.find_session(resolve_repo(args))]
     for record, state in targets:
-        stop_one(record, state, args)
+        try:
+            stop_one(record, state, args)
+        except NoSessionError as exc:
+            if not args.all:
+                raise
+            err("ccr: %s" % exc)                       # one stale record does not keep the others running
     prune_stale_dbs()
     return EXIT_OK
 
