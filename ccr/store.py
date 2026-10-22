@@ -543,11 +543,12 @@ class ReviewStore:
         """
         chain = None
         newest_used = None
+        empty = None
         for row in self._conn.execute("SELECT * FROM reviews ORDER BY id DESC"):
             size = self._review_size(row["id"])
             if not (size["comments"] or size["rounds"] or row["cover"]):
-                self._adopt_review(row, False)          # nothing in it to inherit or to lose
-                break
+                empty = empty or row                    # nothing in it to inherit or to lose, unless one continues
+                continue
             if chain is None:
                 chain = self._listed_chain()
             if self._continues(row, chain):
@@ -557,9 +558,12 @@ class ReviewStore:
                 newest_used = dict(size, id=row["id"], started_at=row["started_at"], range=row["range_spec"] or None)
         else:
             self.previous_review = newest_used
-            self.review_started_at = utcnow()
-            self.review_id = self._conn.execute(
-                "INSERT INTO reviews (started_at) VALUES (?)", (self.review_started_at,)).lastrowid
+            if empty is not None:
+                self._adopt_review(empty, False)
+            else:
+                self.review_started_at = utcnow()
+                self.review_id = self._conn.execute(
+                    "INSERT INTO reviews (started_at) VALUES (?)", (self.review_started_at,)).lastrowid
         self._conn.execute("UPDATE reviews SET range_spec = ? WHERE id = ?",
                            (self._range.get("given") or self._range["spec"] or "", self.review_id))
         self._conn.commit()

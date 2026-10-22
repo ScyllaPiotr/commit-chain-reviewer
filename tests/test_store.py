@@ -1023,6 +1023,23 @@ def test_a_review_of_another_change_starts_empty(fixture_repo, tmp_path):
         kept.close()
 
 
+def test_an_empty_review_does_not_hide_the_review_of_this_change(fixture_repo, tmp_path):
+    """A start on another change that left its review empty must not take the place of this change's review."""
+    db = str(tmp_path / "review.sqlite")
+    first = open_store(fixture_repo, db_path=db, worktree=False)
+    first.add_comment("on the feature chain", {"kind": "commit", "commit": fixture_repo.sha(THREE_HUNKS)})
+    first.close()
+    open_store(fixture_repo, spec="main~1..main", db_path=db, worktree=False).close()   # review 2, left empty
+
+    back = open_store(fixture_repo, db_path=db, worktree=False)
+    assert (back.review_id, back.resumed) == (1, True) and len(back.list_comments()) == 1
+    back.close()
+    again = open_store(fixture_repo, spec="main~1..main", db_path=db, worktree=False)
+    assert (again.review_id, again.resumed) == (2, False), "the empty review is taken when no review continues"
+    assert again.previous_review["id"] == 1
+    again.close()
+
+
 def test_the_same_change_resumes_its_review_across_an_amend(fixture_repo, tmp_path):
     db = str(tmp_path / "review.sqlite")
     first = open_store(fixture_repo, db_path=db, worktree=False)

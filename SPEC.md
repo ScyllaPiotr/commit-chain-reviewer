@@ -310,10 +310,10 @@ current `HEAD`, read on each request. A new-side worktree comment is `live`; a f
 
 A database belongs to a repository, which is reviewed many times, and a server that is killed, times out or is stopped
 leaves its database behind. So every comment and round belongs to a review, and everything the store reads — comments,
-counts, `outdated`, rounds and their numbering — is scoped to the review it serves. On opening it walks the stored
-reviews newest first and takes the first that is empty (no comments, rounds or cover letter) or whose remembered chain
-shares a sha or a subject with the range (an amend, a rebase, a wider range, a branch reviewed before), else starts a
-new one; a range that lists nothing continues the newest review; nothing is deleted. An adopted review keeps its PR
+counts, `outdated`, rounds and their numbering — is scoped to the review it serves. On opening it takes the newest stored
+review whose remembered chain shares a sha or a subject with the range (an amend, a rebase, a wider range, a branch
+reviewed before), else the newest empty one (no comments, rounds or cover letter), else starts a new one; a range that
+lists nothing continues the newest review that holds anything; nothing is deleted. An adopted review keeps its PR
 link, "since" and flags, even an empty one adopted for an unrelated range. `review()` reports which (2.6), and
 `ccr start` prints it (6.2).
 
