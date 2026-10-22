@@ -136,10 +136,9 @@ def _add_server_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--log", metavar="FILE")
     parser.add_argument("--open", action="store_true", help="open the UI in a browser")
     parser.add_argument("--cover", metavar="FILE", help="Markdown cover letter describing the whole change")
-    parser.add_argument("--pr", metavar="URL", help="link the review to a GitHub pull request (PR mode: questions "
-                        "for Claude and GitHub comments for your pending review); URL or OWNER/REPO#N")
-    parser.add_argument("--since", metavar="REV", help="open the \"Since your last review\" view: what the head "
-                        "changed since REV, the commit an earlier review was submitted on, was reviewed")
+    parser.add_argument("--pr", metavar="URL", help="link a GitHub pull request (PR mode); URL or OWNER/REPO#N")
+    parser.add_argument("--since", metavar="REV", help="open \"Since your last review\" from REV, the commit an "
+                        "earlier review was submitted on")
     parser.add_argument("--since-at", metavar="TIME", dest="since_at",
                         help="when that review was submitted (UTC, like 2026-10-07T12:34:56Z); needs --since")
     parser.add_argument("--idle-timeout", type=float, default=server.DEFAULT_IDLE_TIMEOUT, metavar="S",
@@ -247,11 +246,10 @@ def build_parser() -> Parser:
     move.add_argument("id")
     _add_anchor_options(move, review=False)
 
-    cover = add("cover", "set the cover letter (Markdown description of the whole change) of the running review")
+    cover = add("cover", "set the cover letter: the Markdown description of the whole change")
     _add_body_options(cover)
 
-    flag = add("flag", "flag lines of a view as a change that needs a closer look (an orange stripe and ⚑ in the UI); "
-               "--clear removes every flag")
+    flag = add("flag", "flag lines that need a closer look (⚑ in the UI); --clear removes every flag")
     flag.add_argument("body", nargs="?", metavar="REASON", help="why the lines need a closer look ('-' reads stdin)")
     flag.add_argument("--file", metavar="F", help="read the reason from a file ('-' = stdin)")
     flag.add_argument("--commit", metavar="VIEW", help="the view: since (the default), combined or a commit")
@@ -262,18 +260,16 @@ def build_parser() -> Parser:
     flag.add_argument("--clear", action="store_true", help="remove every flag of the review")
     add("flags", "list the review's flags")
 
-    add("gh-sync", "mirror the linked pull request's review threads and review bodies from GitHub into the review")
+    add("gh-sync", "mirror the pull request's review threads and review bodies from GitHub")
 
-    gh_post = add("gh-post", "re-read the linked pull request's discussion, then post GitHub comments and replies "
-                  "verbatim into your pending review on it (starting it when there is none; it is never submitted); "
-                  "nothing is posted while the re-read brings comments changed since the last sync")
+    gh_post = add("gh-post", "post GitHub comments and replies verbatim into your pending review, never submitting "
+                  "it; nothing is posted when the discussion changed on GitHub since the last sync")
     gh_post.add_argument("ids", nargs="+", metavar="ID")
     gh_post.add_argument("--dry-run", action="store_true", dest="dry_run",
                          help="re-read the discussion, show where each comment would go and what it says; post nothing")
 
-    restore_cmd = add("restore", "fill the running review, which has no comments or rounds of its own yet, from an "
-                      "export: the .json or .md `ccr stop` writes, or `ccr export`; in PR mode it syncs with GitHub "
-                      "around the restore")
+    restore_cmd = add("restore", "fill the running review, still empty, from an export of `ccr stop` or "
+                      "`ccr export`; in PR mode with a GitHub sync around it")
     restore_cmd.add_argument("file", metavar="FILE", help="the export ('-' = stdin)")
     restore_cmd.add_argument("--dry-run", action="store_true", dest="dry_run",
                              help="check the export and show what it would restore; change nothing")
