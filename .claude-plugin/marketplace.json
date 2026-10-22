@@ -6,7 +6,7 @@
       "name": "ccr",
       "source": "./",
       "description": "Commit Chain Reviewer — GitHub-like local code review for agentic workflows",
-      "version": "1.1.0"
+      "version": "1.2.0"
     }
   ]
 }

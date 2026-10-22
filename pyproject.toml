@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccr"
-version = "1.1.0"
+version = "1.2.0"
 description = "Commit Chain Reviewer: a local, GitHub-like code review UI for agentic workflows"
 readme = "README.md"
 requires-python = ">=3.10"

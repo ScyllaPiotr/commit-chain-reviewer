@@ -2,7 +2,7 @@
   "name": "ccr",
   "displayName": "Commit Chain Reviewer",
   "description": "GitHub-like code review of a commit chain in your browser, driven by Claude: /review-commit-series shows the change, you comment on lines, files, commits or the cover letter, Claude reads and answers every comment from the CLI.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": { "name": "Piotr Szymaniak" },
   "license": "MIT",
   "keywords": ["code-review", "git", "diff", "agentic"]
