@@ -476,6 +476,7 @@ def cmd_start(args) -> int:
             if args.open:
                 webbrowser.open(record["url"])
             return EXIT_OK
+        gitx.check_version()
         gitx.resolve_range(repo, args.range, args.n)
         # never the database this start resumes, however old
         prune_stale_dbs(say=(lambda line: None) if args.json else None, keep=(paths.db,))

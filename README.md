@@ -39,7 +39,7 @@ then, even after a rebase. Claude can flag lines there that need a closer look (
 Give Claude this:
 
 > Install ccr: `git clone https://github.com/ScyllaPiotr/commit-chain-reviewer.git ~/.claude/skills/ccr`. Check that
-> `python3 -c 'import sqlite3, sys; assert sys.version_info >= (3, 10)'` succeeds and that `git --version` is 2.24 or
+> `python3 -c 'import sqlite3, sys; assert sys.version_info >= (3, 10)'` succeeds and that `git --version` is 2.30 or
 > newer (2.40 for re-reviewing a pull request); for pull requests, also that `gh auth status` shows a login. Then tell
 > me to start a new Claude Code session.
 

@@ -334,6 +334,21 @@ def test_start_with_a_bad_range_fails_immediately(cli, ccr_session_dir):
     assert empty.returncode == 1 and "is empty" in empty.stderr
 
 
+def test_start_and_serve_refuse_a_git_too_old(fixture_repo, ccr_session_dir, monkeypatch, capsys):
+    """ccr passes --end-of-options to git rev-parse, which git learned in 2.30: refused before anything starts."""
+    from ccr import cli as ccr_cli, gitx, server
+
+    real_git = gitx._git
+    monkeypatch.setattr(gitx, "_git", lambda repo, args, *rest, **kwargs: (
+        subprocess.CompletedProcess([], 0, b"git version 2.29.3\n", b"") if args == ["--version"]
+        else real_git(repo, args, *rest, **kwargs)))
+    assert ccr_cli.main(["start", "--repo", fixture_repo.path, "--range", "main..feature"]) == 1
+    assert "ccr: git 2.29.3 is too old; ccr needs git >= 2.30" in capsys.readouterr().err
+    assert os.listdir(str(ccr_session_dir)) == [], "nothing started"
+    with pytest.raises(gitx.GitError, match="too old"):
+        server.serve(fixture_repo.path, spec="main..feature", db=":memory:")
+
+
 def test_start_reports_a_crashing_server_with_the_log_tail(cli, ccr_session_dir):
     proc = cli.run("start", "--range", "main..feature", "--db", "/nonexistent-ccr-dir/review.sqlite")
     assert proc.returncode == 1

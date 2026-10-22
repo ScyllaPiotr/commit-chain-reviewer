@@ -243,8 +243,8 @@ class TestInvocation:
 class TestQueries:
     def test_check_version(self, monkeypatch):
         version = gitx.check_version()
-        assert isinstance(version, tuple) and version >= (2, 24)
-        monkeypatch.setattr(gitx, "_git", lambda *a, **k: subprocess.CompletedProcess([], 0, b"git version 2.20.1\n", b""))
+        assert isinstance(version, tuple) and version >= (2, 30)
+        monkeypatch.setattr(gitx, "_git", lambda *a, **k: subprocess.CompletedProcess([], 0, b"git version 2.29.3\n", b""))
         with pytest.raises(GitError, match="too old"):
             gitx.check_version()
 

@@ -670,6 +670,7 @@ def serve(repo, spec=None, n=None, worktree: bool = False, first_parent: bool = 
     :class:`~ccr.session.SessionError` before anything is bound; the caller prints them.
     """
     out, err = out or sys.stdout, err or sys.stderr
+    gitx.check_version()
     os.umask(0o077)
     from_env = token is None and bool(os.environ.get(session.TOKEN_ENV))
     token = token or os.environ.get(session.TOKEN_ENV) or secrets.token_hex(16)

@@ -21,7 +21,7 @@ Constraints:
   after its last change (6.2), at once with `ccr stop --purge`; `ccr restore` brings a review back from its export
   (6.4). `--db :memory:` or `--db FILE` choose another store.
 * **Local only**: binds `127.0.0.1`, and every `/api/*` call carries a per-process random token.
-* Any git repository (git ≥ 2.24) and range, uncommitted work included.
+* Any git repository (git ≥ 2.30) and range, uncommitted work included.
 * ccr never changes the working tree, refs or index contents. Diffing the worktree may let git refresh the stat
   cache in `.git/index` (`GIT_OPTIONAL_LOCKS=0` minimises that); "Since your last review" writes unreferenced
   objects (3.2).
@@ -203,8 +203,8 @@ flags and, per view, the rows to mark.
 
 gitx runs git and returns plain dicts: ranges (2.1), the chain and its stats, each view's diff, file contents, blame
 and `map_line`. Failures raise `GitError` with an HTTP status (400; 403 a path escaping the toplevel; 404 unknown
-object; 413 too large; 415 binary). git ≥ 2.24 is assumed, not checked at start; `check_version` runs only in the
-rebuild of 3.2, which needs 2.40.
+object; 413 too large; 415 binary). `ccr start` and `ccr serve` refuse git older than 2.30, the first whose
+`rev-parse` takes `--end-of-options`; the rebuild of 3.2 needs 2.40 and checks that itself.
 
 ### 3.1 Invocation rules
 

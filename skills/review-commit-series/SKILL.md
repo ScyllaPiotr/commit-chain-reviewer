@@ -15,7 +15,7 @@ question or a request for a change. You never see the page: the CLI is your whol
 ## Setup
 
 - Run `ccr` from PATH (the plugin's `bin/`), else `${CLAUDE_PLUGIN_ROOT}/bin/ccr`. It needs python3 ≥ 3.10 and
-  git ≥ 2.24, nothing installed.
+  git ≥ 2.30; there is nothing to install.
 - `REPO=$(git rev-parse --show-toplevel)`, and pass `--repo "$REPO"` to **every** ccr command; never rely on the
   current directory. In a linked worktree `REPO` is the worktree, a session of its own.
 - Keep scratch files in `SCRATCH`: your scratchpad directory, else `SCRATCH=$(mktemp -d)` (`$TMPDIR` may be unset).

@@ -67,7 +67,7 @@ __all__ = [
     "pseudo_meta",
 ]
 
-MIN_GIT_VERSION = (2, 24)
+MIN_GIT_VERSION = (2, 30)  # git rev-parse --end-of-options
 REBUILD_GIT_VERSION = (2, 40)  # git merge-tree --merge-base
 MAX_LINE_CHARS = 20000
 FILE_LINE_CAP = 5000
@@ -181,7 +181,7 @@ def _is_sha(value) -> bool:
 # --------------------------------------------------------------------------- simple queries
 
 def check_version() -> tuple:
-    """Return the installed git version as a tuple of ints; refuse anything older than 2.24."""
+    """Return the installed git version as a tuple of ints; refuse anything older than ``MIN_GIT_VERSION``."""
     out = _decode(_git(None, ["--version"]).stdout)
     match = _VERSION_RE.search(out)
     if not match:
