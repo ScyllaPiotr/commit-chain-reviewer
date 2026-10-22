@@ -49,12 +49,14 @@ question or a request for a change. You never see the page: the CLI is your whol
    session was reloaded with your options. Exit 1 with `range X..Y is empty` (fix the base or add `--worktree`) or a
    git error about the spec: fix the range and retry. On `ccr: server exited with code N — last log lines:`, read
    them, then `ccr logs --repo "$REPO" -n 100`.
-4. If the user is local (Setup), run `ccr open --repo "$REPO"` and say so. Either way hand over the URL **verbatim, on
-   its own line** — its `?t=` token authorises the browser, so never shorten it, make it a Markdown link or split
-   it — in this sentence, with its port for `PORT`:
+4. If the user is local (Setup), run `ccr open --repo "$REPO"` (unless `ccr start` had `--open`) and say so. Either
+   way hand over the URL **verbatim, on its own line** — its `?t=` token authorises the browser, so never shorten it,
+   make it a Markdown link or split it — then this sentence, with its port for `PORT`:
 
-   > Open http://127.0.0.1:PORT/?t=… (over SSH: `ssh -L PORT:127.0.0.1:PORT <host>` first), leave
-   > comments, then click **Submit** — or just tell me when you are done.
+   > http://127.0.0.1:PORT/?t=…
+   >
+   > Open it (over SSH: `ssh -L PORT:127.0.0.1:PORT <host>` first), leave comments, then click **Submit** — or just
+   > tell me when you are done.
 
 ### 2. Pre-annotate (optional)
 
@@ -83,16 +85,16 @@ Monitor, then go by the exit code:
 |---|---|---|
 | 0 | a new round | stdout starts `ccr: round <n> — <k> new comments in <j> threads`, then its threads (new comments marked `★ new in round n`). Go to step 4. |
 | 2 | timeout | Re-run the same command. On `ccr: UI not opened yet` (or `ccr status` showing the UI not connected), remind the user of the URL and the SSH forward once; do not nag. |
-| 3 | server gone | `ccr sessions`, then `ccr logs --repo "$REPO"`. After a crash, `ccr start` with the same options (the database kept everything) and hand over the **new** URL: the token changed. If the user ran `ccr stop`, ask before starting again (within a week that resumes the review). On `server was replaced while waiting (new token)`, hand over the URL `ccr status` prints. |
+| 3 | server gone | `ccr sessions`, then `ccr logs --repo "$REPO"`. After a crash, `ccr start` with the same options (the database kept everything) and hand over the **new** URL: the token changed. If the user ran `ccr stop`, ask before starting again (with the same options within a week, that resumes the review). On `server was replaced while waiting (new token)`, hand over the URL `ccr status` prints. |
 
 **Wait for Submit: pending comments are drafts, not instructions.** You can read them before the user is done, and
 they may still change or go; acting on one answers a point the user never made, resolves threads they wanted open
 and changes the review under them while they write. A draft that reads as urgent ("fix this first") is still a
 draft. On exit 2 just wait again, and avoid reading `ccr comments --pending` while a round is open.
 
-Only two things release you: `ccr wait` returns a round, or the user says in chat they are done commenting; then
-`ccr comments --repo "$REPO" --pending` is the round. `ccr wait --repo "$REPO" --any --timeout 590` returns on any
-change; use it only when the user asked you to react live.
+Only two things release you: `ccr wait` returns a round, or the user says in chat they are done commenting. In that
+second case `ccr comments --repo "$REPO" --pending` is the round. `ccr wait --repo "$REPO" --any --timeout 590`
+returns on any change; use it only when the user asked you to react live.
 
 ### 4. Address every thread in one pass
 
@@ -102,7 +104,8 @@ change; use it only when the user asked you to react live.
 2. Make the code changes for all threads before replying to any.
 3. Commit them as **new commits** (`git commit --fixup=<sha>`, or plain ones): no amend, rebase or force-push until
    the user declares the review done, so every anchor stays valid and the page marks the commits added since the last
-   round. Squash (`git rebase -i --autosquash`) only after approval, and only if the user wants it.
+   round. Squash (`GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash <base>`, which needs no editor) only after
+   approval, and only if the user wants it.
 4. Reply to every thread in one call, citing the fix commit (a short sha of 7+ hex chars becomes a link):
 
    ```sh
@@ -143,10 +146,11 @@ database a week after its last change, so a `ccr start` within the week resumes 
 user wants it, first run `ccr export --repo "$REPO" --md -o <file>`. Never pass `--purge` unless the user asks to
 delete the review: it deletes the session's exports too.
 
-A dropped review (`--purge`, the week passed, a lost file) comes back from an export, after `--purge` only from one
-saved elsewhere: `ccr start` with the same options (`--pr` too), `ccr restore --repo "$REPO" --dry-run <export>`, then
-the same without `--dry-run`. Prefer the `.json` export; a `.md` one loses the snippets (taken from git again) and a
-thread's creation time. A restore fills only a review with no comments or rounds of its own.
+When a review was dropped (`--purge`, the week passed, a lost file) and the user wants it back, it comes back from an
+export, after `--purge` only from one saved elsewhere: `ccr start` with the same options (`--pr` too),
+`ccr restore --repo "$REPO" --dry-run <export>`, then the same without `--dry-run`. Prefer the `.json` export; a
+`.md` one loses the snippets (taken from git again) and a thread's creation time. A restore fills only a review with
+no comments or rounds of its own.
 
 If the conversation ends without a decision, leave the server running and say so: "ccr is still serving `<url>`; run
 `ccr stop` when you are finished."
