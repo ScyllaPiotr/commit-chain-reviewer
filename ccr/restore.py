@@ -235,8 +235,9 @@ def parse_markdown(text: str) -> dict:
         edited = next((p[len("edited "):] for p in parts[3:] if p.startswith("edited ")), None)
         i += 1
         if anchor["kind"] == "line" and i < len(lines) and lines[i].startswith("```"):
+            fence = "`" * (len(lines[i]) - len(lines[i].lstrip("`")))   # the snippet's, which no row of it closes
             i += 1
-            while i < len(lines) and lines[i] != "```":
+            while i < len(lines) and lines[i] != fence:
                 i += 1
             i += 1
         body, i = read_body(i, "")

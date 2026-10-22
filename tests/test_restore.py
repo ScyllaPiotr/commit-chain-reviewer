@@ -52,6 +52,21 @@ def stored(comments, keys=STORED) -> list:
     return [{key: c[key] for key in keys} for c in comments]
 
 
+def test_code_fences_in_bodies_and_snippets_survive_the_markdown_export(fixture_repo):
+    """The snippet block after a line thread's header is skipped on restore: no fence of the comment may pass for it."""
+    store = open_store(fixture_repo)
+    sha = fixture_repo.sha(THREE_HUNKS)
+    fenced = "```python\nx = 1\n```\nWhy this?"
+    unseen = store.add_comment(fenced, line_anchor(sha, "src/app.py", 999))        # expanded context: no snippet
+    shown = store.add_comment("A remark.", line_anchor(sha, "src/app.py", 5))
+    comments = store.list_comments()
+    by_id = {c["id"]: c for c in comments}
+    by_id[shown["id"]] = dict(by_id[shown["id"]], snippet="```\n````js\nsnippet text")       # a stored snippet
+    text = render.render_export(store.review(), list(by_id.values()), None, exported_at="2026-10-07T00:00:00Z")
+    bodies = {c["id"]: c["body"] for c in parse_markdown(text)["comments"]}
+    assert bodies == {unseen["id"]: fenced, shown["id"]: "A remark."}
+
+
 def test_a_json_export_restores_the_review_exactly(fixture_repo):
     original = build_review(fixture_repo, open_store(fixture_repo))
     restored = open_store(fixture_repo)

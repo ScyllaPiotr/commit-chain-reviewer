@@ -454,12 +454,18 @@ def _snippet_row(row: dict, width: int, anchored: bool) -> str:
     return (">" + text[1:]) if anchored else text
 
 
+def _fence(rows: list) -> str:
+    """A code fence longer than every backtick run opening one of ``rows``, so none of them can close it."""
+    return "`" * max(3, 1 + max((len(row) - len(row.lstrip("`")) for row in rows), default=0))
+
+
 def _stored_snippet(root: dict):
     """Fallback block showing the snippet captured at creation (no diff available)."""
     snippet = root.get("snippet")
     if not snippet:
         return None
-    return ["```"] + clean(snippet).split("\n") + ["```"]
+    rows = clean(snippet).split("\n")
+    return [_fence(rows)] + rows + [_fence(rows)]
 
 
 class _SnippetSource:
@@ -494,7 +500,10 @@ def _thread_lines(thread: dict, source: _SnippetSource, matching: set, mark: str
     root = thread["root"]
     lines = [_thread_header(thread, matching, mark, pr_mode)]
     if snippets:
-        lines += _snippet_block(root, source, context)
+        block = _snippet_block(root, source, context)
+        if not block and root["anchor"]["kind"] == "line" and (root.get("body") or "").startswith("```"):
+            block = ["```", "```"]  # an empty snippet, or restore.py would take the body's own fence for one
+        lines += block
     lines += _body_lines(root.get("body"))
     for reply in thread["replies"]:
         lines.append("")

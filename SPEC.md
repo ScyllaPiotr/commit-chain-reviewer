@@ -510,7 +510,8 @@ Why not use the existing backoff helper here?
 
 Groups come in this order: review-level comments, Since your last review, the commits, All changes, Uncommitted
 changes, outdated. The snippet shows `--context N` rows around the anchored ones, which start with `>`; without a diff
-the stored snippet is shown instead. The HEAD arrow is qualified `(moved)`, `(changed near)`, `(deleted)`,
+the stored snippet is shown instead, in a fence longer than any backtick run in it. A line thread with no snippet whose
+body opens with a fence gets an empty one, so `ccr restore` never takes the body's fence for the snippet's. The HEAD arrow is qualified `(moved)`, `(changed near)`, `(deleted)`,
 `(file deleted)` (no line) or `(live)`, nothing for `same`, and left out when `unknown`. Every repository- or
 user-derived string is cleaned of control characters and of the bidi embedding, override and isolate controls
 (one-line fields also of newlines, shown as `␤`); a body line starting with `#` is written `\#…`, so outside code
