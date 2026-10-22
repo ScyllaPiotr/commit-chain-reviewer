@@ -671,11 +671,11 @@ def cmd_comments(args) -> int:
     selected, matching = render.select_threads(
         threads, state=state, round=args.round, author=args.author, commit=args.commit, path=args.path,
         unresolved=args.unresolved, unanswered=args.unanswered, outdated=outdated)
+    if args.json:                                       # also when nothing matches: a reader of --json parses it
+        print_json(render.to_json(review, comments, threads=selected))
+        return EXIT_OK
     if not selected:
         out("ccr: no comments match")
-        return EXIT_OK
-    if args.json:
-        print_json(render.to_json(review, comments, threads=selected))
         return EXIT_OK
     sys.stdout.write(render.render_comments(review, comments, fetch_file_diff(client), threads=selected,
                                             matching=matching, context=args.context, snippets=not args.no_snippets))

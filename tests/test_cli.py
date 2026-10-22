@@ -460,6 +460,14 @@ def test_wait_any_reports_changes_and_ui_tracking(cli):
     assert cli.run("stop", check=0).returncode == 0
 
 
+def test_comments_json_stays_json_when_nothing_matches(cli):
+    cli.start("--range", "main..feature")
+    assert cli.run("comments", "--pending", check=0).stdout == "ccr: no comments match\n"
+    document = json.loads(cli.run("comments", "--pending", "--json", check=0).stdout)
+    assert document["threads"] == [] and document["comments"] == []
+    assert cli.run("stop", check=0).returncode == 0
+
+
 def test_wait_returns_at_once_for_a_round_submitted_before_it(cli):
     """The round the agent asks for may be in already: it is reported without first long-polling for a change."""
     record = cli.start("--range", "main..feature")
