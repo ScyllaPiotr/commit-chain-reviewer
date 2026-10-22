@@ -436,10 +436,11 @@ listing the live sessions; `ccr start` starts a new server instead. A live `ccr 
 * `ccr serve` runs the server in the foreground (also `--token T`, for tests, `--verbose`, `--db-force`); a token from
   the environment, as `ccr start` passes it, is shown redacted, so a started server's log never holds it.
 * `ccr stop` checks that the session's pid is the server's (else the record is stale: deleted, nothing signalled,
-  exit 3; `--all` reports it and goes on with the others), writes `ccr export --md` and `--json` to `<session dir>/<key>-<time>.md|.json` (`ccr: exported to <path>`
-  each; a failed export says `export skipped` and the stop goes on), asks the server to shut down, and SIGTERMs it
-  after 5 s only if its command line is a `ccr serve`. The database stays; `--purge` deletes it, the logs and every
-  export of the session, the two just written included (`--keep-db` keeps the database). Like `ccr start`, it then
+  exit 3; `--all` reports it and goes on with the others), writes `ccr export --md` and `--json` to
+  `<session dir>/<key>-<time>.md|.json` (`ccr: exported to <path>` each; a failed export says `export skipped` and
+  the stop goes on), asks the server to shut down, and SIGTERMs it after 5 s only if its command line is a
+  `ccr serve`. The database stays. `--purge` writes no export and deletes the database, the logs and the session's
+  earlier exports; `--keep-db` cancels `--purge`. Like `ccr start`, it then
   removes the database of every session not running (no live record, its lock not held) whose database and WAL have
   not changed for 7 days; `ccr start` never removes the one it resumes.
 * `ccr reload` prints `ccr: N commits (was M), +a −r, K comments remapped, J now outdated`; `warning: R reviewed
@@ -508,15 +509,15 @@ Why not use the existing backoff helper here?
 #### [id: …] user · 1b2c3d4e5f src/x.py new:10 → HEAD src/x.py:10 · R1 · unresolved · 0 replies · last: user
 ```
 
-Groups come in this order: review-level comments, Since your last review, the commits, All changes, Uncommitted
-changes, outdated. The snippet shows `--context N` rows around the anchored ones, which start with `>`; without a diff
-the stored snippet is shown instead, in a fence longer than any backtick run in it. A line thread with no snippet whose
-body opens with a fence gets an empty one, so `ccr restore` never takes the body's fence for the snippet's. The HEAD arrow is qualified `(moved)`, `(changed near)`, `(deleted)`,
-`(file deleted)` (no line) or `(live)`, nothing for `same`, and left out when `unknown`. Every repository- or
-user-derived string is cleaned of control characters and of the bidi embedding, override and isolate controls
-(one-line fields also of newlines, shown as `␤`); a body line starting with `#` is written `\#…`, so outside code
-blocks a line starting with `#` is always structure (the stored-snippet block is not escaped); reply bodies are
-indented two spaces.
+Groups come in this order: review-level comments, Since your last review, the commits, All changes, Uncommitted changes,
+outdated. The snippet shows `--context N` rows around the anchored ones, which start with `>`; without a diff the stored
+snippet is shown instead, in a fence longer than any backtick run in it. A line thread with no snippet whose body opens
+with a fence gets an empty one, so `ccr restore` never takes the body's fence for the snippet's. The HEAD arrow is
+qualified `(moved)`, `(changed near)`, `(deleted)`, `(file deleted)` (no line) or `(live)`, nothing for `same`, and left
+out when `unknown`. Every repository- or user-derived string is cleaned of control characters and of the bidi embedding,
+override and isolate controls (one-line fields also of newlines, shown as `␤`); a body line starting with `#` is written
+`\#…`, so outside code blocks a line starting with `#` is always structure (the stored-snippet block is not escaped);
+reply bodies are indented two spaces.
 
 In PR mode the title carries `— PR <owner/repo#N>`, and right after the author each user root says what it is:
 `question`, `GitHub comment (not posted)` or `GitHub comment (posted: <url>)`, with `; edited since, the update not
@@ -532,10 +533,10 @@ on the file, resolved there, pending, deleted there)` or `GitHub review (<state>
 ### 6.4 Restoring a review from its export (`ccr restore`, `ccr/restore.py`)
 
 A review lives in its database, which `ccr stop --purge`, the weekly prune (6.2) or a lost file can drop. `ccr stop`
-writes two exports first: the Markdown one, and the JSON one, which holds every stored field of the comments and
-rounds (not flags, nor the review's chain memory, PR link or "since"). `--purge` deletes them too, so only an export
-kept elsewhere survives it. `ccr restore FILE` loads either into the running review (`POST /api/restore`);
-`restore.py` parses what 6.3 writes.
+writes two exports first: the Markdown one, and the JSON one, which holds every stored field of the comments and rounds
+(not flags, nor the review's chain memory, PR link or "since"). `--purge` writes none and deletes the earlier ones, so
+only an export kept elsewhere survives it. `ccr restore FILE` loads either into the running review (`POST
+/api/restore`); `restore.py` parses what 6.3 writes.
 
 * The review must have no comments or rounds of its own (mirrored GitHub comments may be there); an export of a pull
   request needs the review linked to it, and an abbreviated commit (a Markdown export's) must resolve in the

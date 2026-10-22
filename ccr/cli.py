@@ -185,9 +185,9 @@ def build_parser() -> Parser:
 
     stop = add("stop", "export the review and shut the server down; the database stays a week")
     stop.add_argument("--all", action="store_true", help="stop every live session")
-    stop.add_argument("--keep-db", action="store_true", dest="keep_db",
-                      help="with --purge, keep the review database")
-    stop.add_argument("--purge", action="store_true", help="delete the review database, logs and exports now, this stop's too")
+    stop.add_argument("--keep-db", action="store_true", dest="keep_db", help="cancel --purge")
+    stop.add_argument("--purge", action="store_true",
+                      help="delete the review database, logs and exports now, writing no export")
 
     add("status", "show the running session")
     add("sessions", "list every live session")
@@ -512,28 +512,35 @@ def cmd_serve(args) -> int:
                         open_browser=args.open, cover=args.cover, pr=args.pr, since=args.since, since_at=args.since_at)
 
 
+def write_exports(paths, client: Client) -> None:
+    """The two exports ``ccr stop`` leaves in the session directory: the Markdown one and the lossless JSON one."""
+    try:
+        review, comments = load_review(client)
+        text = render.render_export(review, comments, fetch_file_diff(client))
+    except ApiError as exc:
+        err("ccr: export skipped: %s" % exc)
+        return
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    path = paths.export(stamp)
+    session.write_private(path, text.encode("utf-8"))
+    out("ccr: exported to %s" % path)
+    # the lossless one, for `ccr restore`
+    path = paths.export(stamp, "json")
+    session.write_private(path, json_text(render.to_json(review, comments)).encode("utf-8"))
+    out("ccr: exported to %s" % path)
+
+
 def stop_one(record: dict, state: dict, args) -> None:
     paths = session.paths_for(record["repo"])
     if (state.get("server") or {}).get("pid") != record["pid"]:
         session.remove_record(paths.record)
         raise NoSessionError("session record for %s is stale (server pid mismatch); removed" % record["repo"])
     client = Client(record["url"], record["token"])
-    try:
-        review, comments = load_review(client)
-        text = render.render_export(review, comments, fetch_file_diff(client))
-    except ApiError as exc:
-        err("ccr: export skipped: %s" % exc)
-    else:
-        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-        path = paths.export(stamp)
-        session.write_private(path, text.encode("utf-8"))
-        out("ccr: exported to %s" % path)
-        # the lossless one, for `ccr restore`
-        path = paths.export(stamp, "json")
-        session.write_private(path, json_text(render.to_json(review, comments)).encode("utf-8"))
-        out("ccr: exported to %s" % path)
+    purge = args.purge and not args.keep_db
+    if not purge:  # a purge deletes the exports with the review: none is written only to go at once
+        write_exports(paths, client)
     session.shutdown_server(record, client)
-    session.remove_session_files(paths, record, purge=args.purge and not args.keep_db)
+    session.remove_session_files(paths, record, purge=purge)
     out("ccr: stopped %s (pid %d)" % (record["repo"], record["pid"]))
 
 

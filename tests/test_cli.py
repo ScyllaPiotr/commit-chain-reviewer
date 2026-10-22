@@ -637,8 +637,11 @@ def saved_exports(cli, tmp_path) -> tuple:
 
 def drop_the_database(cli, start_args) -> None:
     record = cli.start(*start_args)
-    cli.run("stop", "--purge", check=0)
+    stopped = cli.run("stop", "--purge", check=0).stdout
     assert not os.path.exists(record["db"])
+    assert "exported to" not in stopped, "a purge writes no export only to delete it"
+    key = os.path.basename(record["db"])[:-len(".sqlite")]
+    assert not [n for n in os.listdir(cli.session_dir) if n.startswith(key + "-")], "no export is left either"
 
 
 def stored_fields(document: dict) -> tuple:
