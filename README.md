@@ -17,16 +17,17 @@ updates by itself. Repeat until you have nothing left to say. The cover letter b
 ## Reviewing someone else's pull request
 
 Ask Claude, for example *"review https://github.com/OWNER/REPO/pull/N with ccr"*. Claude checks the pull request out
-into a worktree of its own, with its body as the cover letter, so **All changes** is the diff GitHub shows. Claude
-changes no code here. A comment is one of two kinds:
+into a worktree of its own and starts ccr from its merge base, so **All changes** is the diff GitHub shows; the pull
+request body is the cover letter. Claude changes no code here. A comment is one of two kinds:
 
 * **Ask AI**: a question for Claude, answered in the thread. Nothing goes to GitHub.
-* **GH comment**, or **GH reply** in a GitHub thread: a message for the pull request. On Submit, Claude checks it
+* **GH comment**, or **GH reply** in a thread on a line or a file: a message for the pull request. On Submit, Claude checks it
   against the code and either posts it verbatim into your pending GitHub review or replies with what is wrong with
   it. Questions are answered first. Where GitHub takes no comment, such as a line outside the pull request diff, the
   button is greyed out and its tooltip says why.
 
-The pull request's GitHub discussion comes in too, so you can ask about a GitHub thread or reply to it in place. A
+The pull request's review threads and review bodies on GitHub come in too (not its Conversation tab's comments), so
+you can ask about a GitHub thread or reply to it in place. A
 blue background is your exchange with Claude, a grey one what comes from or goes to GitHub, posted or still a draft.
 Submitting the review, with its verdict, stays yours, on GitHub.
 
@@ -43,7 +44,8 @@ Give Claude this:
 
 > Install ccr: `git clone https://github.com/ScyllaPiotr/commit-chain-reviewer.git ~/.claude/skills/ccr`. Check that
 > `python3 -c 'import sqlite3, sys; assert sys.version_info >= (3, 10)'` succeeds and that `git --version` is 2.24 or
-> newer; for pull requests, also that `gh auth status` shows a login. Then tell me to start a new Claude Code session.
+> newer (2.40 for re-reviewing a pull request); for pull requests, also that `gh auth status` shows a login. Then tell
+> me to start a new Claude Code session.
 
 Claude Code loads the clone as a plugin, with the `review-commit-series` skill and the `ccr` command. There is
 nothing to build or install.
@@ -53,8 +55,8 @@ nothing to build or install.
 * [SPEC.md](SPEC.md): how ccr works, from the data model to the HTTP API and the UI.
 * [skills/review-commit-series/SKILL.md](skills/review-commit-series/SKILL.md): what Claude does in a review.
 * `ccr --help`: the command line.
-* ccr listens on 127.0.0.1 only, and every API call needs the session's token. Only `ccr gh-sync` and `ccr gh-post`
-  talk to GitHub, through your `gh` login, and neither submits a review.
+* ccr listens on 127.0.0.1 only, and every API call needs the session's token. Only `ccr gh-sync`, `ccr gh-post` and,
+  for a pull request, `ccr restore` talk to GitHub, through your `gh` login, and none of them submits a review.
 
 ## License
 
