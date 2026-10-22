@@ -20,6 +20,8 @@ is your whole interface, and `ccr comments` / `ccr wait` print Markdown written 
   git ≥ 2.24; there is nothing to install.
 - `REPO=$(git rev-parse --show-toplevel)`, and pass `--repo "$REPO"` to **every** ccr command; never rely on the
   current directory. In a linked worktree `REPO` is the worktree, a session of its own.
+- Keep scratch files (the cover letter) in `SCRATCH`: your scratchpad directory, else `SCRATCH=$(mktemp -d)`.
+  `$TMPDIR` may be unset.
 - Open the browser (`ccr open`, or `ccr start --open`) only when the user is on this machine with a display:
   `DISPLAY` or `WAYLAND_DISPLAY` set and `SSH_CONNECTION` not. Hand over the URL either way.
 
@@ -31,12 +33,12 @@ is your whole interface, and `ccr comments` / `ccr wait` print Markdown written 
    base), or a sha the user named. Do not rely on ccr's default detection.
 2. If `git -C "$REPO" status --porcelain` prints anything, add `--worktree`, so the uncommitted work shows as
    "Uncommitted changes".
-3. Always write a **cover letter** to a scratch file: the future pull-request description — what the change does,
-   why, how it is split into commits, what to look at first, open questions. It is the first thing under **All
+3. Always write a **cover letter** to `$SCRATCH/ccr-cover.md`: the future pull-request description — what the change
+   does, why, how it is split into commits, what to look at first, open questions. It is the first thing under **All
    changes**, and the user can comment on it. Then:
 
    ```sh
-   ccr start --repo "$REPO" --range main..HEAD [--worktree] --cover "$TMPDIR/ccr-cover.md"
+   ccr start --repo "$REPO" --range main..HEAD [--worktree] --cover "$SCRATCH/ccr-cover.md"
    ```
 
    Treat comments on the cover letter as edits and apply them with `ccr cover --repo "$REPO" --file FILE` (which also
@@ -85,7 +87,7 @@ Monitor, then go by the exit code:
 |---|---|---|
 | 0 | a new round | stdout starts `ccr: round <n> — <k> new comments in <j> threads`, then its threads (new comments marked `★ new in round n`). Go to step 4. |
 | 2 | timeout | Re-run the same command. On `ccr: UI not opened yet` (or `ccr status` showing the UI not connected), remind the user of the URL and the SSH forward once; do not nag. |
-| 3 | server gone | `ccr sessions`, then `ccr logs --repo "$REPO"`. After a crash, `ccr start` with the same options (the database kept everything) and hand over the **new** URL: the token changed. If the user ran `ccr stop`, a start with the same options within a week resumes the review; ask before starting it. |
+| 3 | server gone | `ccr sessions`, then `ccr logs --repo "$REPO"`. After a crash, `ccr start` with the same options (the database kept everything) and hand over the **new** URL: the token changed. If the user ran `ccr stop`, a start with the same options within a week resumes the review; ask before starting it. `server was replaced while waiting (new token)`: hand over the URL `ccr status` prints. |
 
 **Wait for Submit: pending comments are drafts, not instructions.** You can read them long before the user is done,
 and they may still be reworded or deleted; acting on one answers a point the user never made, resolves threads they
@@ -128,7 +130,7 @@ returns on any change; use it only when the user asked you to react live.
 ccr reload --repo "$REPO"
 ```
 
-Run it after every batch of commits, in a round or not. Never pass a narrower `--range`: without one the pinned base stays and the new commits appear (add `--worktree` /
+Run it after every batch of commits, in a round or not. Never pass a narrower `--range`: without one the range keeps its base and the new commits appear (add `--worktree` /
 `--no-worktree` only to change what is shown of the uncommitted work). It prints `ccr: N commits (was M), +a −r,
 K comments remapped, J now outdated`, and when reviewed commits left the range a warning and one line per thread now
 outdated; re-anchor any that became outdated by accident
@@ -146,7 +148,7 @@ place of the user's choosing, first run `ccr export --repo "$REPO" --md -o <file
 user asks to delete the review.
 
 When a review was dropped (`--purge`, the week passed, a lost file) and the user wants it back, it comes back from
-an export: `ccr start` with the same
+an export; `--purge` deletes the session's exports too, so after it only one saved elsewhere is left. `ccr start` with the same
 options (`--pr` too), then `ccr restore --repo "$REPO" --dry-run <export>`, then the same without `--dry-run`. Prefer
 the `.json` export; a `.md` one loses the snippets (taken from git again) and a thread's creation time. A restore
 fills only a review with no comments or rounds of its own.
@@ -193,17 +195,19 @@ verbatim into the user's pending GitHub review. A text you wrote goes there only
    only). Hand over the URL as in step 1.4 and add: "**Ask AI** asks me, also in a thread; **GH comment** drafts a
    comment for your pending GitHub review, and **GH reply** a reply in a GitHub thread; you submit that review on
    GitHub." With `--since`, add: "**Since your last review**, above All changes, shows only what the author changed
-   since your review of <date>; what a rebase brought in is left out."
+   since your review of <date>; what a rebase brought in is left out." When the start's `ccr: since your last review
+   of …` line says upstream changes may show (paths not rebuilt, or no shared base), tell the user where.
 
 ### Every round
 
-Run `ccr gh-sync --repo "$REPO"` first, so the round meets GitHub's discussion as it is now. The `ccr wait` header ends
-with `— <g> GitHub comments to check and post` when the round has some, and each root says what it is right after its
-author ("What you will read"). A user's reply is a question unless it reads `GitHub reply (not posted)`, which any
-thread on a line or a file can hold, a question thread too. There the first GitHub comment of a thread not on GitHub
-yet starts a thread on GitHub at the root's place (`--dry-run` shows a line, not `reply to …`), and later GitHub
-replies go into it: post a thread's GitHub comments in the order they were written (`gh-post` refuses a reply whose
-thread starter is not posted yet).
+Run `ccr gh-sync --repo "$REPO" --json` first, so the round meets GitHub's discussion as it is now, and read in full
+each comment its `news` lists (added, edited or deleted on GitHub since the last sync): `gh-post` lists only what
+changed after this sync. The `ccr wait` header ends with `— <g> GitHub comments to check and post` when the round has
+some, and each root says what it is right after its author ("What you will read"). A user's reply is a question
+unless it reads `GitHub reply (…)`, which any thread on a line or a file can hold, a question thread too. There the
+first GitHub comment of a thread not on GitHub yet starts a thread on GitHub at the root's place (`--dry-run` shows
+that place, not `reply to …`), and later GitHub replies go into it: post a thread's GitHub comments in the order they
+were written (`gh-post` refuses a reply whose thread starter is not posted yet).
 
 The user is waiting for the answers, and checking GitHub comments takes much longer, so handle a round in two passes,
 each ending in one `ccr reply --batch -` call:
@@ -222,7 +226,7 @@ each ending in one `ccr reply --batch -` call:
    - Sound: `ccr gh-post --repo "$REPO" <id>…` posts each body verbatim into the user's pending review, starting one if
      there is none, and records it. That ends your part: no reply and no resolve (a posted comment drops out of
      `--unanswered`).
-   - `GitHub comment (posted: <url>; edited since, …)`: the user edited it after posting. Check the new text like a
+   - `GitHub comment (posted: <url>; edited since, …)`, or the same of a `GitHub reply`: the user edited it after posting. Check the new text like a
      new comment; when sound, `gh-post` updates it in the pending review (`<id>: updated → <url>`), never adding a
      second one.
    - Not sound: do not post it, and never post a reworded version on your own. Reply with what is wrong and one
@@ -230,7 +234,8 @@ each ending in one `ccr reply --batch -` call:
      as it is", or says "post it after your correction" ("Your wording" below), and submits again; then check the text
      as it is now, and post it.
    - `<id>: ERROR …`: nothing was posted, unless the line says posted but not recorded (then run the same `gh-post`
-     again: it finds the comment and records it). Say in the thread what was refused and how to fix it: a line outside
+     again until it prints `<id>: found already in your pending review …`; a re-run before that may list the comment
+     as news from the user and post nothing). Say in the thread what was refused and how to fix it: a line outside
      the pull request diff, or one that moved since, goes where it belongs, in **All changes**. `warning: …`: posted,
      but tell the user what the re-read found.
 
@@ -276,7 +281,14 @@ When the user is done, ask whether to stop the server (step 6) and offer to remo
 # Review comments — repo-name (main..HEAD) — 5 threads (3 pending, 2 unresolved, 1 unanswered)
 
 ## Rounds
-- Round 1 · request_changes · 2026-09-03T13:50:12Z · 4 comments · "Overall looks good, two nits."  [id: q8x1zz]
+- Round 1 · 2026-09-03T13:50:12Z · 4 comments
+
+## Review-level comments
+
+#### [id: …] user · review · R1 · unresolved · 0 replies · last: user
+…
+
+## Since your last review
 
 ## Commit 9fceb02d3a — "Add retry to fetcher"
 
@@ -294,7 +306,7 @@ Why not use the existing backoff helper here?
   ↳ [id: p0o9i8] claude · 2026-09-03T13:52:10Z · R1
   Good catch — switched to `backoff.retry()` in 1a2b3c4.
 
-#### [id: …] user · new:20-24 → HEAD src/fetcher.py:23-27 · R1 · resolved · edited 2026-09-03T14:01:00Z
+#### [id: …] user · new:20-24 → HEAD src/fetcher.py:23-27 · R1 · resolved · 1 reply · last: claude · edited 2026-09-03T14:01:00Z
 …
 
 ### (file) src/other.py
@@ -302,13 +314,13 @@ Why not use the existing backoff helper here?
 …
 
 ### (commit)
-#### [id: …] claude · commit · R0 · unresolved
+#### [id: …] claude · commit · R0 · unresolved · 0 replies · last: claude
 …
 
 ## All changes (combined)
 ## Uncommitted changes
 ## Outdated (anchored to commits no longer in the range)
-#### [id: …] user · 1b2c3d4e5f src/x.py new:10 → HEAD src/x.py:10 · R1 · unresolved
+#### [id: …] user · 1b2c3d4e5f src/x.py new:10 → HEAD src/x.py:10 · R1 · unresolved · 0 replies · last: user
 ````
 
 - `#### [id: XXXXXX]` opens a thread; `ccr reply` takes the id. Replies are indented and start with `↳`.
@@ -320,10 +332,11 @@ Why not use the existing backoff helper here?
 - `★` marks the comments a filter matched; `ccr wait` marks `★ new in round n`.
 - `## Outdated …` threads are anchored to commits that left the range: re-anchor them with `ccr move`, or answer them
   by id like any other.
-- A `#` starting a body line is escaped as `\#`, so `##` to `####` lines are always structure.
-- PR mode: the header carries `— PR <owner/repo#N>`. Right after the author a root reads `question`,
-  `GitHub comment (not posted)` or `GitHub comment (posted: <url>)`; a mirrored one, by `@login (GitHub)`, reads
-  `GitHub thread (…)` or `GitHub review (…)`.
+- A `#` starting a body line is escaped as `\#`, so outside code blocks `##` to `####` lines are always structure.
+- PR mode: the header carries `— PR <owner/repo#N>`. Right after the author a user's root reads `question`,
+  `GitHub comment (not posted)` or `GitHub comment (posted: <url>)`, and a user's reply nothing (a question) or
+  `GitHub reply (…)`; a mirrored root, by `@login (GitHub)` (`@login (GitHub, you)` for the user), reads
+  `GitHub thread` or `GitHub review (…)`.
 
 ### `--json`
 
@@ -341,9 +354,11 @@ Why not use the existing backoff helper here?
                  "snippet": "    y = 3", "outdated": false, "moved_from": null,
                  "head_location": {"path": "src/fetcher.py", "line": 14, "status": "moved"},
                  "created_at": "…Z", "updated_at": "…Z"} ],
-  "threads": [ {"root": Comment, "replies": [Comment], "last_author": "user", "answered": false} ]
+  "threads": [ {"root": "k3f9a2", "replies": ["p0o9i8"], "last_author": "user", "answered": false} ]
 }
 ```
+
+`threads` name their comments by id; `comments` holds every comment of the review, whatever the filter.
 
 `threads[].answered` is false when the last comment is the user's and not a GitHub comment already posted;
 `--unanswered` selects the threads not answered whose root is unresolved and not outdated.
