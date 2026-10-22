@@ -23,14 +23,17 @@ request body is the cover letter. Claude changes no code here. A comment is one 
 * **Ask AI**: a question for Claude, answered in the thread. Nothing goes to GitHub.
 * **GH comment**, or **GH reply** in a thread on a line or a file: a message for the pull request. On Submit, Claude
   checks it against the code, then posts it verbatim into your pending GitHub review or replies with what is wrong.
-  Questions are answered first.
+  Questions are answered first. Where GitHub takes no comment, such as a line outside the pull request diff, the
+  button is greyed out and its tooltip says why.
 
 The pull request's review threads and review bodies come in from GitHub too, so you can ask about a GitHub thread or
 reply to it in place. Blue is your exchange with Claude, grey what comes from or goes to GitHub. Submitting the
 review, with its verdict, stays yours, on GitHub.
 
 If you reviewed the pull request before, ccr also opens **Since your last review**: only what the author changed since
-then, even after a rebase. Claude can flag lines there that need a closer look (⚑); **⚑ Next** steps through them.
+then, even after a rebase. Its left side is the version you reviewed; a GH comment on a line removed since goes on
+the removed code, where the pull request diff still shows it. Claude can flag lines that need a closer look: an orange
+stripe and a ⚑ whose tooltip says why; **⚑ Next** steps through them.
 
 ![A GitHub thread on grey holding a question for Claude and its answer on blue, then a GH reply draft on grey; the Ask AI and GH comment buttons on a line](docs/screenshot-pull-request.png)
 
