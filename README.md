@@ -1,49 +1,39 @@
 # ccr — Commit Chain Reviewer
 
-ccr is a GitHub-like review page for a chain of git commits. It runs on your machine, with Claude Code at the other
-end: you read the change in the browser and comment on lines, files, commits or the change as a whole, and Claude
-reads every comment from the command line and answers in the same threads. There are two ways to use it.
+ccr is a GitHub-like review page for a chain of git commits, served on your machine. You comment in the browser;
+Claude reads every comment from the command line and answers in the same threads.
 
 ## Reviewing the commits your agent wrote
 
-When Claude has made a change, ask it to show you the code, or run `/review-commit-series main..HEAD`. It starts
-ccr on the commits with a cover letter describing the change and hands you a URL.
+Ask Claude to show you the code, or run `/review-commit-series main..HEAD`. Claude starts ccr with a cover letter
+describing the change and hands you a URL.
 
-Comment as you would on GitHub, with **Ask AI**: hovering the **+** by a line opens it, and files, commits, the
-change as a whole and threads have it too. Then click **Submit**: your comments become a round. Claude takes the
-whole round, fixes the code in new fixup commits, answers every thread, citing the commit with the fix or asking
-back, and the page updates by itself. Repeat until you have nothing left to say. The cover letter becomes the
-pull-request description.
+Comment with **Ask AI** on lines, files, commits or the whole change, then click **Submit**: your comments become a
+round. Claude fixes the code in new fixup commits and answers every thread, citing the fix or asking back; the page
+updates by itself. Repeat until you have nothing left to say. The cover letter becomes the pull-request description.
 
 ![A commit under review: a question Claude answers by asking back, and a resolved thread linking the fixup commit](docs/screenshot-own-commits.png)
 
 ## Reviewing someone else's pull request
 
-Ask Claude to review a pull request with ccr, for example *"review https://github.com/OWNER/REPO/pull/N with ccr"*.
-It checks the pull request out into a worktree of its own and starts ccr with the pull request body as the cover
-letter, so **All changes** is exactly the diff GitHub shows. Claude changes no code here. Lines and files offer two
-buttons, and so do the threads that come from GitHub:
+Ask Claude, for example *"review https://github.com/OWNER/REPO/pull/N with ccr"*. Claude checks the pull request out
+into a worktree of its own, with its body as the cover letter, so **All changes** is the diff GitHub shows. Claude
+changes no code here. A comment is one of two kinds:
 
 * **Ask AI**: a question for Claude, answered in the thread. Nothing goes to GitHub.
-* **GH comment**, or **GH reply** in a GitHub thread: a message for the pull request. When you submit, Claude checks
-  it against the code and posts it verbatim into your pending GitHub review, or replies with what is wrong with it.
-  Claude answers your questions first, so you can read the answers while it checks the GitHub comments. Where
-  GitHub takes no comment, for example on a line outside the pull request diff, the button is greyed out and says
-  why when you hover over it.
+* **GH comment**, or **GH reply** in a GitHub thread: a message for the pull request. On Submit, Claude checks it
+  against the code and either posts it verbatim into your pending GitHub review or replies with what is wrong with
+  it. Questions are answered first. Where GitHub takes no comment, such as a line outside the pull request diff, the
+  button is greyed out and its tooltip says why.
 
-The pull request's discussion on GitHub comes in too, so you can ask Claude about a GitHub thread or answer it on
-the spot, in that same thread. The background colour tells the two dialogues apart: **blue** for yours with Claude,
-**grey** for the messages from and to GitHub, both the ones that came from there and yours, posted or still a draft.
-The editor takes the colour of what you are writing. Submitting the review, with its verdict, stays yours, on
-GitHub.
+The pull request's GitHub discussion comes in too, so you can ask about a GitHub thread or reply to it in place. A
+blue background is your exchange with Claude, a grey one what comes from or goes to GitHub, posted or still a draft.
+Submitting the review, with its verdict, stays yours, on GitHub.
 
-If you reviewed the pull request before, ccr also opens **Since your last review**, above All changes, with the
-date of that review: exactly what the author changed since then. It holds even after a rebase, because what the new
-base brought in is left out. Its left side is the version you reviewed. A GH comment on a line that is gone goes on
-the removed code, wherever the pull request diff still shows it.
-
-Claude can mark lines that need your closer look: an orange stripe on both edges of each line, and a ⚑ whose tooltip
-says why. **⚑ Next** steps through them, and the commit list and the file tree count them.
+If you reviewed the pull request before, ccr also opens **Since your last review**: only what the author changed since
+then, even after a rebase. Its left side is the version you reviewed; a GH comment on a line removed since goes on the
+removed code, where the pull request diff still shows it. Claude can flag lines that need a closer look: an orange
+stripe and a ⚑ whose tooltip says why, and **⚑ Next** steps through them.
 
 ![A GitHub thread on grey holding a question for Claude and its answer on blue, then a GH reply draft on grey; the Ask AI and GH comment buttons on a line](docs/screenshot-pull-request.png)
 
@@ -55,18 +45,18 @@ Give Claude this:
 > `python3 -c 'import sqlite3, sys; assert sys.version_info >= (3, 10)'` succeeds and that `git --version` is 2.24 or
 > newer; for pull requests, also that `gh auth status` shows a login. Then tell me to start a new Claude Code session.
 
-Claude Code loads the clone as a plugin: the `review-commit-series` skill and the `ccr` command. There is nothing to
-build and no package to install.
+Claude Code loads the clone as a plugin, with the `review-commit-series` skill and the `ccr` command. There is
+nothing to build or install.
 
 ## More
 
-* [SPEC.md](SPEC.md): the complete specification, from the data model to the HTTP API and the UI.
+* [SPEC.md](SPEC.md): how ccr works, from the data model to the HTTP API and the UI.
 * [skills/review-commit-series/SKILL.md](skills/review-commit-series/SKILL.md): what Claude does in a review.
 * `ccr --help`: the command line.
-* Local by design: the server listens on 127.0.0.1 only, and every API call needs the session's token. Only
-  `ccr gh-sync` and `ccr gh-post` talk to GitHub, through your `gh` login, and neither submits a review.
+* ccr listens on 127.0.0.1 only, and every API call needs the session's token. Only `ccr gh-sync` and `ccr gh-post`
+  talk to GitHub, through your `gh` login, and neither submits a review.
 
 ## License
 
-ccr is under the [MIT License](LICENSE). The vendored [highlight.js](https://highlightjs.org/) in `ccr/static/vendor/`
-is under its own [BSD 3-Clause License](ccr/static/vendor/LICENSE).
+[MIT](LICENSE). The vendored [highlight.js](https://highlightjs.org/) in `ccr/static/vendor/` is under its own
+[BSD 3-Clause License](ccr/static/vendor/LICENSE).
