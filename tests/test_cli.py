@@ -545,6 +545,20 @@ def test_reload_refreshes_the_session_record(cli, ccr_session_dir):
     assert not pid_alive(record["pid"])
 
 
+def test_relative_paths_of_start_resolve_against_the_current_directory(cli, tmp_path):
+    """A fresh start reads --cover and writes --db where the caller is, as a start that reuses a session does."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "cover.md").write_text("# From the caller's directory\n")
+    proc = cli.run("start", "--json", "--range", "main..feature", "--cover", "cover.md", "--db", "review.sqlite",
+                   cwd=str(elsewhere), check=0)
+    record = json.loads(proc.stdout)
+    cli.pids.add(record["pid"])
+    assert record["db"] == str(elsewhere / "review.sqlite") and os.path.exists(record["db"])
+    assert api(record, "GET", "/api/review")["cover"] == "# From the caller's directory"
+    assert cli.run("stop", check=0).returncode == 0
+
+
 def test_cover_letter_via_start_and_cover_command(cli, tmp_path):
     cover = tmp_path / "cover.md"
     cover.write_text("# Why\n\nThis chain adds retries.\n")

@@ -540,6 +540,9 @@ def start_background(repo: str, paths: SessionPaths, spec=None, n=None, worktree
     err = err or sys.stderr
     token = secrets.token_hex(16)
     log_path = os.path.abspath(log) if log else paths.log
+    # the child runs in the repository: resolve paths here, against the caller's directory, as a reuse does
+    db = db if db in (None, ":memory:") else os.path.abspath(db)
+    cover = None if cover is None else os.path.abspath(cover)
     chosen_port = pick_port(paths.key, port)
     argv = serve_argv(repo, chosen_port, log_path, spec, n, worktree, first_parent, db, idle_timeout, cover, pr, since,
                       since_at)

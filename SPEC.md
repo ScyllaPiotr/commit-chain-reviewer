@@ -431,6 +431,8 @@ listing the live sessions; `ccr start` starts a new server instead. A live `ccr 
   `ccr: since your last review of <R> (<at>): N files changed`, naming the paths that were not rebuilt, if any. All
   three apply on reuse too (where only the since line is printed); a bad `--pr` or `--since` exits 1 before anything
   starts, an unreadable `--cover` at once on reuse but on a fresh start only once the spawned server fails on it.
+  Relative `--cover`, `--db` and `--log` paths name files in the caller's directory, though the server runs in the
+  repository.
 * `ccr serve` runs the server in the foreground (also `--token T`, for tests, `--verbose`, `--db-force`); a token from
   the environment, as `ccr start` passes it, is shown redacted, so a started server's log never holds it.
 * `ccr stop` checks that the session's pid is the server's (else the record is stale: deleted, nothing signalled,
