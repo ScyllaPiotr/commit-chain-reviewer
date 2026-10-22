@@ -413,6 +413,18 @@ def test_wait_any_reports_changes_and_ui_tracking(cli):
     assert cli.run("stop", check=0).returncode == 0
 
 
+def test_wait_returns_at_once_for_a_round_submitted_before_it(cli):
+    """The round the agent asks for may be in already: it is reported without first long-polling for a change."""
+    record = cli.start("--range", "main..feature")
+    api(record, "POST", "/api/comments", {"body": "Submitted before the wait", "anchor": {"kind": "review"}})
+    api(record, "POST", "/api/submit", {"verdict": "comment", "summary": ""})
+    started = time.monotonic()
+    proc = cli.run("wait", "--since-round", "0", "--timeout", "60", check=0)
+    assert time.monotonic() - started < 10, "the wait long-polled before looking at the rounds"
+    assert proc.stdout.startswith("ccr: round 1 — "), proc.stdout
+    assert cli.run("stop", check=0).returncode == 0
+
+
 def test_serve_foreground_with_explicit_token(cli, fixture_repo, ccr_session_dir):
     proc = subprocess.Popen([CCR, "serve", "--repo", fixture_repo.path, "--range", "main..feature", "--port", "0",
                              "--token", "f" * 32, "--verbose", "--db", ":memory:"],

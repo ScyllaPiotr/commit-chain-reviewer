@@ -739,8 +739,14 @@ class _Waiter:
         self.ui_notice_printed = False
 
     def run(self) -> int:
-        version = self.state["version"]
         while True:
+            # checked before every poll, so a round submitted before the call returns at once, not after a poll
+            if self.args.any_change:
+                if self.state["version"] > self.since_version:
+                    return report_change(self.client, self.since_version, self.state, self.call_time, self.args.json)
+            elif self.state["rounds"] > self.since_round:
+                return report_round(self.client, self.since_round + 1, self.args.json)
+            self._maybe_ui_notice()
             remaining = None if self.deadline is None else self.deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
                 return self._timed_out()
@@ -748,7 +754,8 @@ class _Waiter:
             if not self.ui_notice_printed:
                 poll = min(poll, max(1.0, UI_NOTICE_SECONDS - (time.monotonic() - self.started)))
             try:
-                self.state = self.client.get("/api/events?since=%d&timeout=%s" % (version, _format_seconds(poll)),
+                self.state = self.client.get("/api/events?since=%d&timeout=%s" % (self.state["version"],
+                                                                                   _format_seconds(poll)),
                                              timeout=WAIT_REQUEST_TIMEOUT)
             except URLError:
                 if self._server_gone():
@@ -761,13 +768,6 @@ class _Waiter:
                     return EXIT_NO_SESSION
                 raise
             self.failing_since = None
-            version = self.state["version"]
-            if self.args.any_change:
-                if version > self.since_version:
-                    return report_change(self.client, self.since_version, self.state, self.call_time, self.args.json)
-            elif self.state["rounds"] > self.since_round:
-                return report_round(self.client, self.since_round + 1, self.args.json)
-            self._maybe_ui_notice()
 
     def _server_gone(self) -> bool:
         now = time.monotonic()
