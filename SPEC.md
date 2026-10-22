@@ -1067,7 +1067,10 @@ block (maximal run of `del` followed by the maximal, possibly empty, run of `add
   already read it with ccr comments"*), `R<n>`, `edited` (when `updated_at > created_at`), `moved`, `New` (7.5). Body =
   safe Markdown (own renderer: paragraphs, ATX headings, `code`, fenced code (hljs when `getLanguage`), **bold**, *italic*, links only
   when the trimmed, control-stripped URL matches `/^https?:\/\//i` → `<a target=_blank rel="noopener noreferrer">`,
-  `- ` lists, `> ` quotes, line breaks; everything escaped first; no autolinks). 7–40 hex tokens matching a listed sha
+  `- ` lists, `> ` quotes, GFM tables (a header row, a delimiter row of as many `---` cells, where `:-`, `:-:` and `-:`
+  align the column left, centre and right as `data-align`, then rows up to a blank line or another block, a short row
+  padded and a long one cut, `\|` for a pipe in a cell; as wide as the content, at most the comment's width, long words
+  wrapping), line breaks; everything escaped first; no autolinks). 7–40 hex tokens matching a listed sha
   render as links selecting that commit. Actions (visible on hover/focus-within/selected): Edit, Delete (confirm; a
   root with replies says *"This also deletes N replies"* and sends `?cascade=1`), *Ask AI* (a reply, as in the
   thread's foot beside Resolve), Resolve/Unresolve (root).
@@ -1282,9 +1285,10 @@ Install (as a plugin): `ln -s <checkout> ~/.claude/skills/ccr` (auto-loads as `c
   `body[data-ready]`, asserts every lang id from the section-3 table satisfies `hljs.getLanguage`, clicks the 2nd
   commit, checks that the file, commit and uncommitted-changes buttons read *Ask AI* and open the plain editor,
   hovers a diff row, opens the gutter `[+]` into its one button, *Ask AI* (a click where hovering opened it stays
-  with the `[+]`, the row is grey, another line closes it), clicks it, types a comment, submits it (thread appears,
-  its reply buttons read *Ask AI*), types into another editor, checks that it grows with its content (also after
-  leaving the commit and coming back), that the Preview tab renders it (`<code>`) and that Cancel keeps the draft,
+  with the `[+]`, the row is grey, another line closes it), clicks it, types a comment holding a table, submits it
+  (thread appears, the table aligned and keeping its rows inside the comment, its reply buttons read *Ask AI*), types
+  into another editor, checks that it grows with its content (also after leaving the commit and coming back), that
+  the Preview tab renders it (`<code>`) and that Cancel keeps the draft,
   checks that `j` does nothing (shortcuts off), toggles split view (thread still present, under its own side only),
   drags a 3-line range and comments, submits the round with `#btn-submit`,
   then creates a claude reply via the API and asserts the toast + New dot, reloads the page and asserts the token

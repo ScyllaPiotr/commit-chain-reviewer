@@ -255,6 +255,9 @@ export class Runner {
 const MAIN_THREADS = '#main .thread[data-thread-id]';
 /** Cover letter the scenario sets through POST /api/cover: a heading, a paragraph, a list and a code span. */
 export const COVER = '# Why\n\nThe **cover** letter set by the e2e driver.\n\n- retries\n- `backoff`';
+/** The line comment the scenario posts (mirrors LINE_COMMENT in test_e2e.py): a table aligned left, centre and right,
+ *  with a code span, an escaped pipe and a short row. */
+export const LINE_COMMENT = 'First **e2e** comment with `code`.\n\n| value | was | is |\n| :-- | :-: | --: |\n| `value_05` | 5 | 500 |\n| a \\| b |';
 /** Controls the simplified UI no longer has (drawer, help, Viewed, collapse-all, verdicts, since-round). */
 const REMOVED = ['#drawer', '#drawer-backdrop', '#btn-review', '#btn-help', '#help', '#btn-mark-seen', '#btn-collapse-all', '#btn-expand-all',
   '#chk-hide-viewed', '#files-progress', '#files-toolbar', '#review-summary', '#rounds-list', '#btn-submit-review', 'input[name=verdict]',
@@ -438,10 +441,17 @@ export async function runScenario(page, url) {
   });
 
   await runner.step('type and submit comment', async () => {
-    await page.type('First **e2e** comment with `code`.');
+    await page.type(LINE_COMMENT);
     await page.click('tr.editor form.comment-editor .btn-submit-comment');
     await page.waitFor(`document.querySelector('tr.threads .thread .comment[data-author="user"] .comment-body strong')`, { label: 'thread rendered' });
     await page.waitFor(`!document.querySelector('tr.editor')`, { label: 'editor closed' });
+    // The table keeps its rows inside the comment (the thread row lives in the diff table, which must not take them).
+    const table = await page.evaluate(`(() => { const t = document.querySelector('tr.threads .comment-body table');
+      return t && { cells: [...t.rows].map((r) => [...r.cells].map((c) => c.textContent)), code: Boolean(t.querySelector('td code')),
+        align: [...t.querySelectorAll('th')].map((c) => getComputedStyle(c).textAlign).join(','),
+        fits: t.getBoundingClientRect().right <= t.closest('td').getBoundingClientRect().right }; })()`);
+    if (!table || JSON.stringify(table.cells) !== JSON.stringify([['value', 'was', 'is'], ['value_05', '5', '500'], ['a | b', '', '']])
+        || !table.code || table.align !== 'left,center,right' || !table.fits) throw new Error('table in the comment: ' + JSON.stringify(table));
     const badge = await page.evaluate(`document.querySelector('#btn-submit .badge-pending').textContent.trim()`);
     if (badge !== '2') throw new Error('pending badge is ' + JSON.stringify(badge)); // the review-level comment plus this one
     return 'pending badge=' + badge;

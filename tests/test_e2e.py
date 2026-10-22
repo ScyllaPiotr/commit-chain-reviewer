@@ -26,6 +26,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DRIVER = os.path.join(ROOT, "tests", "e2e", "driver.mjs")
 TOKEN = "e2e0123456789abcdef0123456789abc"
 COVER = "# Why\n\nThe **cover** letter set by the e2e driver.\n\n- retries\n- `backoff`"  # mirrors COVER in driver.mjs
+LINE_COMMENT = ("First **e2e** comment with `code`.\n\n| value | was | is |\n| :-- | :-: | --: |\n"
+                "| `value_05` | 5 | 500 |\n| a \\| b |")  # mirrors LINE_COMMENT in driver.mjs
 PR_URL = "https://github.com/o/r/pull/7"  # mirrors PR_URL in driver.mjs
 CHROME_CANDIDATES = ("chromium-browser", "chromium", "google-chrome", "google-chrome-stable")
 DRIVER_TIMEOUT = 240
@@ -135,7 +137,7 @@ def test_browser_review_flow(live, tmp_path):
     assert [(c["anchor"]["commit"], c["anchor"]["path"], c["anchor"]["side"], c["anchor"]["start_line"], c["anchor"]["line"])
             for c in roots] == [(second["sha"], "src/app.py", "new", 2, 4), (second["sha"], "src/app.py", "new", None, 5)]
     assert roots[0]["snippet"] == "value_02 = 2\nvalue_03 = 3\nvalue_04 = 4"
-    assert roots[1]["snippet"] == "value_05 = 500  # changed" and roots[1]["body"] == "First **e2e** comment with `code`."
+    assert roots[1]["snippet"] == "value_05 = 500  # changed" and roots[1]["body"] == LINE_COMMENT
     assert all(c["state"] == "submitted" and c["round"] == 1 for c in comments)
     review_level = sorted((c for c in by_author["user"] if c["anchor"]["kind"] == "review"), key=lambda c: c["created_at"])
     assert [c["body"] for c in review_level] == ["Whole-series comment from the e2e driver."]

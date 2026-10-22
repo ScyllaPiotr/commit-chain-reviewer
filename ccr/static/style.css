@@ -517,6 +517,13 @@ table.diff.has-fork[data-view="split"] tr.line:has(> .new:hover) > .new { backgr
 .md pre code { background: none; padding: 0; font-size: inherit; }
 .md ul { margin: 0 0 6px; padding-left: 20px; }
 .md blockquote { margin: 0 0 6px; padding: 0 10px; border-left: 3px solid var(--border); color: var(--fg-muted); }
+/* a table as wide as its content and at most as wide as the comment, its long words wrapping as elsewhere in .md (one
+   too wide even then scrolls sideways); ".md table td" wins over "table.diff td" by coming after it */
+.md table { display: block; width: max-content; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 0 0 6px; background: var(--bg); }
+.md table th, .md table td { padding: 3px 8px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+.md table th { font-weight: 600; background: var(--bg-2); }
+.md table [data-align="center"] { text-align: center; }
+.md table [data-align="right"] { text-align: right; }
 .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 0 0 6px; font-weight: 600; line-height: 1.3; }
 .md h1, .md h2 { font-size: 15px; }
 .md h3, .md h4, .md h5, .md h6 { font-size: 13px; }

@@ -1859,7 +1859,7 @@
         for (const tr of $$(`tr.threads[data-key="${cssEsc(key)}"], tr.editor[data-key="${cssEsc(key)}"]`, table)) tr.remove();
         const tmp = document.createElement('table');
         tmp.innerHTML = `<tbody>${threadRowHtml(key)}</tbody>`;
-        for (const tr of Array.from(tmp.querySelectorAll('tr'))) insertAttachment(row, tr);
+        for (const tr of Array.from(tmp.tBodies[0].rows)) insertAttachment(row, tr); // not the rows of a table in a comment
       });
       observeThreads(row.closest('.file-card'));
     } else if (key.startsWith('file:')) {
@@ -2360,6 +2360,20 @@
     return s.replace(/\u0000(\d+)\u0000/g, (m, i) => parked[+i]);
   }
 
+  /** The cells of a table row (GFM): the outer pipes dropped, split at every pipe not escaped as \|, trimmed. */
+  const tableCells = (line) => line.trim().replace(/^\|/, '').replace(/(^|[^\\])\|$/, '$1').split(/(?<!\\)\|/)
+    .map((c) => c.trim().replace(/\\\|/g, '|'));
+
+  /** The column alignments of a table's delimiter row (`| :-- | :-: | --: |`), or null when the line is not one. */
+  function tableAligns(line) {
+    const cells = line.includes('|') ? tableCells(line) : [];
+    if (!cells.length || !cells.every((c) => /^:?-+:?$/.test(c))) return null;
+    return cells.map((c) => (c.endsWith(':') ? (c.startsWith(':') ? 'center' : 'right') : c.startsWith(':') ? 'left' : ''));
+  }
+
+  /** A line that starts a block of its own, ending a table above it: a fence, a heading, a list item or a quote. */
+  const startsBlock = (line) => /^```\s*[\w+-]*\s*$|^#{1,6}\s|^\s*[-*]\s|^>/.test(line);
+
   function renderMarkdown(src) {
     const lines = String(src || '').replace(/\r\n?/g, '\n').split('\n');
     const out = [];
@@ -2393,6 +2407,18 @@
       if (li) { if (para.length || quote) flush(); (list = list || []).push(li[1]); continue; }
       const q = /^>\s?(.*)$/.exec(line);
       if (q) { if (para.length || list) flush(); (quote = quote || []).push(q[1]); continue; }
+      // A table (GFM): a header row, a delimiter row with as many cells, then rows up to a blank line or another
+      // block; a row's missing cells are empty and its extra ones dropped, as on GitHub.
+      const aligns = line.includes('|') && i + 1 < lines.length ? tableAligns(lines[i + 1]) : null;
+      if (aligns && tableCells(line).length === aligns.length) {
+        flush();
+        const row = (tag, cells) => `<tr>${aligns.map((a, k) => `<${tag}${a ? ` data-align="${a}"` : ''}>${renderInline(cells[k] || '')}</${tag}>`).join('')}</tr>`;
+        const body = [];
+        for (i += 2; i < lines.length && !/^\s*$/.test(lines[i]) && !startsBlock(lines[i]); i++) body.push(row('td', tableCells(lines[i])));
+        i--;
+        out.push(`<table><thead>${row('th', tableCells(line))}</thead>${body.length ? `<tbody>${body.join('')}</tbody>` : ''}</table>`);
+        continue;
+      }
       // Lazy continuation: a non-blank line inside a list item or quote belongs to it (CommonMark), so
       // "- text that wraps\n  onto the next line" stays one bullet instead of breaking into a paragraph.
       if (list) { list[list.length - 1] += ' ' + line.trim(); continue; }
